@@ -11,6 +11,59 @@ export type SubagentProtocolMode = "readonly" | "worktree";
 export type SubagentProtocolStatus = "completed" | "failed" | "cancelled";
 export type SubagentProtocolChannel = "direct" | "shared" | "decision" | "question";
 
+export type CompletionProposalDetails = {
+  kind: "completion_proposal";
+  schemaVersion: 1;
+  backendId: "native-pi";
+  taskId: string;
+  runId: string;
+  runSpecHash: string;
+  backendStatus: "completed";
+  producedAt: number;
+};
+
+export type CandidateBundleDetails = {
+  kind: "candidate_bundle";
+  candidateId: string;
+  taskId: string;
+  runId: string;
+  runSpecHash: string;
+  candidateHash: string;
+  baseRevision: string;
+  changedPaths: string[];
+  status: string;
+  diffStat: string;
+  diff: string;
+  diffTruncated: boolean;
+  untrackedFiles: string[];
+  createdAt: number;
+};
+
+export type ValidationReportDetails = {
+  kind: "validation_report";
+  reportId: string;
+  reportHash: string;
+  taskId: string;
+  runId: string;
+  runSpecHash: string;
+  candidateHash: string;
+  baseRevision: string;
+  status: "passed" | "failed";
+  scope: "structural";
+  checks: Array<{
+    id:
+      | "base_revision"
+      | "candidate_paths"
+      | "candidate_limits"
+      | "candidate_stability"
+      | "git_diff_check";
+    status: "passed" | "failed";
+    summary: string;
+  }>;
+  testStatus: "not_run";
+  createdAt: number;
+};
+
 /** Final per-agent report embedded in cards and batch results. */
 export type SubagentReportDetails = {
   id: string;
@@ -56,6 +109,23 @@ export type SubagentReportDetails = {
   worktreeBranchDeleted?: boolean;
   candidateArtifacts?: string[];
   changedPaths?: string[];
+  backendId?: "native-pi";
+  runSpecHash?: string;
+  completionProposal?: CompletionProposalDetails;
+  candidateBundle?: CandidateBundleDetails;
+  validationReport?: ValidationReportDetails;
+  codeTaskState?:
+    | "running"
+    | "backend_completed"
+    | "candidate_ready"
+    | "validating"
+    | "waiting_review"
+    | "validation_failed"
+    | "backend_failed"
+    | "cancelled"
+    | "unknown"
+    | "applied"
+    | "succeeded";
 };
 
 export type SubagentBatchIssue = {

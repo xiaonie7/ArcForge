@@ -172,7 +172,7 @@ function buildWindowsPostgresRoutingLine(snapshot?: RuntimeEnvironmentSnapshot) 
   if (driver === "psycopg" || driver === "psycopg2") {
     return `- For PostgreSQL inspection or statistics, use the snapshot-detected \`${driver}\` driver directly. Do not probe \`psql\` unless the user explicitly requested the CLI or execution contradicts the snapshot.`;
   }
-  if (driver !== "psycopg" && driver !== "psycopg2" && psql === "available") {
+  if (psql === "available") {
     return "- For PostgreSQL inspection or statistics, no usable Python PostgreSQL driver was confirmed but `psql` was detected, so use `psql` directly.";
   }
   if (

@@ -56,16 +56,12 @@ export function buildSubagentSystemPrompt(params: {
           "You are running in an isolated git worktree.",
           "Complete only the assigned agent job and report concise findings back to the parent agent.",
           "Do not address the end user directly. Do not ask follow-up questions.",
-          "You may inspect, edit, create, and delete files, run non-interactive shell commands inside your assigned worktree, and use enabled MCP business tools when available. Do not spawn more subagents.",
-          "The worktree isolates workspace file changes from the parent agent, but it does not isolate global application state. Do not modify ArcForge settings, MCP server configuration, cron tasks, or user-level skills. MCP configuration management is not available; only enabled MCP business tools may be used.",
+          "You may inspect, edit, create, and delete files and run non-interactive shell commands inside your assigned worktree. Candidate mode does not expose MCP, Office, Memory, Skill management, ManagedProcess, SSH, tunnels, cron, or nested Agent tools.",
+          "The worktree isolates candidate file changes from the parent workspace but is not an OS security sandbox. Use only the assigned worktree and do not access user-level configuration, credentials, or unrelated paths.",
           params.messageBusEnabled
             ? "Do not create files just to communicate your answer or pass notes to another agent. Use SendMessage for cross-agent messages and questions; use the final report only as your concise completion summary to the parent agent. Messages sent to parent are private to the parent; send to=* when peer agents need to read a report or summary."
             : "Do not create files just to communicate your answer or pass notes to another agent. Use your final report as the communication channel to the parent agent.",
-          params.spec.applyPolicy === "auto"
-            ? "If you complete successfully, ArcForge automatically applies your worktree patch back to the parent workspace. Your final report should describe what changed; do not tell the parent agent to manually copy your diff."
-            : params.spec.applyPolicy === "explicit"
-              ? "ArcForge will apply worktree changes only when every changed file is inside the allowed output paths. Otherwise, changed files remain candidate artifacts for review."
-              : "ArcForge will not apply your worktree file changes back to the parent workspace for this task. Return the useful result in your final report.",
+          "Your completion only creates a CompletionProposal. ArcForge independently freezes and structurally validates the CandidateBundle; changed worktrees remain unapplied until a separate trusted approval flow is available.",
           params.worktree
             ? `Assigned worktree root: ${params.worktree.worktreeRoot}\nAssigned workdir: ${params.worktree.workdir}\nBranch: ${params.worktree.branchName}`
             : null,

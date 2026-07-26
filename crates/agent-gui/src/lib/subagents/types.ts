@@ -1,4 +1,8 @@
 import type { Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
+import type {
+  CandidateBundle,
+  ValidationReport,
+} from "../execution/contracts";
 
 export const AGENT_TOOL_NAME = "Agent";
 export const SEND_MESSAGE_TOOL_NAME = "SendMessage";
@@ -106,10 +110,12 @@ export type SubagentMessageRecord = {
 };
 
 export type SubagentWorktreeInfo = {
+  workspaceId: string;
   repoRoot: string;
   worktreeRoot: string;
   workdir: string;
   branchName: string;
+  baseRevision: string;
 };
 
 export type SubagentWorktreeStatus = {
@@ -119,6 +125,11 @@ export type SubagentWorktreeStatus = {
   diff: string;
   diffTruncated: boolean;
   untrackedFiles: string[];
+};
+
+export type SubagentWorktreeValidationResult = {
+  candidate: CandidateBundle;
+  validation: ValidationReport;
 };
 
 export type SubagentWorktreeApplyResult = {

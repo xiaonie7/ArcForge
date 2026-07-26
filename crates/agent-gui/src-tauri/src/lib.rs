@@ -83,6 +83,7 @@ macro_rules! app_invoke_handler {
             // Subagent worktrees
             commands::subagent_worktree::subagent_worktree_create,
             commands::subagent_worktree::subagent_worktree_status,
+            commands::subagent_worktree::subagent_worktree_validate,
             commands::subagent_worktree::subagent_worktree_apply,
             commands::subagent_worktree::subagent_worktree_cleanup,
             // MCP
@@ -154,6 +155,9 @@ macro_rules! app_invoke_handler {
             commands::cron::automation_release_prompt_run,
             commands::cron::automation_complete_prompt_run,
             // Local command execution
+            commands::execution_broker::execution_broker_register_run,
+            commands::execution_broker::execution_broker_authorize,
+            commands::execution_broker::execution_broker_close_run,
             commands::shell::shell_run,
             commands::shell::shell_cancel,
             commands::process::managed_process_start,
@@ -483,6 +487,7 @@ pub fn run() {
         .manage(Arc::new(commands::app::GlobalShortcutRegistry::default()))
         .manage(Arc::new(commands::app::WindowPinState::default()))
         .manage(Arc::new(commands::mcp::McpRuntimeManager::default()))
+        .manage(commands::execution_broker::ExecutionBrokerState::default())
         .manage(Arc::clone(&memory_store))
         .manage(Arc::clone(&power_activity))
         .manage(Arc::new(runtime::shell_runner::ShellRunRegistry::default()))

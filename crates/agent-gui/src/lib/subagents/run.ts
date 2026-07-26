@@ -9,6 +9,25 @@ import {
 } from "../chat/conversation/conversationState";
 import { createTurnCancellationFromSignal } from "../chat/conversation/turnCancellation";
 import { runAssistantWithTools } from "../chat/runner/agentRunner";
+import {
+  closeBrokerRun,
+  createBrokeredToolIntentSubmitter,
+  registerBrokerRun,
+  type ToolIntentAuthorizer,
+} from "../execution/broker";
+import {
+  NATIVE_PI_BACKEND_ID,
+  sealRunSpec,
+  type CandidateBundle,
+  type CodeTaskState,
+  type CompletionProposal,
+  type SealedRunSpec,
+  type ValidationReport,
+} from "../execution/contracts";
+import {
+  nativePiBackend,
+  type NativePiRunRequest,
+} from "../execution/nativePiBackend";
 import type { RuntimeEnvironmentSnapshot, RuntimePlatform } from "../runtimePlatform";
 import type {
   CodexRequestFormat,
@@ -20,7 +39,7 @@ import type {
 import { renderMessageBusSnapshot } from "./bus";
 import { toolErrorResult } from "./errors";
 import type { SubagentWorktreeIpc } from "./ipc/worktree";
-import { decideWorktreeApply, decideWorktreeCleanup, selectWorktreeTools } from "./policy";
+import { decideWorktreeCleanup, selectCandidateTools } from "./policy";
 import {
   buildMessageBusUpdateMessage,
   buildSubagentContext,
@@ -85,6 +104,11 @@ export type SubagentRunEnvironment = {
     execute: ChildToolExecutor,
   ) => { tools: Tool[]; execute: ChildToolExecutor };
   enqueueWorktreeApply: <T>(run: () => Promise<T>) => Promise<T>;
+  executionBroker?: {
+    register: typeof registerBrokerRun;
+    close: typeof closeBrokerRun;
+    authorize?: ToolIntentAuthorizer;
+  };
   onStatus?: (status: string | null) => void;
 };
 
@@ -121,6 +145,12 @@ function buildWorktreeLabel(params: {
 function isCancellation(error: unknown, signal?: AbortSignal) {
   if (signal?.aborted) return true;
   return error instanceof Error && error.message === "Cancelled";
+}
+
+function throwIfCancelled(signal?: AbortSignal) {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("Cancelled");
+  }
 }
 
 /**
@@ -185,6 +215,16 @@ export async function executeSubagentRun(
   let worktreeBranchDeleted: boolean | undefined;
   let candidateArtifacts: string[] | undefined;
   let changedPaths: string[] | undefined;
+  let sealedRunSpec: SealedRunSpec | undefined;
+  let completionProposal: CompletionProposal | undefined;
+  let candidateBundle: CandidateBundle | undefined;
+  let validationReport: ValidationReport | undefined;
+  let codeTaskState: CodeTaskState | undefined =
+    spec.mode === "worktree" ? "running" : undefined;
+  let registeredExecutionBroker:
+    | NonNullable<SubagentRunEnvironment["executionBroker"]>
+    | undefined;
+  let brokerRunOpen = false;
   let childWorkdir = env.workdir;
 
   const persistenceWarnings: string[] = [];
@@ -250,6 +290,18 @@ export async function executeSubagentRun(
     }
   };
 
+  const closeBrokerBinding = async () => {
+    if (!brokerRunOpen || !sealedRunSpec || !registeredExecutionBroker) return;
+    brokerRunOpen = false;
+    try {
+      await registeredExecutionBroker.close(sealedRunSpec);
+    } catch (error) {
+      persistenceWarnings.push(
+        normalizeErrorMessage(error, "Failed to close execution broker run"),
+      );
+    }
+  };
+
   const buildReport = (
     status: SubagentReportDetails["status"],
     outcome: { summary?: string; error?: string },
@@ -297,6 +349,12 @@ export async function executeSubagentRun(
     worktreeBranchDeleted,
     candidateArtifacts,
     changedPaths,
+    backendId: sealedRunSpec?.spec.backendId,
+    runSpecHash: sealedRunSpec?.hash,
+    completionProposal,
+    candidateBundle,
+    validationReport,
+    codeTaskState,
   });
 
   const renderBusSnapshot = async () => {
@@ -336,45 +394,55 @@ export async function executeSubagentRun(
 
     const agentSucceeded = terminal === "completed";
     if (agentSucceeded) {
-      const applyDecision = worktreeStatus
-        ? decideWorktreeApply({ spec, status: worktreeStatus })
-        : undefined;
-      if (applyDecision) {
-        changedPaths = applyDecision.changedPaths;
-        candidateArtifacts = applyDecision.candidateArtifacts;
-      }
-      if (worktreeStatus?.changed && applyDecision?.shouldApply) {
-        env.onStatus?.(`Applying worktree changes from ${identity.name}…`);
+      throwIfCancelled(signal);
+      if (sealedRunSpec && worktree.baseRevision) {
+        codeTaskState = "validating";
+        env.onStatus?.(`Validating candidate changes from ${identity.name}…`);
         try {
-          const applyResult = await env.enqueueWorktreeApply(() =>
-            env.worktree.apply({
-              parentWorkdir: env.workdir,
-              worktreeRoot: worktree!.worktreeRoot,
-            }),
-          );
-          applyStatus = applyResult.applied ? "applied" : "skipped";
-          applyMethod = applyResult.applyMethod;
-          applyChanged = applyResult.changed;
-          applyPatchBytes = applyResult.patchBytes;
-          applySkippedReason = applyResult.skippedReason;
-          applyFallbackReason = applyResult.fallbackReason;
-          applyCopiedFiles = applyResult.copiedFiles;
-          applyDeletedFiles = applyResult.deletedFiles;
-          applyConflictFiles = applyResult.conflictFiles;
-          appliedToWorkdir = env.workdir;
+          const validated = await env.worktree.validate({
+            runId: sealedRunSpec.spec.runId,
+            runSpecHash: sealedRunSpec.hash,
+            maxDiffChars: MAX_DIFF_CHARS,
+          });
+          throwIfCancelled(signal);
+          candidateBundle = validated.candidate;
+          validationReport = validated.validation;
+          codeTaskState =
+            validated.validation.status === "passed"
+              ? "waiting_review"
+              : "validation_failed";
+          changedPaths = candidateBundle.changedPaths;
+          candidateArtifacts = [...candidateBundle.changedPaths];
+          worktreeStatus = {
+            changed: candidateBundle.changedPaths.length > 0,
+            status: candidateBundle.status,
+            diffStat: candidateBundle.diffStat,
+            diff: candidateBundle.diff,
+            diffTruncated: candidateBundle.diffTruncated,
+            untrackedFiles: candidateBundle.untrackedFiles,
+          };
         } catch (error) {
-          applyStatus = "failed";
-          applyError = normalizeErrorMessage(error, "Failed to apply subagent worktree changes");
+          codeTaskState = "unknown";
+          worktreeStatusError = normalizeErrorMessage(
+            error,
+            "Failed to validate subagent candidate",
+          );
         }
-      } else {
-        applyStatus = "skipped";
-        applyChanged = false;
-        applyPatchBytes = 0;
-        applySkippedReason = worktreeStatusError
-          ? "status_unavailable"
-          : (applyDecision?.skippedReason ?? "no_changes");
       }
+      applyStatus = "skipped";
+      applyChanged = false;
+      applyPatchBytes = 0;
+      applySkippedReason = worktreeStatusError
+        ? "validation_unavailable"
+        : validationReport?.status === "failed"
+          ? "validation_failed"
+          : !worktreeStatus?.changed
+            ? "no_changes"
+            : spec.applyPolicy === "none"
+              ? "apply_policy_none"
+              : "approval_required";
     } else {
+      codeTaskState = terminal === "cancelled" ? "cancelled" : "backend_failed";
       applyStatus = "skipped";
       applyChanged = false;
       applyPatchBytes = 0;
@@ -456,7 +524,7 @@ export async function executeSubagentRun(
       });
       env.onStatus?.(null);
       const childRegistry = await env.createChildToolRegistry(worktree.workdir);
-      childTools = selectWorktreeTools({
+      childTools = selectCandidateTools({
         tools: childRegistry.tools,
         metadataByName: childRegistry.metadataByName,
       });
@@ -476,6 +544,44 @@ export async function executeSubagentRun(
       childExecute = attached.execute;
     }
     const childToolNames = new Set(childTools.map((tool) => tool.name));
+    if (spec.mode === "worktree") {
+      if (!worktree?.baseRevision) {
+        throw new Error("worktree_unavailable: task workspace did not return a base revision");
+      }
+      sealedRunSpec = await sealRunSpec({
+        taskId: `${request.parentToolCallId}:${spec.id}`,
+        runId,
+        backendId: NATIVE_PI_BACKEND_ID,
+        mode: "execute",
+        workspace: {
+          workspaceId: worktree.workspaceId,
+          parentRoot: env.workdir,
+          taskRoot: worktree.workdir,
+          baseRevision: worktree.baseRevision,
+        },
+        capabilities: [
+          "workspace.read",
+          "workspace.write",
+          "process.execute",
+          "coordination.send",
+        ],
+        validationPlan: {
+          requiredChecks: [
+            "base_revision",
+            "candidate_paths",
+            "candidate_limits",
+            "candidate_stability",
+            "git_diff_check",
+          ],
+          commands: [],
+        },
+        candidatePolicy: {
+          allowedOutputPaths:
+            spec.applyPolicy === "explicit" ? spec.allowedOutputPaths : [],
+        },
+        createdAt: Date.now(),
+      });
+    }
 
     // ---- provision: context (resume or fresh) ------------------------------
     const systemPrompt = buildSubagentSystemPrompt({
@@ -580,7 +686,7 @@ export async function executeSubagentRun(
     schedulePersist("running", baseState);
 
     // ---- execute ------------------------------------------------------------
-    const result = await runAssistantWithTools({
+    const runRequest: NativePiRunRequest = {
       providerId: env.providerId,
       model: env.model,
       runtime: env.runtime,
@@ -592,17 +698,6 @@ export async function executeSubagentRun(
       nativeWebSearch: env.runtime.nativeWebSearchEnabled !== false,
       tools: childTools,
       subagentScheduler: env.scheduler,
-      executeToolCall: (childToolCall, childSignal) => {
-        if (!childToolNames.has(childToolCall.name)) {
-          return Promise.resolve(
-            toolErrorResult(
-              childToolCall,
-              `Tool ${childToolCall.name} is not available to delegated subagents in mode=${spec.mode}.`,
-            ),
-          );
-        }
-        return childExecute(childToolCall, childSignal);
-      },
       onTurnStart: (round) => {
         rounds = Math.max(rounds, round);
       },
@@ -647,13 +742,54 @@ export async function executeSubagentRun(
         };
       },
       signal,
-    });
+    };
+    const executeChildToolCall: ChildToolExecutor = (childToolCall, childSignal) => {
+      if (!childToolNames.has(childToolCall.name)) {
+        return Promise.resolve(
+          toolErrorResult(
+            childToolCall,
+            `Tool ${childToolCall.name} is not available to delegated subagents in mode=${spec.mode}.`,
+          ),
+        );
+      }
+      return childExecute(childToolCall, childSignal);
+    };
+
+    let result: Awaited<ReturnType<typeof runAssistantWithTools>>;
+    if (sealedRunSpec) {
+      registeredExecutionBroker = env.executionBroker ?? {
+        register: registerBrokerRun,
+        close: closeBrokerRun,
+      };
+      await registeredExecutionBroker.register(sealedRunSpec);
+      brokerRunOpen = true;
+      const backendResult = await nativePiBackend.run({
+        runSpec: sealedRunSpec,
+        request: runRequest,
+        submitToolIntent: createBrokeredToolIntentSubmitter({
+          capabilities: sealedRunSpec.spec.capabilities,
+          executeToolCall: executeChildToolCall,
+          authorize: registeredExecutionBroker.authorize,
+        }),
+      });
+      throwIfCancelled(signal);
+      result = backendResult.result;
+      completionProposal = backendResult.completionProposal;
+      codeTaskState = "backend_completed";
+    } else {
+      result = await runAssistantWithTools({
+        ...runRequest,
+        executeToolCall: executeChildToolCall,
+      });
+    }
 
     const finalState = appendMessagesToConversation(baseState, result.emittedMessages);
     lastView = finalState;
 
     // ---- settle ---------------------------------------------------------------
     await settleWorktree("completed");
+    throwIfCancelled(signal);
+    await closeBrokerBinding();
 
     // ---- report ---------------------------------------------------------------
     const summary =
@@ -673,6 +809,7 @@ export async function executeSubagentRun(
     } catch {
       // Settlement is best-effort on the failure path.
     }
+    await closeBrokerBinding();
     if (lastView) {
       schedulePersist(status, lastView, { error: message, endedAt: Date.now() });
     }

@@ -10,7 +10,12 @@ import {
   createBuiltinMetadataMap,
 } from "../tools/builtinTypes";
 import { ToolPathResolver } from "../tools/pathUtils";
-import { buildSubagentCardResult, buildSubagentCardToolCall, renderBatchResultText } from "./cards";
+import {
+  buildSubagentCardResult,
+  buildSubagentCardToolCall,
+  isSubagentReportAccepted,
+  renderBatchResultText,
+} from "./cards";
 import {
   buildRejectedBatchDetails,
   issue,
@@ -89,13 +94,13 @@ const AGENT_PARAMETERS = Type.Object(
           apply_policy: Type.Optional(
             Type.Union([Type.Literal("none"), Type.Literal("explicit"), Type.Literal("auto")], {
               description:
-                "Worktree merge-back policy. none (default) never applies; auto applies the patch; explicit applies only files matching allowed_output_paths.",
+                "Requested merge policy recorded with the candidate. It is not approval: changed worktrees remain unapplied after structural validation. explicit additionally constrains changed files to allowed_output_paths.",
             }),
           ),
           allowed_output_paths: Type.Optional(
             Type.Array(Type.String(), {
               description:
-                "Workspace-relative files/directories (globs allowed) permitted to merge back. Required with apply_policy=explicit.",
+                "Workspace-relative candidate files/directories (globs allowed) permitted by structural validation. Required with apply_policy=explicit.",
             }),
           ),
           resume: Type.Optional(
@@ -208,6 +213,7 @@ export function createSubagentTools(params: {
   metadataByName: Map<string, BuiltinToolMetadata>;
   createSubagentToolRegistry?: (workdir: string) => Promise<SubagentToolRegistry>;
   worktreeIpc?: SubagentWorktreeIpc;
+  executionBroker?: SubagentRunEnvironment["executionBroker"];
 }): BuiltinToolBundle {
   const store = params.store;
   const templates = params.templates;
@@ -241,7 +247,7 @@ export function createSubagentTools(params: {
       "Each agent has a stable `id` inside this conversation. Reuse the same id to resume that agent's private context; use a new id only for a genuinely new persona.",
       "Creation fields (name, role, identity, template) apply only when an id is first created; sending different values for an existing id is an error. For an existing id, send only id and the new prompt.",
       "mode=readonly (default for new agents) gives inspect-only tools — use it for research, review, and discussion. mode=worktree gives file+shell tools inside an isolated git worktree — use it only when file changes are expected or explicitly requested. A resumed agent keeps its previous mode unless you set mode.",
-      "apply_policy controls merge-back from a worktree: none (default) never applies, auto applies the patch automatically, explicit applies only when every changed file matches allowed_output_paths.",
+      "apply_policy declares the requested merge policy, but it is not approval. Worktree runs now return a validated CandidateBundle and retain changed worktrees for independent review; ArcForge does not auto-apply model-authored changes.",
       "retain_worktree=true keeps a safely-cleanable worktree for review. Worktrees with unapplied changes or failed agents are always retained.",
       "Subagents cannot call Agent recursively. Worktree mode must not modify global ArcForge settings, MCP server configuration, cron tasks, or user-level skills.",
       "Subagents communicate through SendMessage (to=parent is parent-private; to=* is a shared broadcast); do not use workspace files as a message channel.",
@@ -340,6 +346,7 @@ export function createSubagentTools(params: {
           }
         : undefined,
       enqueueWorktreeApply,
+      executionBroker: params.executionBroker,
       onStatus: context?.emitToolStatus,
     };
 
@@ -444,7 +451,7 @@ export function createSubagentTools(params: {
       toolName: toolCall.name,
       content: [{ type: "text", text: renderBatchResultText(details) }],
       details,
-      isError: reports.some((report) => report.status !== "completed"),
+      isError: reports.some((report) => !isSubagentReportAccepted(report)),
       timestamp: Date.now(),
     };
   }

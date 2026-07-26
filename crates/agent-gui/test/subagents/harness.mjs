@@ -229,14 +229,16 @@ export function createFakeStoreIpc(options = {}) {
   return api;
 }
 
-export function createFakeWorktreeIpc(options = {}) {
+export function createFakeWorktreeIpc(options = {}, brokerState = { runSpecs: new Map() }) {
   const creates = [];
   const statuses = [];
+  const validations = [];
   const applies = [];
   const cleanups = [];
   return {
     creates,
     statuses,
+    validations,
     applies,
     cleanups,
     async create(input) {
@@ -244,10 +246,12 @@ export function createFakeWorktreeIpc(options = {}) {
       if (options.createError) throw options.createError;
       const worktreeRoot = `/tmp/arcforge-worktrees/${input.label}`;
       return {
+        workspaceId: `workspace-${input.label}`,
         repoRoot: input.workdir,
         worktreeRoot,
         workdir: worktreeRoot,
         branchName: `arcforge/subagent/${input.label}`,
+        baseRevision: options.baseRevision ?? "a".repeat(40),
       };
     },
     async status(input) {
@@ -263,6 +267,85 @@ export function createFakeWorktreeIpc(options = {}) {
           untrackedFiles: ["src/new.ts"],
         }
       );
+    },
+    async validate(input) {
+      validations.push(structuredClone(input));
+      if (options.validationError) throw options.validationError;
+      await options.onValidate?.(structuredClone(input));
+      const registered = brokerState.runSpecs.get(`${input.runId}:${input.runSpecHash}`);
+      if (!registered) throw new Error("run is not registered with the fake execution broker");
+      const runSpec = registered.spec;
+      const status =
+        options.status ?? {
+          changed: true,
+          status: " M src/app.ts",
+          diffStat: " src/app.ts | 2 +",
+          diff: "diff --git a/src/app.ts b/src/app.ts",
+          diffTruncated: false,
+          untrackedFiles: ["src/new.ts"],
+        };
+      const statusPaths = status.status
+        .split(/\r?\n/)
+        .map((line) => line.slice(3).trim())
+        .filter(Boolean);
+      const changedPaths = status.changed
+        ? [...new Set([...statusPaths, ...status.untrackedFiles])].sort()
+        : [];
+      const allowed = runSpec.candidatePolicy.allowedOutputPaths ?? [];
+      const disallowed = changedPaths.filter(
+        (path) =>
+          allowed.length > 0 &&
+          !allowed.some((pattern) => {
+            if (pattern.endsWith("/**")) {
+              return path.startsWith(pattern.slice(0, -3));
+            }
+            return path === pattern || path.startsWith(`${pattern}/`);
+          }),
+      );
+      const validationStatus =
+        options.validationStatus ?? (disallowed.length > 0 ? "failed" : "passed");
+      return {
+        candidate: {
+          kind: "candidate_bundle",
+          candidateId: "candidate-1",
+          taskId: runSpec.taskId,
+          runId: input.runId,
+          runSpecHash: input.runSpecHash,
+          candidateHash: "b".repeat(64),
+          baseRevision: runSpec.workspace.baseRevision,
+          changedPaths,
+          status: status.status,
+          diffStat: status.diffStat,
+          diff: status.diff,
+          diffTruncated: status.diffTruncated,
+          untrackedFiles: status.untrackedFiles,
+          createdAt: Date.now(),
+        },
+        validation: {
+          kind: "validation_report",
+          reportId: "validation-1",
+          reportHash: "c".repeat(64),
+          taskId: runSpec.taskId,
+          runId: input.runId,
+          runSpecHash: input.runSpecHash,
+          candidateHash: "b".repeat(64),
+          baseRevision: runSpec.workspace.baseRevision,
+          status: validationStatus,
+          scope: "structural",
+          checks: [
+            {
+              id: "base_revision",
+              status: validationStatus,
+              summary:
+                disallowed.length > 0
+                  ? `changed path(s) outside policy: ${disallowed.join(", ")}`
+                  : `base revision ${validationStatus}`,
+            },
+          ],
+          testStatus: "not_run",
+          createdAt: Date.now(),
+        },
+      };
     },
     async apply(input) {
       applies.push(structuredClone(input));
@@ -291,6 +374,38 @@ export function createFakeWorktreeIpc(options = {}) {
           branchDeleted: true,
         }
       );
+    },
+  };
+}
+
+export function createFakeExecutionBroker(options = {}, brokerState = { runSpecs: new Map() }) {
+  const registrations = [];
+  const proposals = [];
+  const closes = [];
+  return {
+    registrations,
+    proposals,
+    closes,
+    async register(runSpec) {
+      registrations.push(structuredClone(runSpec));
+      if (options.registerError) throw options.registerError;
+      brokerState.runSpecs.set(`${runSpec.spec.runId}:${runSpec.hash}`, structuredClone(runSpec));
+      return { bindingId: "binding-1", isolationLevel: "workspace_only" };
+    },
+    async authorize(proposal) {
+      proposals.push(structuredClone(proposal));
+      if (options.authorizeError) throw options.authorizeError;
+      return {
+        authorized: options.authorized !== false,
+        authorizationId: "authorization-1",
+        isolationLevel: "workspace_only",
+        reason: options.reason,
+      };
+    },
+    async close(runSpec) {
+      closes.push(structuredClone(runSpec));
+      if (options.closeError) throw options.closeError;
+      brokerState.runSpecs.delete(`${runSpec.spec.runId}:${runSpec.hash}`);
     },
   };
 }
@@ -403,7 +518,12 @@ export async function createSubagentHarness(options = {}) {
   const agentToolModule = loader.loadModule("src/lib/subagents/agentTool.ts");
 
   const storeIpc = options.storeIpc ?? createFakeStoreIpc(options.storeIpcOptions);
-  const worktreeIpc = options.worktreeIpc ?? createFakeWorktreeIpc(options.worktreeOptions);
+  const brokerState = { runSpecs: new Map() };
+  const worktreeIpc =
+    options.worktreeIpc ?? createFakeWorktreeIpc(options.worktreeOptions, brokerState);
+  const executionBroker =
+    options.executionBroker ??
+    createFakeExecutionBroker(options.executionBrokerOptions, brokerState);
   const conversationId = options.conversationId ?? "conversation-1";
   const store =
     options.store ??
@@ -501,6 +621,7 @@ export async function createSubagentHarness(options = {}) {
           };
         },
     worktreeIpc,
+    executionBroker,
   });
 
   return {
@@ -513,6 +634,7 @@ export async function createSubagentHarness(options = {}) {
     scheduler,
     storeIpc,
     worktreeIpc,
+    executionBroker,
     runnerCalls,
     compactionCalls,
     executedBaseToolCalls,

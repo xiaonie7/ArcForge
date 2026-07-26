@@ -153,7 +153,10 @@ export function collectWorktreeChangedPaths(status: SubagentWorktreeStatus) {
 }
 
 /**
- * Decide whether worktree changes merge back into the parent workspace.
+ * Legacy merge-back policy helper.
+ *
+ * NativePiBackend candidate mode does not call this function: model-authored
+ * apply_policy is not an ApprovalGrant.
  * Purely policy-driven: "none" never applies, "explicit" applies only when
  * every changed path matches allowed_output_paths, "auto" always applies.
  */
@@ -267,5 +270,40 @@ export function selectWorktreeTools(params: {
       (metadata?.groupId === "memory" && metadata.isReadOnly === true) ||
       (metadata?.groupId === "mcp" && metadata.kind === "mcp")
     );
+  });
+}
+
+const CANDIDATE_TOOL_NAMES = new Set([
+  "Read",
+  "List",
+  "Glob",
+  "Grep",
+  "Write",
+  "Edit",
+  "Delete",
+  "Bash",
+  SEND_MESSAGE_TOOL_NAME,
+]);
+
+/**
+ * NativePiBackend candidate surface.
+ *
+ * This list is intentionally name-based and fail-closed. Generic metadata is
+ * not sufficient to classify MCP, Memory, Office, Skill or system actions.
+ */
+export function selectCandidateTools(params: {
+  tools: Tool[];
+  metadataByName: Map<string, ToolMetadataLike>;
+}) {
+  return params.tools.filter((tool) => {
+    if (!CANDIDATE_TOOL_NAMES.has(tool.name) || tool.name === AGENT_TOOL_NAME) {
+      return false;
+    }
+    if (tool.name === SEND_MESSAGE_TOOL_NAME) return true;
+    const metadata = params.metadataByName.get(tool.name);
+    if (tool.name === "Bash") {
+      return metadata?.groupId === "shell" && metadata.kind === "bash";
+    }
+    return metadata?.groupId === "fs";
   });
 }

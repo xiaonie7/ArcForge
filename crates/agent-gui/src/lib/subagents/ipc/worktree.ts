@@ -5,6 +5,7 @@ import type {
   SubagentWorktreeCleanupResult,
   SubagentWorktreeInfo,
   SubagentWorktreeStatus,
+  SubagentWorktreeValidationResult,
 } from "../types";
 
 export type SubagentWorktreeIpc = {
@@ -13,6 +14,11 @@ export type SubagentWorktreeIpc = {
     worktreeRoot: string;
     maxDiffChars: number;
   }) => Promise<SubagentWorktreeStatus>;
+  validate: (input: {
+    runId: string;
+    runSpecHash: string;
+    maxDiffChars: number;
+  }) => Promise<SubagentWorktreeValidationResult>;
   apply: (input: {
     parentWorkdir: string;
     worktreeRoot: string;
@@ -38,6 +44,10 @@ export const tauriSubagentWorktreeIpc: SubagentWorktreeIpc = {
     stripNulls(await invoke<SubagentWorktreeInfo>("subagent_worktree_create", { input })),
   status: async (input) =>
     stripNulls(await invoke<SubagentWorktreeStatus>("subagent_worktree_status", { input })),
+  validate: async (input) =>
+    stripNulls(
+      await invoke<SubagentWorktreeValidationResult>("subagent_worktree_validate", { input }),
+    ),
   apply: async (input) =>
     stripNulls(await invoke<SubagentWorktreeApplyResult>("subagent_worktree_apply", { input })),
   cleanup: async (input) =>

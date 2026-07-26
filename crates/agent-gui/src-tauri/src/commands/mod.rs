@@ -30,6 +30,7 @@ pub use integration_commands::gateway;
 pub use integration_commands::mcp;
 pub use integration_commands::memory;
 
+pub use runtime_commands::execution_broker;
 pub use runtime_commands::process;
 pub use runtime_commands::sftp;
 pub use runtime_commands::shell;

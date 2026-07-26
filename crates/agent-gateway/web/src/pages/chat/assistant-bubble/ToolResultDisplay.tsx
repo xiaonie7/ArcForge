@@ -930,6 +930,12 @@ export function ToolResultDisplay({
     if (agent.mode === "worktree") {
       tags.push({ label: "mode", value: agent.mode });
     }
+    if (agent.codeTaskState) {
+      tags.push({ label: "task", value: agent.codeTaskState });
+    }
+    if (agent.validationReport) {
+      tags.push({ label: "validation", value: agent.validationReport.status });
+    }
     if (shouldShowSubagentApplyStatus(agent) && agent.applyStatus) {
       tags.push({ label: "apply", value: agent.applyStatus });
     }
@@ -978,6 +984,19 @@ export function ToolResultDisplay({
           ) : null}
           {agent.worktreeStatusError ? (
             <CodePreview text={agent.worktreeStatusError} maxChars={1200} />
+          ) : null}
+          {agent.validationReport ? (
+            <CodePreview
+              text={[
+                `validation: ${agent.validationReport.status} (${agent.validationReport.scope})`,
+                `candidate: ${agent.validationReport.candidateHash}`,
+                `tests: ${agent.validationReport.testStatus}`,
+                ...agent.validationReport.checks.map(
+                  (check) => `- [${check.status}] ${check.id}: ${check.summary}`,
+                ),
+              ].join("\n")}
+              maxChars={2400}
+            />
           ) : null}
           {agent.applyError ? (
             <CodePreview text={`apply failed:\n${agent.applyError}`} maxChars={1200} />

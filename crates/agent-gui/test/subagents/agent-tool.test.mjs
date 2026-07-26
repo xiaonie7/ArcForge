@@ -144,7 +144,7 @@ test("SendMessage is not attached and persistence is skipped without a conversat
   assert.equal(harness.storeIpc.upsertIdentityCount, 0);
 });
 
-test("worktree children get fs/shell/memory-ro/mcp tools plus SendMessage", async () => {
+test("worktree candidates expose only fixed fs/shell tools plus SendMessage", async () => {
   const harness = await createSubagentHarness();
   await harness.bundle.executeToolCall(
     createAgentToolCall({ agents: [{ id: "builder", prompt: "build", mode: "worktree" }] }),
@@ -152,9 +152,49 @@ test("worktree children get fs/shell/memory-ro/mcp tools plus SendMessage", asyn
   const call = harness.runnerCalls[0];
   assert.deepEqual(
     call.tools.map((tool) => tool.name),
-    ["Read", "Grep", "Write", "Bash", "MemoryManager", "mcp_docs_search", "SendMessage"],
+    ["Read", "Grep", "Write", "Bash", "SendMessage"],
   );
   assert.match(call.context.systemPrompt, /isolated git worktree/);
+});
+
+test("worktree tool calls cross the broker as ordered ToolIntentProposal objects", async () => {
+  const harness = await createSubagentHarness({
+    runnerToolCalls: [
+      {
+        type: "toolCall",
+        id: "read-candidate",
+        name: "Read",
+        arguments: { path: "src/app.ts" },
+      },
+      {
+        type: "toolCall",
+        id: "write-candidate",
+        name: "Write",
+        arguments: { path: "src/app.ts", content: "next" },
+      },
+    ],
+  });
+  await harness.bundle.executeToolCall(
+    createAgentToolCall({
+      agents: [{ id: "builder", prompt: "build", mode: "worktree" }],
+    }),
+  );
+
+  assert.deepEqual(
+    harness.executionBroker.proposals.map((proposal) => ({
+      sequence: proposal.sourceSequence,
+      name: proposal.toolName,
+      effect: proposal.effect,
+    })),
+    [
+      { sequence: 1, name: "Read", effect: "workspace_read" },
+      { sequence: 2, name: "Write", effect: "workspace_draft_mutation" },
+    ],
+  );
+  assert.deepEqual(
+    harness.executedChildToolCalls.map(({ toolCall }) => toolCall.name),
+    ["Read", "Write"],
+  );
 });
 
 test("concurrency cap bounds parallel runs", async () => {
@@ -192,7 +232,7 @@ test("two concurrent batches serialize runs for the same stable agent id", async
   assert.equal(harness.getMaxActiveRuns(), 1);
 });
 
-test("worktree lifecycle: create -> run -> status -> auto apply -> cleanup", async () => {
+test("worktree lifecycle: create -> brokered Pi run -> validate -> waiting review", async () => {
   const harness = await createSubagentHarness();
   const { context, emittedStatuses } = createRecordingContext(
     createAgentToolCall({
@@ -217,34 +257,38 @@ test("worktree lifecycle: create -> run -> status -> auto apply -> cleanup", asy
   const worktreeRoot = "/tmp/arcforge-worktrees/parent-session-call-agent-1-fixer";
   // Runner executed inside the worktree workdir with the child registry.
   assert.equal(harness.runnerCalls[0].workdir, worktreeRoot);
-  // Status inspected, patch applied back to the parent workdir, then cleanup.
+  // Status and candidate are recomputed, but model-authored policy is not approval.
   assert.deepEqual(harness.worktreeIpc.statuses, [
     { worktreeRoot, maxDiffChars: 20000 },
   ]);
-  assert.deepEqual(harness.worktreeIpc.applies, [
-    { parentWorkdir: "/tmp/arcforge-subagent-test", worktreeRoot },
-  ]);
-  assert.equal(harness.worktreeIpc.cleanups.length, 1);
-  assert.equal(harness.worktreeIpc.cleanups[0].worktreeRoot, worktreeRoot);
+  assert.equal(harness.worktreeIpc.validations.length, 1);
+  assert.equal(harness.worktreeIpc.applies.length, 0);
+  assert.equal(harness.worktreeIpc.cleanups.length, 0);
 
   const report = result.details.agents[0];
   assert.equal(report.status, "completed");
   assert.equal(report.changed, true);
-  assert.equal(report.applyStatus, "applied");
-  assert.equal(report.applyMethod, "git_apply");
-  assert.equal(report.appliedToWorkdir, "/tmp/arcforge-subagent-test");
-  assert.equal(report.worktreeCleanupStatus, "removed");
-  assert.equal(report.worktreeCleanupReason, "applied");
-  assert.equal(report.worktreeBranchDeleted, true);
+  assert.equal(report.backendId, "native-pi");
+  assert.equal(report.completionProposal.kind, "completion_proposal");
+  assert.equal(report.candidateBundle.kind, "candidate_bundle");
+  assert.equal(report.validationReport.status, "passed");
+  assert.equal(report.validationReport.testStatus, "not_run");
+  assert.equal(report.codeTaskState, "waiting_review");
+  assert.equal(report.applyStatus, "skipped");
+  assert.equal(report.applySkippedReason, "approval_required");
+  assert.equal(report.worktreeCleanupStatus, "retained");
+  assert.equal(report.worktreeCleanupReason, "unapplied_changes");
   assert.deepEqual(report.changedPaths, ["src/app.ts", "src/new.ts"]);
-  assert.ok(emittedStatuses.some((status) => /Applying worktree changes/.test(status ?? "")));
+  assert.ok(emittedStatuses.some((status) => /Validating candidate changes/.test(status ?? "")));
+  assert.equal(harness.executionBroker.registrations.length, 1);
+  assert.equal(harness.executionBroker.closes.length, 1);
 
   const finalSave = harness.storeIpc.appliedSaves.at(-1);
   assert.equal(finalSave.run.worktreeRoot, worktreeRoot);
   assert.equal(finalSave.run.workdir, worktreeRoot);
 });
 
-test("explicit apply policy applies when every changed path matches the globs", async () => {
+test("explicit path policy validates but still requires independent approval", async () => {
   const harness = await createSubagentHarness();
   const result = await harness.bundle.executeToolCall(
     createAgentToolCall({
@@ -260,11 +304,12 @@ test("explicit apply policy applies when every changed path matches the globs", 
     }),
   );
   const report = result.details.agents[0];
-  assert.equal(report.applyStatus, "applied");
+  assert.equal(report.applyStatus, "skipped");
+  assert.equal(report.applySkippedReason, "approval_required");
   assert.deepEqual(report.allowedOutputPaths, ["src/**"]);
-  assert.deepEqual(report.candidateArtifacts, []);
-  assert.equal(harness.worktreeIpc.applies.length, 1);
-  assert.equal(report.worktreeCleanupStatus, "removed");
+  assert.deepEqual(report.candidateArtifacts, ["src/app.ts", "src/new.ts"]);
+  assert.equal(harness.worktreeIpc.applies.length, 0);
+  assert.equal(report.worktreeCleanupStatus, "retained");
 });
 
 test("explicit apply policy mismatch keeps disallowed paths as candidate artifacts and retains the worktree", async () => {
@@ -295,13 +340,36 @@ test("explicit apply policy mismatch keeps disallowed paths as candidate artifac
   );
   const report = result.details.agents[0];
   assert.equal(report.applyStatus, "skipped");
-  assert.equal(report.applySkippedReason, "explicit_apply_paths_mismatch");
-  assert.deepEqual(report.candidateArtifacts, ["src/app.ts"]);
+  assert.equal(report.applySkippedReason, "validation_failed");
+  assert.deepEqual(report.candidateArtifacts, ["docs/notes.md", "src/app.ts"]);
   assert.deepEqual(report.changedPaths, ["docs/notes.md", "src/app.ts"]);
+  assert.equal(report.validationReport.status, "failed");
+  assert.equal(report.codeTaskState, "validation_failed");
+  assert.equal(result.isError, true);
   assert.equal(harness.worktreeIpc.applies.length, 0);
   assert.equal(report.worktreeCleanupStatus, "retained");
   assert.equal(report.worktreeCleanupReason, "unapplied_changes");
   assert.equal(harness.worktreeIpc.cleanups.length, 0);
+});
+
+test("validator failure is not accepted as a successful Agent-tool outcome", async () => {
+  const harness = await createSubagentHarness({
+    worktreeOptions: { validationError: new Error("validator unavailable") },
+  });
+  const result = await harness.bundle.executeToolCall(
+    createAgentToolCall({
+      agents: [{ id: "unvalidated", prompt: "prepare candidate", mode: "worktree" }],
+    }),
+  );
+
+  assert.equal(result.isError, true);
+  const report = result.details.agents[0];
+  assert.equal(report.status, "completed");
+  assert.equal(report.codeTaskState, "unknown");
+  assert.equal(report.applySkippedReason, "validation_unavailable");
+  assert.match(report.worktreeStatusError, /validator unavailable/);
+  assert.equal(report.worktreeCleanupStatus, "retained");
+  assert.equal(harness.executionBroker.closes.length, 1);
 });
 
 test("apply policy none keeps changes as candidate artifacts and retains the worktree", async () => {
@@ -347,7 +415,7 @@ test("apply policy none with a clean worktree cleans up", async () => {
   assert.equal(harness.worktreeIpc.cleanups.length, 1);
 });
 
-test("retain_worktree keeps an otherwise cleanable worktree", async () => {
+test("retain_worktree keeps a validated candidate worktree", async () => {
   const harness = await createSubagentHarness();
   const result = await harness.bundle.executeToolCall(
     createAgentToolCall({
@@ -363,7 +431,8 @@ test("retain_worktree keeps an otherwise cleanable worktree", async () => {
     }),
   );
   const report = result.details.agents[0];
-  assert.equal(report.applyStatus, "applied");
+  assert.equal(report.applyStatus, "skipped");
+  assert.equal(report.applySkippedReason, "approval_required");
   assert.equal(report.worktreeCleanupStatus, "retained");
   assert.equal(report.worktreeCleanupReason, "retain_worktree");
   assert.equal(harness.worktreeIpc.cleanups.length, 0);
@@ -596,6 +665,32 @@ test("abort persists a cancelled run and retains the worktree", async () => {
   const finalSave = harness.storeIpc.appliedSaves.at(-1);
   assert.equal(finalSave.run.status, "cancelled");
   assert.equal(finalSave.run.error, "Cancelled");
+});
+
+test("abort during candidate validation cannot be reported as completed", async () => {
+  const controller = new AbortController();
+  const harness = await createSubagentHarness({
+    worktreeOptions: {
+      onValidate() {
+        controller.abort(new Error("Cancelled"));
+      },
+    },
+  });
+  const result = await harness.bundle.executeToolCall(
+    createAgentToolCall({
+      agents: [{ id: "late-cancel", prompt: "prepare candidate", mode: "worktree" }],
+    }),
+    controller.signal,
+  );
+
+  assert.equal(result.isError, true);
+  const report = result.details.agents[0];
+  assert.equal(report.status, "cancelled");
+  assert.equal(report.codeTaskState, "cancelled");
+  assert.equal(report.completionProposal.kind, "completion_proposal");
+  assert.equal(report.candidateBundle, undefined);
+  assert.equal(harness.worktreeIpc.validations.length, 1);
+  assert.equal(harness.executionBroker.closes.length, 1);
 });
 
 test("failed runs keep their worktree", async () => {

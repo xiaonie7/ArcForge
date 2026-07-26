@@ -10,6 +10,21 @@ import {
 import { AGENT_TOOL_NAME, type SubagentIdentity, type SubagentSpec } from "./types";
 
 /**
+ * Transport completion is not code-task acceptance. Worktree runs are only a
+ * usable Agent-tool outcome once validation produced a reviewable candidate
+ * (or a future trusted Apply/Succeeded state).
+ */
+export function isSubagentReportAccepted(report: SubagentReportDetails) {
+  if (report.status !== "completed") return false;
+  if (report.mode !== "worktree") return true;
+  return (
+    report.codeTaskState === "waiting_review" ||
+    report.codeTaskState === "applied" ||
+    report.codeTaskState === "succeeded"
+  );
+}
+
+/**
  * Synthetic per-agent tool call emitted when a subagent starts executing.
  * Reuses the same id scheme as the streaming placeholder cards so live
  * placeholders upgrade in place.
@@ -73,7 +88,7 @@ export function buildSubagentCardResult(params: {
       },
     ],
     details,
-    isError: params.report.status !== "completed",
+    isError: !isSubagentReportAccepted(params.report),
     timestamp: Date.now(),
   };
 }
@@ -94,6 +109,9 @@ export function renderBatchResultText(details: SubagentBatchDetails) {
       "",
       `${index + 1}. [${agent.status}] ${agent.name} (${agent.id}) - ${agent.prompt}`,
       `run_id=${agent.runId}`,
+      agent.backendId ? `backend=${agent.backendId}` : "",
+      agent.codeTaskState ? `code_task_state=${agent.codeTaskState}` : "",
+      agent.runSpecHash ? `run_spec_hash=${agent.runSpecHash}` : "",
       agent.role ? `role=${agent.role}` : "",
       `mode=${agent.mode}`,
       agent.applyPolicy ? `apply_policy=${agent.applyPolicy}` : "",
@@ -108,6 +126,15 @@ export function renderBatchResultText(details: SubagentBatchDetails) {
       agent.applySkippedReason ? `apply_skipped_reason=${agent.applySkippedReason}` : "",
       agent.applyFallbackReason ? `apply_fallback_reason=${agent.applyFallbackReason}` : "",
       agent.applyError ? `apply_error=${agent.applyError}` : "",
+      agent.candidateBundle
+        ? `candidate_id=${agent.candidateBundle.candidateId} candidate_hash=${agent.candidateBundle.candidateHash}`
+        : "",
+      agent.validationReport
+        ? `validation=${agent.validationReport.status} report_id=${agent.validationReport.reportId} report_hash=${agent.validationReport.reportHash} tests=${agent.validationReport.testStatus}`
+        : "",
+      ...(agent.validationReport?.checks.map(
+        (check) => `validation_check.${check.id}=${check.status}: ${check.summary}`,
+      ) ?? []),
       agent.appliedToWorkdir ? `applied_to=${agent.appliedToWorkdir}` : "",
       agent.worktreeCleanupStatus ? `worktree_cleanup=${agent.worktreeCleanupStatus}` : "",
       agent.worktreeCleanupReason ? `worktree_cleanup_reason=${agent.worktreeCleanupReason}` : "",

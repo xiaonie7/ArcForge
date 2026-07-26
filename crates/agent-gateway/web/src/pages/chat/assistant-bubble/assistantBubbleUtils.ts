@@ -349,6 +349,7 @@ export function isBuiltinShareToolName(name: string) {
     "ManagedProcess",
     "McpManager",
     "MemoryManager",
+    "PresentFile",
     "Read",
     "ReadTerminal",
     "SendMessage",
