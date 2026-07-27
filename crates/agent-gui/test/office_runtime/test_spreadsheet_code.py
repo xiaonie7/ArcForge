@@ -100,12 +100,33 @@ sheet["B2"] = "=A2*2"
             original.close()
             modified.close()
 
+    def test_supports_wb_as_workbook_alias(self) -> None:
+        script = self.write_script(
+            "wb_alias.py",
+            """
+sheet = wb.active
+sheet.title = "Alias Works"
+sheet["A1"] = "created through wb"
+""".strip(),
+        )
+        output = self.root / "wb-alias.xlsx"
+
+        self.run_code(script, output)
+
+        workbook = spreadsheet.load_workbook(output, data_only=False)
+        try:
+            self.assertEqual(workbook.sheetnames, ["Alias Works"])
+            self.assertEqual(workbook["Alias Works"]["A1"].value, "created through wb")
+        finally:
+            workbook.close()
+
     def test_rejects_imports_filesystem_builtins_and_direct_save(self) -> None:
         cases = {
             "import.py": ("import os", "cannot use Import"),
             "open.py": ('open("outside.txt", "w")', "cannot access name 'open'"),
             "save.py": ('workbook.save("outside.xlsx")', "cannot access attribute 'save'"),
             "private.py": ("workbook._archive", "cannot access attribute '_archive'"),
+            "rebind_wb.py": ("wb = workbook", "cannot rebind protected name 'wb'"),
         }
         for name, (source, message) in cases.items():
             with self.subTest(name=name):

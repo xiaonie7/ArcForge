@@ -809,6 +809,11 @@ export async function executeSubagentRun(
     } catch {
       // Settlement is best-effort on the failure path.
     }
+    if (spec.mode === "worktree" && codeTaskState === "running") {
+      // Worktree provisioning can fail before `worktree` is assigned, so
+      // settleWorktree has nothing to inspect and cannot advance the state.
+      codeTaskState = cancelled ? "cancelled" : "backend_failed";
+    }
     await closeBrokerBinding();
     if (lastView) {
       schedulePersist(status, lastView, { error: message, endedAt: Date.now() });

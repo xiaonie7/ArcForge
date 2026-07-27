@@ -4,6 +4,7 @@
 //! 对发现/list 不可见），最后在 [`skills_write_guard`] 保护下用 `fs::rename`
 //! 原子入位。读者永远只会看到旧目录或新目录，不存在半成品窗口。
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use serde_json::Value;
 use std::fs;
@@ -13,6 +14,89 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 use super::*;
+
+const MAX_LOCAL_SKILL_UPLOAD_BYTES: usize = 40 * 1024 * 1024;
+
+fn local_upload_file_name(value: &str) -> Result<&str, String> {
+    let file_name = Path::new(value)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "Local Skill upload requires a valid fileName".to_string())?;
+    if file_name != value || file_name.is_empty() {
+        return Err("Local Skill upload fileName must not contain a path".to_string());
+    }
+    let supported = matches!(
+        file_name.to_ascii_lowercase().as_str(),
+        "skill.md" | "skill.json"
+    ) || matches!(
+        Path::new(file_name)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("zip") | Some("skill")
+    );
+    if !supported {
+        return Err(
+            "Local Skill uploads must be .zip/.skill archives, SKILL.md, or skill.json".to_string(),
+        );
+    }
+    Ok(file_name)
+}
+
+pub(crate) fn install_uploaded_skill_from_payload(
+    root: &Path,
+    payload: &serde_json::Map<String, Value>,
+) -> Result<Vec<SystemSkillInstallResult>, String> {
+    let file_name = local_upload_file_name(
+        object_string(payload, "fileName")
+            .or_else(|| object_string(payload, "file_name"))
+            .ok_or_else(|| "SkillsManager install_upload requires fileName".to_string())?,
+    )?;
+    let content_base64 = object_string(payload, "contentBase64")
+        .or_else(|| object_string(payload, "content_base64"))
+        .ok_or_else(|| "SkillsManager install_upload requires contentBase64".to_string())?;
+    let max_encoded_len = MAX_LOCAL_SKILL_UPLOAD_BYTES.div_ceil(3) * 4;
+    if content_base64.len() > max_encoded_len {
+        return Err(format!(
+            "Local Skill upload is too large, over {} bytes",
+            MAX_LOCAL_SKILL_UPLOAD_BYTES
+        ));
+    }
+    let content = BASE64_STANDARD
+        .decode(content_base64)
+        .map_err(|error| format!("Local Skill upload is not valid base64: {error}"))?;
+    if content.is_empty() {
+        return Err("Local Skill upload is empty".to_string());
+    }
+    if content.len() > MAX_LOCAL_SKILL_UPLOAD_BYTES {
+        return Err(format!(
+            "Local Skill upload is too large, over {} bytes",
+            MAX_LOCAL_SKILL_UPLOAD_BYTES
+        ));
+    }
+
+    let upload = TempDir::new("arcforge-skill-upload")?;
+    let source = upload.path().join(file_name);
+    fs::write(&source, content)
+        .map_err(|error| format!("Failed to stage local Skill upload: {error}"))?;
+
+    let mut install_payload = payload
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "action" | "fileName" | "file_name" | "contentBase64" | "content_base64"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<String, Value>>();
+    install_payload.insert(
+        "source".to_string(),
+        Value::String(source.to_string_lossy().into_owned()),
+    );
+    install_source_from_payload(root, &install_payload)
+}
 
 const STAGING_DIR_NAME: &str = ".staging";
 const STAGING_MAX_AGE_MS: u128 = 24 * 60 * 60 * 1000;

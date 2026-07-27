@@ -557,6 +557,57 @@ fn install_source_from_local_skill_archive_installs_skill() {
 }
 
 #[test]
+fn install_uploaded_skill_archive_installs_skill() {
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+
+    let tmp = TempDir::new("arcforge-skill-upload-install-test").expect("temp dir");
+    let root = tmp.path().join("skills");
+    let archive = tmp.path().join("uploaded.zip");
+    {
+        let file = fs::File::create(&archive).expect("archive file");
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        writer
+            .start_file("uploaded-skill/SKILL.md", options)
+            .expect("start skill file");
+        writer
+            .write_all(
+                b"---\nname: uploaded-skill\ndescription: Uploaded install\n---\n\n# Uploaded Skill\n",
+            )
+            .expect("write skill file");
+        writer.finish().expect("finish archive");
+    }
+    let payload = json!({
+        "fileName": "uploaded.zip",
+        "contentBase64": BASE64_STANDARD.encode(fs::read(&archive).expect("read archive")),
+        "conflict": "fail"
+    });
+    let payload = payload.as_object().expect("payload object");
+
+    let installed = install_uploaded_skill_from_payload(&root, payload).expect("install upload");
+
+    assert_eq!(installed.len(), 1);
+    assert_eq!(installed[0].name, "uploaded-skill");
+    assert!(root.join("uploaded-skill").join("SKILL.md").is_file());
+}
+
+#[test]
+fn install_uploaded_skill_rejects_unsupported_file_names() {
+    let tmp = TempDir::new("arcforge-skill-upload-name-test").expect("temp dir");
+    let root = tmp.path().join("skills");
+    let payload = json!({
+        "fileName": "skill.exe",
+        "contentBase64": "dGVzdA=="
+    });
+
+    let error =
+        install_uploaded_skill_from_payload(&root, payload.as_object().expect("payload object"))
+            .expect_err("unsupported upload should fail");
+
+    assert!(error.contains("must be .zip/.skill archives"));
+}
+
+#[test]
 fn clawhub_download_url_preserves_slug_and_tag_params() {
     let url = clawhub_download_url_for_slug("owner/example-skill", None, Some("v1.2.3"))
         .expect("download url");

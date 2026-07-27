@@ -39,6 +39,7 @@ import {
   Shield,
   SkillIcon,
   Trash2,
+  Upload,
   Wallet,
   Wrench,
   X,
@@ -58,8 +59,10 @@ import {
   discoverSkills,
   type ExternalToolScan,
   getSkillInstallJobStatus,
+  installUploadedSkill,
   isAlwaysEnabledSkillName,
   isUserSelectableSkill,
+  LOCAL_SKILL_UPLOAD_ACCEPT,
   manageSkill,
   mergeAlwaysEnabledSkillNames,
   notifySkillsDiscoveryUpdated,
@@ -734,6 +737,12 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
   >([]);
   const [importedCount, setImportedCount] = useState<number | null>(null);
   const [importToast, setImportToast] = useState<string | null>(null);
+  const [localSkillUploading, setLocalSkillUploading] = useState(false);
+  const [localSkillUploadError, setLocalSkillUploadError] = useState<string | null>(null);
+  const [localSkillUploadResult, setLocalSkillUploadResult] = useState<{
+    fileName: string;
+    count: number;
+  } | null>(null);
   const importToastTimerRef = useRef<number | null>(null);
   const [previewInstalledSkill, setPreviewInstalledSkill] = useState<SkillSummary | null>(null);
   const [installedPreviewState, setInstalledPreviewState] = useState<InstalledSkillPreviewState>(
@@ -976,7 +985,7 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
   );
 
   const importSelectedExternalSkills = useCallback(async () => {
-    if (importProgress) return;
+    if (importProgress || localSkillUploading) return;
     const selectedSkills = (externalScans ?? [])
       .flatMap((scan) => scan.skills)
       .filter((skill) => selectedExternal.has(skill.baseDir));
@@ -1022,7 +1031,30 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
     installedSkillNames,
     showImportToast,
     t,
+    localSkillUploading,
   ]);
+
+  const uploadLocalSkill = useCallback(
+    async (file: File) => {
+      if (localSkillUploading || importProgress) return;
+      setLocalSkillUploading(true);
+      setLocalSkillUploadError(null);
+      setLocalSkillUploadResult(null);
+      try {
+        const installed = await installUploadedSkill(file);
+        if (installed.length === 0) {
+          throw new Error(t("settings.skillsLocalUploadNoSkills"));
+        }
+        setLocalSkillUploadResult({ fileName: file.name, count: installed.length });
+        await refresh({ silent: true });
+      } catch (error) {
+        setLocalSkillUploadError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setLocalSkillUploading(false);
+      }
+    },
+    [importProgress, localSkillUploading, refresh, t],
+  );
 
   // Drop installed skills from import selection (cannot re-import).
   useEffect(() => {
@@ -2514,6 +2546,9 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
                       importErrors={importErrors}
                       importedCount={importedCount}
                       importToast={importToast}
+                      localSkillUploading={localSkillUploading}
+                      localSkillUploadError={localSkillUploadError}
+                      localSkillUploadResult={localSkillUploadResult}
                       onDismissImportToast={() => {
                         if (importToastTimerRef.current !== null) {
                           window.clearTimeout(importToastTimerRef.current);
@@ -2526,6 +2561,7 @@ export function SkillsHubPage(props: SkillsHubPageProps) {
                       onBatchToggle={batchToggleExternalSkills}
                       onRescan={() => void rescanExternalSkills()}
                       onImport={() => void importSelectedExternalSkills()}
+                      onUploadLocalSkill={(file) => void uploadLocalSkill(file)}
                     />
                   )}
                 </>
@@ -2679,12 +2715,16 @@ function SkillsImportView(props: {
   importErrors: Array<{ baseDir: string; name: string; message: string }>;
   importedCount: number | null;
   importToast: string | null;
+  localSkillUploading: boolean;
+  localSkillUploadError: string | null;
+  localSkillUploadResult: { fileName: string; count: number } | null;
   onDismissImportToast: () => void;
   bulkMode: boolean;
   onToggle: (baseDir: string) => void;
   onBatchToggle: (baseDirs: string[], on: boolean) => void;
   onRescan: () => void;
   onImport: () => void;
+  onUploadLocalSkill: (file: File) => void;
 }) {
   const {
     scans,
@@ -2697,15 +2737,20 @@ function SkillsImportView(props: {
     importErrors,
     importedCount,
     importToast,
+    localSkillUploading,
+    localSkillUploadError,
+    localSkillUploadResult,
     onDismissImportToast,
     bulkMode,
     onToggle,
     onBatchToggle,
     onRescan,
     onImport,
+    onUploadLocalSkill,
   } = props;
   const { t } = useLocale();
   const bulkAnchorRef = useRef<string | null>(null);
+  const localSkillInputRef = useRef<HTMLInputElement | null>(null);
 
   const normalizedQuery = query.trim().toLowerCase();
   const filteredScans = useMemo(
@@ -2723,6 +2768,7 @@ function SkillsImportView(props: {
     [scans, normalizedQuery],
   );
   const importing = importProgress !== null;
+  const operationInProgress = importing || localSkillUploading;
   const importableSelectedCount = useMemo(() => {
     let count = 0;
     for (const scan of scans) {
@@ -2792,6 +2838,75 @@ function SkillsImportView(props: {
         </div>
       ) : null}
       <div className="flex flex-col gap-4">
+        <input
+          ref={localSkillInputRef}
+          type="file"
+          accept={LOCAL_SKILL_UPLOAD_ACCEPT}
+          className="hidden"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = "";
+            if (file) onUploadLocalSkill(file);
+          }}
+        />
+        <GlassPanel className="hub-panel-enter overflow-hidden">
+          <div
+            role="group"
+            aria-label={t("settings.skillsLocalUploadTitle")}
+            className="flex flex-col gap-3 sm:flex-row sm:items-center"
+            onDragOver={(event) => {
+              event.preventDefault();
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (operationInProgress) return;
+              const file = event.dataTransfer.files?.[0];
+              if (file) onUploadLocalSkill(file);
+            }}
+          >
+            <div className="flex min-w-0 flex-1 items-start gap-3">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-border/45 bg-background/75 text-foreground/80">
+                <Upload className="h-4.5 w-4.5" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-[13px] font-semibold text-foreground">
+                  {t("settings.skillsLocalUploadTitle")}
+                </div>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+                  {t("settings.skillsLocalUploadDesc")}
+                </p>
+                {localSkillUploadError ? (
+                  <p className="mt-1.5 break-words text-[11px] text-destructive">
+                    {t("settings.skillsLocalUploadFailed")}: {localSkillUploadError}
+                  </p>
+                ) : localSkillUploadResult ? (
+                  <p className="mt-1.5 text-[11px] text-[hsl(var(--chat-success))]">
+                    {t("settings.skillsLocalUploadSuccess")
+                      .replace("{fileName}", localSkillUploadResult.fileName)
+                      .replace("{count}", String(localSkillUploadResult.count))}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <Button
+              type="button"
+              size="sm"
+              className="shrink-0 gap-1.5 rounded-full"
+              disabled={operationInProgress}
+              onClick={() => localSkillInputRef.current?.click()}
+            >
+              {localSkillUploading ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Upload className="h-3.5 w-3.5" />
+              )}
+              {localSkillUploading
+                ? t("settings.skillsLocalUploading")
+                : t("settings.skillsLocalUploadChoose")}
+            </Button>
+          </div>
+        </GlassPanel>
+
         {error ? (
           <GlassPanel tone="error" className="hub-panel-enter">
             <div className="flex items-center gap-2">
@@ -2891,7 +3006,7 @@ function SkillsImportView(props: {
                   variant="outline"
                   size="sm"
                   className="gap-1.5 rounded-full"
-                  disabled={loading || importing}
+                  disabled={loading || operationInProgress}
                   onClick={onRescan}
                 >
                   <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
@@ -2901,7 +3016,7 @@ function SkillsImportView(props: {
                   <Button
                     size="sm"
                     className="gap-1.5 rounded-full"
-                    disabled={selected.size === 0 || importing || loading}
+                    disabled={selected.size === 0 || operationInProgress || loading}
                     onClick={onImport}
                   >
                     {importing ? (
@@ -2976,7 +3091,7 @@ function SkillsImportView(props: {
                         variant="outline"
                         size="sm"
                         className="gap-1.5 rounded-full"
-                        disabled={importing || selectableVisibleBaseDirs.length === 0}
+                        disabled={operationInProgress || selectableVisibleBaseDirs.length === 0}
                         onClick={() =>
                           onBatchToggle(selectableVisibleBaseDirs, !allVisibleSelected)
                         }
@@ -3001,7 +3116,7 @@ function SkillsImportView(props: {
                       {activeScan.skills.map((skill) => {
                         const alreadyInstalled = installedNames.has(skill.name);
                         const checked = !alreadyInstalled && selected.has(skill.baseDir);
-                        const locked = alreadyInstalled || importing;
+                        const locked = alreadyInstalled || operationInProgress;
                         return (
                           <button
                             key={skill.baseDir}
@@ -3040,7 +3155,7 @@ function SkillsImportView(props: {
                                 : checked
                                   ? "border-primary/60 bg-primary/5 shadow-sm shadow-primary/10"
                                   : "border-border/40 bg-background/60 hover:border-border/70 hover:bg-background/85",
-                              importing && !alreadyInstalled ? "opacity-60" : null,
+                              operationInProgress && !alreadyInstalled ? "opacity-60" : null,
                             )}
                           >
                             <span
@@ -3098,7 +3213,7 @@ function SkillsImportView(props: {
                 </span>
                 <button
                   type="button"
-                  disabled={importing || loading}
+                  disabled={operationInProgress || loading}
                   className="inline-flex h-7 items-center rounded-full bg-foreground px-3 text-[12px] font-medium text-background transition-colors hover:bg-foreground/90 disabled:cursor-not-allowed disabled:opacity-40"
                   onClick={onImport}
                 >

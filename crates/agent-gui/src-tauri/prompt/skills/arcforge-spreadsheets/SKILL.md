@@ -16,7 +16,7 @@ Produce reviewable spreadsheet deliverables with ArcForge's bundled Office Runti
    - Create: `document=spreadsheet`, `action=create`, `spec_path=<workspace-json-path>`, `output_path=<workspace-output.xlsx>`.
    - Modify: `document=spreadsheet`, `action=patch`, `input_path=<workspace-input.xlsx>`, `spec_path=<workspace-json-path>`, `output_path=<workspace-output.xlsx>`.
 
-4. Use `SpreadsheetCode` only when the requested algorithm, layout, or openpyxl feature cannot be represented cleanly by the JSON schema. Read `references/code-api.md`, write a reviewable workspace `.py` file, then call `SpreadsheetCode` with its path, an optional input workbook, and the output workbook.
+4. Use `SpreadsheetCode` only when the requested algorithm, layout, or openpyxl feature cannot be represented cleanly by the JSON schema. Read `references/code-api.md`, write a reviewable workspace `.py` file that uses the injected `workbook` name, then call `SpreadsheetCode` with its path, an optional input workbook, and the output workbook. Never introduce `wb` in newly generated scripts; it exists only as a runtime compatibility alias for older scripts.
 5. Inspect the generated workbook with `OfficeRuntime` using `action=inspect`, then inspect it with ArcForge's Read tool.
 6. Report the output path, sheet names, dimensions, formula count, chart count, script hash when applicable, and any validation limitation.
 

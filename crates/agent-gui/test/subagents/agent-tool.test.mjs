@@ -710,6 +710,26 @@ test("failed runs keep their worktree", async () => {
   assert.equal(harness.storeIpc.appliedSaves.at(-1).run.status, "failed");
 });
 
+test("worktree provisioning failure does not leave the code task running", async () => {
+  const harness = await createSubagentHarness({
+    worktreeOptions: { createError: new Error("git worktree add failed") },
+  });
+  const result = await harness.bundle.executeToolCall(
+    createAgentToolCall({
+      agents: [{ id: "unprovisioned", prompt: "edit it", mode: "worktree" }],
+    }),
+  );
+
+  assert.equal(result.isError, true);
+  const report = result.details.agents[0];
+  assert.equal(report.status, "failed");
+  assert.equal(report.codeTaskState, "backend_failed");
+  assert.equal(report.rounds, 0);
+  assert.equal(report.toolCalls, 0);
+  assert.equal(harness.runnerCalls.length, 0);
+  assert.equal(harness.worktreeIpc.statuses.length, 0);
+});
+
 test("child tool gating rejects tools outside the selected registry", async () => {
   const harness = await createSubagentHarness({
     runnerToolCalls: [

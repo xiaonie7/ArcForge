@@ -14,14 +14,14 @@ Use `SpreadsheetCode` only when `OfficeRuntime` JSON create or patch operations 
 
 The runtime injects these names:
 
-- Workbook object: `workbook`
+- Workbook object: `workbook` (canonical). The runtime also exposes `wb` only as a compatibility alias for older scripts.
 - Styles: `Alignment`, `Border`, `Font`, `GradientFill`, `NamedStyle`, `PatternFill`, `Protection`, `Side`
 - Charts: `AreaChart`, `BarChart`, `LineChart`, `PieChart`, `Reference`
 - Worksheet helpers: `Comment`, `Table`, `TableStyleInfo`, `get_column_letter`
 - Values: `Decimal`, `date`, `datetime`, `timedelta`, `copy`
 - Safe builtins: `abs`, `all`, `any`, `bool`, `dict`, `enumerate`, `float`, `int`, `isinstance`, `len`, `list`, `max`, `min`, `range`, `reversed`, `round`, `set`, `sorted`, `str`, `sum`, `tuple`, `zip`, and common exception classes.
 
-Use normal openpyxl workbook and worksheet methods through `workbook`. Do not import openpyxl.
+Always generate new scripts with `workbook`; never introduce `wb` in new code. The `wb` alias is runtime-only backward compatibility. Use normal openpyxl workbook and worksheet methods through `workbook`, and do not import openpyxl.
 
 ## Example: create a workbook
 

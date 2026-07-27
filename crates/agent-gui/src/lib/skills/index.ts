@@ -93,6 +93,8 @@ export type SkillInstallResult = {
   backup?: string | null;
   skillFile: string;
 };
+export const MAX_LOCAL_SKILL_UPLOAD_BYTES = 40 * 1024 * 1024;
+export const LOCAL_SKILL_UPLOAD_ACCEPT = ".zip,.skill,.md,.json";
 export type SkillInstallJobSnapshot = {
   jobId: string;
   phase: string;
@@ -526,6 +528,7 @@ export async function manageSkill(
   const action = typeof params.action === "string" ? params.action : "";
   if (
     action === "install" ||
+    action === "install_upload" ||
     action === "create" ||
     action === "delete" ||
     action === "clawhub_install" ||
@@ -534,6 +537,48 @@ export async function manageSkill(
     invalidateSkillsDiscoveryCache();
   }
   return response;
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function isSupportedLocalSkillUpload(fileName: string): boolean {
+  const lowerName = fileName.trim().toLowerCase();
+  return (
+    lowerName === "skill.md" ||
+    lowerName === "skill.json" ||
+    lowerName.endsWith(".zip") ||
+    lowerName.endsWith(".skill")
+  );
+}
+
+export async function installUploadedSkill(file: File): Promise<SkillInstallResult[]> {
+  if (!isSupportedLocalSkillUpload(file.name)) {
+    throw new Error("Only .zip/.skill archives, SKILL.md, and skill.json can be uploaded");
+  }
+  if (file.size === 0) {
+    throw new Error("The selected Skill file is empty");
+  }
+  if (file.size > MAX_LOCAL_SKILL_UPLOAD_BYTES) {
+    throw new Error(
+      `The selected Skill file is larger than ${MAX_LOCAL_SKILL_UPLOAD_BYTES / 1024 / 1024} MB`,
+    );
+  }
+
+  const response = await manageSkill({
+    action: "install_upload",
+    fileName: file.name,
+    contentBase64: arrayBufferToBase64(await file.arrayBuffer()),
+    conflict: "backup",
+  });
+  return response.installed ?? [];
 }
 
 export async function scanExternalSkills(): Promise<ExternalToolScan[]> {

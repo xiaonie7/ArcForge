@@ -88,6 +88,7 @@ FORBIDDEN_CODE_ATTRIBUTES = {
 }
 PROTECTED_CODE_NAMES = {
     "workbook",
+    "wb",
     "Alignment",
     "AreaChart",
     "BarChart",
@@ -719,6 +720,7 @@ def spreadsheet_code_environment(workbook: Any) -> Dict[str, Any]:
     return {
         "__builtins__": SAFE_CODE_BUILTINS,
         "workbook": workbook,
+        "wb": workbook,
         "Alignment": Alignment,
         "AreaChart": AreaChart,
         "BarChart": BarChart,

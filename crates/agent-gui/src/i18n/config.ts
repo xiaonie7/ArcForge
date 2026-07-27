@@ -1764,6 +1764,14 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.skillsHubInstalledTab": "已安装",
     "settings.skillsHubStoreTab": "技能商店",
     "settings.skillsHubImportTab": "本地导入",
+    "settings.skillsLocalUploadTitle": "上传本地 Skill",
+    "settings.skillsLocalUploadDesc":
+      "选择或拖入 .zip、.skill、SKILL.md、skill.json 文件（最大 40 MB）；压缩包可包含多个 Skills。",
+    "settings.skillsLocalUploadChoose": "选择文件",
+    "settings.skillsLocalUploading": "正在安装...",
+    "settings.skillsLocalUploadFailed": "上传安装失败",
+    "settings.skillsLocalUploadSuccess": "已从 {fileName} 安装 {count} 个 Skill",
+    "settings.skillsLocalUploadNoSkills": "上传文件中没有可安装的 Skill",
     "settings.skillsImportDesc":
       "扫描本机 Claude Code、Codex、CodeBuddy 的技能目录，勾选后导入到 ArcForge。",
     "settings.skillsImportOverwriteHint": "同名技能将自动备份后覆盖。",
@@ -3803,6 +3811,14 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.skillsHubInstalledTab": "Installed",
     "settings.skillsHubStoreTab": "Skills Store",
     "settings.skillsHubImportTab": "Local Import",
+    "settings.skillsLocalUploadTitle": "Upload a local Skill",
+    "settings.skillsLocalUploadDesc":
+      "Choose or drop a .zip, .skill, SKILL.md, or skill.json file (up to 40 MB). Archives may contain multiple Skills.",
+    "settings.skillsLocalUploadChoose": "Choose file",
+    "settings.skillsLocalUploading": "Installing...",
+    "settings.skillsLocalUploadFailed": "Upload install failed",
+    "settings.skillsLocalUploadSuccess": "Installed {count} Skill(s) from {fileName}",
+    "settings.skillsLocalUploadNoSkills": "No installable Skill was found in the upload",
     "settings.skillsImportDesc":
       "Scan local Claude Code, Codex, and CodeBuddy skill directories, then pick skills to import into ArcForge.",
     "settings.skillsImportOverwriteHint":

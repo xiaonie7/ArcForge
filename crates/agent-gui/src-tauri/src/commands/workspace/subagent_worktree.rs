@@ -453,7 +453,19 @@ fn is_worktree_name_collision(message: &str) -> bool {
 }
 
 fn display_path(path: &Path) -> String {
-    path.to_string_lossy().to_string()
+    // `fs::canonicalize` returns a verbatim (`\\?\`) path on Windows. Git for
+    // Windows does not accept that prefix as a `worktree add` path and rewrites
+    // it to `//?/...`, which then fails with `Invalid argument`. Keep verbatim
+    // paths for Rust filesystem operations, but expose classic paths to Git and
+    // the frontend.
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        return format!("//{rest}");
+    }
+    if let Some(rest) = normalized.strip_prefix("//?/") {
+        return rest.to_string();
+    }
+    normalized
 }
 
 fn truncate_chars(input: String, max_chars: usize) -> (String, bool) {
@@ -1767,6 +1779,47 @@ mod tests {
         assert_eq!(sanitize_path_component("aux.txt", "repo"), "aux-item.txt");
         assert_eq!(sanitize_path_component("LPT9", "repo"), "LPT9-item");
         assert_eq!(sanitize_path_component("COM0", "repo"), "COM0");
+    }
+
+    #[test]
+    fn display_path_strips_windows_verbatim_prefix_for_git() {
+        assert_eq!(
+            display_path(Path::new(r"\\?\E:\.arcforge-subagents\Repo\agent")),
+            "E:/.arcforge-subagents/Repo/agent"
+        );
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\server\share\Repo\agent")),
+            "//server/share/Repo/agent"
+        );
+        assert_eq!(
+            display_path(Path::new("/tmp/repo/agent")),
+            "/tmp/repo/agent"
+        );
+    }
+
+    #[test]
+    fn git_accepts_worktree_target_joined_to_a_canonical_parent() -> Result<(), String> {
+        let root = temp_root("canonical-parent");
+        let repo = root.join("repo");
+        let target_parent = root.join(".arcforge-subagents").join("repo");
+        init_repo(&repo)?;
+        fs::create_dir_all(&target_parent)
+            .map_err(|err| format!("failed to create worktree parent: {err}"))?;
+
+        // On Windows this is the exact shape used by subagent_worktree_create:
+        // canonicalize returns a `\\?\` path, then the not-yet-created worktree
+        // name is joined to it before being handed to Git.
+        let canonical_parent = fs::canonicalize(&target_parent)
+            .map_err(|err| format!("failed to canonicalize worktree parent: {err}"))?;
+        #[cfg(windows)]
+        assert!(canonical_parent.to_string_lossy().starts_with(r"\\?\"));
+
+        let worktree = canonical_parent.join("candidate");
+        add_worktree(&repo, &worktree)?;
+        assert!(worktree.join(".git").is_file());
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     fn add_worktree(repo: &Path, worktree: &Path) -> Result<(), String> {

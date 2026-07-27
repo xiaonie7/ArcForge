@@ -15,9 +15,11 @@ pub(crate) fn action_from_payload(
         }
     });
     match action {
-        "read" | "list" | "install" | "install_start" | "install_status" | "install_cancel"
-        | "create" | "validate" | "package" | "delete" | "clawhub_search" | "clawhub_install"
-        | "scan_external" | "scan_external_mcp" | "scan_mcp_file" => Ok(action.to_string()),
+        "read" | "list" | "install" | "install_upload" | "install_start" | "install_status"
+        | "install_cancel" | "create" | "validate" | "package" | "delete" | "clawhub_search"
+        | "clawhub_install" | "scan_external" | "scan_external_mcp" | "scan_mcp_file" => {
+            Ok(action.to_string())
+        }
         _ => Err(format!("SkillsManager action is not supported: {action}")),
     }
 }
@@ -90,6 +92,10 @@ pub fn system_manage_skill_sync(payload: Value) -> Result<SystemManageSkillRespo
         }
         "install" => Ok(SystemManageSkillResponse {
             installed: Some(install_source_from_payload(&root, payload)?),
+            ..base
+        }),
+        "install_upload" => Ok(SystemManageSkillResponse {
+            installed: Some(install_uploaded_skill_from_payload(&root, payload)?),
             ..base
         }),
         "clawhub_install" => {
