@@ -1,0 +1,29 @@
+# Build toolchain
+PyInstaller==6.11.1
+altgraph==0.17.4
+packaging==24.2
+pefile==2023.2.7
+pyinstaller-hooks-contrib==2024.10
+pywin32-ctypes==0.2.3
+setuptools==75.6.0
+
+# WeCom connector runtime
+wecom-aibot-python-sdk==1.0.2
+aiohttp==3.13.5
+aiohappyeyeballs==2.6.2
+aiosignal==1.4.0
+async-timeout==5.0.1; python_version < "3.11"
+attrs==25.3.0
+certifi==2025.1.31
+cffi==1.17.1
+cryptography==45.0.6
+frozenlist==1.7.0
+idna==3.10
+multidict==6.6.4
+propcache==0.5.2
+pycparser==2.21
+pyee==13.0.0
+typing-extensions==4.15.0
+websockets==15.0.1
+yarl==1.24.2
+protobuf==5.29.5

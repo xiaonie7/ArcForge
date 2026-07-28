@@ -3,7 +3,7 @@ grok-build/
 /docs/
 
 # Build outputs
-/target/
+target/
 node_modules/
 dist/
 
