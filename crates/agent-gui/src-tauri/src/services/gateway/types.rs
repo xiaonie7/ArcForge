@@ -57,6 +57,23 @@ pub struct GatewayChatMessageRefEvent {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GatewayTrustedOriginEvent {
+    pub channel: String,
+    pub tenant_id: String,
+    pub bot_id: String,
+    pub external_user_id: String,
+    pub chat_id: String,
+    pub chat_type: String,
+    pub external_message_id: String,
+    pub connector_id: String,
+    pub auth_time: i64,
+    pub request_id: String,
+    pub channel_session_id: String,
+    pub channel_command: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GatewayChatRequestEvent {
     pub request_id: String,
     pub conversation_id: String,
@@ -71,6 +88,7 @@ pub struct GatewayChatRequestEvent {
     pub selected_system_tools: Vec<String>,
     pub uploaded_files: Vec<GatewayUploadedFileEvent>,
     pub queue_policy: String,
+    pub origin: Option<GatewayTrustedOriginEvent>,
 }
 
 pub(crate) fn is_complete_user_chat_message_ref(ref_value: &proto::ChatMessageRef) -> bool {

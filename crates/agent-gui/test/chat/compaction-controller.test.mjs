@@ -219,6 +219,67 @@ test("below-threshold decisions are side-effect free", async () => {
   assert.equal(recorder.events.length, 0);
 });
 
+test("forced pre-send compaction runs below threshold", async () => {
+  const controller = new CompactionController();
+  const smallState = conversationState.createConversationStateFromContext({
+    systemPrompt: "sys",
+    messages: [user("hi"), assistantWithUsage("hello", 1000)],
+  });
+  let completeCalls = 0;
+  const { recorder } = bindController(controller, {
+    complete: async () => {
+      completeCalls += 1;
+      return summaryResponse();
+    },
+    presend: {
+      baseState: smallState,
+      pendingUserText: "",
+      composeAppliedState: (state) => state,
+    },
+  });
+
+  const applied = await controller.maybeCompactPreSend({
+    budgetContext: conversationState.buildRequestContext(smallState),
+    force: true,
+  });
+
+  assert.equal(applied, true);
+  assert.equal(completeCalls, 1);
+  assert.deepEqual(
+    recorder.byKind("publishStatus").map(([, status]) => status.phase),
+    ["running", "completed"],
+  );
+});
+
+test("forced pre-send compaction refuses an empty conversation", async () => {
+  const controller = new CompactionController();
+  const emptyState = conversationState.createConversationStateFromContext({
+    systemPrompt: "sys",
+    messages: [],
+  });
+  let completeCalls = 0;
+  const { recorder } = bindController(controller, {
+    complete: async () => {
+      completeCalls += 1;
+      return summaryResponse();
+    },
+    presend: {
+      baseState: emptyState,
+      pendingUserText: "",
+      composeAppliedState: (state) => state,
+    },
+  });
+
+  const applied = await controller.maybeCompactPreSend({
+    budgetContext: conversationState.buildRequestContext(emptyState),
+    force: true,
+  });
+
+  assert.equal(applied, false);
+  assert.equal(completeCalls, 0);
+  assert.equal(recorder.events.length, 0);
+});
+
 test("single-flight: a concurrent trigger is rejected while a compaction is in flight", async () => {
   const controller = new CompactionController();
   let release;

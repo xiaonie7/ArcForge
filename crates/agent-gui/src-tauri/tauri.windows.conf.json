@@ -15,7 +15,9 @@
   },
   "bundle": {
     "externalBin": [
-      "binaries/arcforge-office-runtime"
+      "binaries/arcforge-office-runtime",
+      "binaries/arcforge-gateway",
+      "binaries/arcforge-wecom-connector"
     ],
     "targets": [
       "nsis",

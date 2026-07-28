@@ -50,6 +50,7 @@ export type CompactionDecisionReason =
   | "in-flight"
   | "below-threshold"
   | "cooldown"
+  | "forced"
   | "threshold-exceeded";
 
 export type CompactionDecision = {

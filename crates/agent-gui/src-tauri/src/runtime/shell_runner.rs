@@ -1015,13 +1015,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_explicit_bash_automation_preserves_posix_compatibility() {
-        let profiles: Vec<&'static str> = super::platform_shell_candidates(
-            "echo hi",
-            super::ShellPreference::PosixCompatible,
-        )
-        .iter()
-        .map(|candidate| candidate.profile.profile)
-        .collect();
+        let profiles: Vec<&'static str> =
+            super::platform_shell_candidates("echo hi", super::ShellPreference::PosixCompatible)
+                .iter()
+                .map(|candidate| candidate.profile.profile)
+                .collect();
 
         if super::find_git_bash().is_some() {
             assert_eq!(profiles[0], "windows-git-bash");
@@ -1135,10 +1133,8 @@ mod tests {
     fn run_shell_script_can_be_cancelled_before_timeout() {
         let registry = ShellRunRegistry::default();
         let token = registry.register("cancel-test");
-        let temp_dir = std::env::temp_dir().join(format!(
-            "arcforge-shell-cancel-test-{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("arcforge-shell-cancel-test-{}", std::process::id()));
         let _ = fs::create_dir_all(&temp_dir);
 
         let worker_token = Arc::clone(&token);

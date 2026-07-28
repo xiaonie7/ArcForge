@@ -8,6 +8,21 @@ export function normalizeBaseUrl(input: string) {
   return normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
 }
 
+export function isSupportedGatewayUrl(input: string) {
+  const normalized = normalizeBaseUrl(input);
+  if (!normalized) return false;
+
+  try {
+    const url = new URL(normalized);
+    return (
+      ["http:", "https:", "ws:", "wss:"].includes(url.protocol.toLowerCase()) &&
+      Boolean(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeApiKey(input: string) {
   return input.trim();
 }

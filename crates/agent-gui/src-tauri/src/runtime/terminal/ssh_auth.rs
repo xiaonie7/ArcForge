@@ -332,8 +332,8 @@ pub(crate) async fn authenticate_ssh_handle(
             Err("SSH authentication failed".to_string())
         }
         ResolvedSshAuth::PrivateKey { key, passphrase } => {
-            let key_pair = russh::keys::decode_secret_key(&key, passphrase.as_deref())
-                .map_err(|error| {
+            let key_pair =
+                russh::keys::decode_secret_key(&key, passphrase.as_deref()).map_err(|error| {
                     describe_ssh_private_key_decode_error(&error, passphrase.is_some())
                 })?;
             // Negotiate the RSA signature hash from the server's

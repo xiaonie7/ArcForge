@@ -2,6 +2,7 @@ pub mod automation;
 pub mod chat_run_ledger;
 pub mod gateway;
 pub mod gateway_bridge;
+pub mod local_wecom;
 pub mod memory;
 pub mod power_activity;
 pub mod provider_models;

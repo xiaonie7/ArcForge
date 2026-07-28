@@ -564,7 +564,10 @@ fn upload_import_root_in(base: &Path) -> Result<PathBuf, String> {
             Err(e) => return Err(format!("创建上传目录失败 {}: {e}", root.display())),
         }
     }
-    Err(format!("创建上传目录失败：{} 下批次名冲突过多", base.display()))
+    Err(format!(
+        "创建上传目录失败：{} 下批次名冲突过多",
+        base.display()
+    ))
 }
 
 fn upload_import_root() -> Result<PathBuf, String> {
@@ -1431,7 +1434,10 @@ mod tests {
 
     #[test]
     fn sanitize_uploaded_file_name_avoids_windows_reserved_names() {
-        assert_eq!(sanitize_uploaded_file_name("safe name.txt"), "safe name.txt");
+        assert_eq!(
+            sanitize_uploaded_file_name("safe name.txt"),
+            "safe name.txt"
+        );
         assert_eq!(sanitize_uploaded_file_name("CON.txt"), "CON_file.txt");
         assert_eq!(sanitize_uploaded_file_name("aux"), "aux_file");
         assert_eq!(sanitize_uploaded_file_name("LPT9.log"), "LPT9_file.log");
@@ -1445,11 +1451,23 @@ mod tests {
             sanitize_uploaded_file_name("第三季度 财务:报表.xlsx"),
             "第三季度 财务_报表.xlsx"
         );
-        assert_eq!(sanitize_uploaded_file_name("русский файл.txt"), "русский файл.txt");
-        assert_eq!(sanitize_uploaded_file_name("面试题（最终版）.docx"), "面试题（最终版）.docx");
+        assert_eq!(
+            sanitize_uploaded_file_name("русский файл.txt"),
+            "русский файл.txt"
+        );
+        assert_eq!(
+            sanitize_uploaded_file_name("面试题（最终版）.docx"),
+            "面试题（最终版）.docx"
+        );
         // 路径分隔符与遍历序列被压成单段组件；控制字符被替换。
-        assert_eq!(sanitize_uploaded_file_name("../../秘密.txt"), "_.._秘密.txt");
-        assert_eq!(sanitize_uploaded_file_name("恶意\u{7}响铃.txt"), "恶意_响铃.txt");
+        assert_eq!(
+            sanitize_uploaded_file_name("../../秘密.txt"),
+            "_.._秘密.txt"
+        );
+        assert_eq!(
+            sanitize_uploaded_file_name("恶意\u{7}响铃.txt"),
+            "恶意_响铃.txt"
+        );
         // 全部非法字符时回退到占位名。
         assert_eq!(sanitize_uploaded_file_name("..."), "file");
     }

@@ -30,6 +30,7 @@ type PersistedSettingsResponse = {
   agents?: unknown | null;
   ssh?: unknown | null;
   remote?: unknown | null;
+  wecom?: unknown | null;
   memory?: unknown | null;
   defaultWorkdir?: unknown | null;
 };
@@ -57,6 +58,7 @@ type SshPatchApplyResponse = {
 
 export type PersistSettingsResult = {
   ssh?: AppSettings["ssh"];
+  wecom?: AppSettings["wecom"];
   conflict?: string;
 };
 
@@ -201,6 +203,7 @@ export async function loadPersistedSettingsWithDefaults(): Promise<PersistedSett
     agents: (persisted?.agents ?? defaults.agents) as AppSettings["agents"],
     ssh: (persisted?.ssh ?? defaults.ssh) as AppSettings["ssh"],
     remote: (persisted?.remote ?? defaults.remote) as AppSettings["remote"],
+    wecom: (persisted?.wecom ?? defaults.wecom) as AppSettings["wecom"],
     memory: (persisted?.memory ?? defaults.memory) as AppSettings["memory"],
     skills: localUi.skills,
     chatRuntimeControls: localUi.chatRuntimeControls,
@@ -284,11 +287,26 @@ export async function persistSettings(
     );
   }
 
-  if (hasChanged(prev.remote, next.remote)) {
-    tasks.push(
-      invoke("settings_save_remote", {
+  const remoteSave = hasChanged(prev.remote, next.remote)
+    ? invoke("settings_save_remote", {
         payload: next.remote,
-      } as any),
+      } as any)
+    : null;
+  if (remoteSave) {
+    tasks.push(remoteSave);
+  }
+
+  if (hasChanged(prev.wecom, next.wecom)) {
+    // Secret values are intentionally not part of AppSettings. The command
+    // preserves the stored secrets unless an explicit write-only update is
+    // issued by the WeCom settings panel.
+    tasks.push(
+      (remoteSave ?? Promise.resolve()).then(async () => {
+        const wecom = await invoke<AppSettings["wecom"]>("settings_save_wecom", {
+          payload: next.wecom,
+        } as any);
+        result.wecom = wecom;
+      }),
     );
   }
 

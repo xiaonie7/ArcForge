@@ -3,6 +3,11 @@ import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
 
 import type { HistoryMessageRef } from "../../../lib/chat/conversation/conversationState";
+import {
+  derivePrincipalConversationId,
+  type PrincipalContext,
+  resolvePrincipalContext,
+} from "../../../lib/security/principalContext";
 import { normalizeChatRuntimeControls, normalizeSystemToolSelection } from "../../../lib/settings";
 import { createUuid } from "../../../lib/shared/id";
 import {
@@ -16,6 +21,10 @@ import {
 } from "./gatewayBridgeTypes";
 
 type UseGatewayBridgeListenersParams = GatewayBridgeRuntimeRefs & {
+  /** Group WeCom messages are opt-in and checked before queueing or execution. */
+  allowWecomGroupMessages: boolean;
+  /** Desktop-owned ACL. Channel payloads can never supply or modify it. */
+  wecomAccessPolicy?: unknown;
   queueGatewayBridgeEventForRequest: (
     requestId: string,
     event: Record<string, unknown>,
@@ -28,6 +37,7 @@ type UseGatewayBridgeListenersParams = GatewayBridgeRuntimeRefs & {
   enqueueGatewayChatRequest: (
     claimed: GatewayChatClaimedRequest,
     conversationId: string,
+    principal?: PrincipalContext,
   ) => Promise<boolean>;
   isConversationRunning: (conversationId: string) => boolean;
   getConversationAbortController: (conversationId: string) => AbortController | null;
@@ -326,12 +336,17 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
       });
     };
 
-    const markQueuedInGui = async (claimed: GatewayChatClaimedRequest, conversationId: string) => {
+    const markQueuedInGui = async (
+      claimed: GatewayChatClaimedRequest,
+      conversationId: string,
+      principal?: PrincipalContext,
+    ) => {
       const requestId = claimed.requestId.trim();
       if (!requestId) return false;
       const queued = await latestParamsRef.current.enqueueGatewayChatRequest(
         claimed,
         conversationId,
+        principal,
       );
       if (!queued) return false;
       await invoke("gateway_chat_mark_queued_in_gui", {
@@ -349,17 +364,58 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
       const clientRequestId = payload.clientRequestId?.trim() ?? "";
       const message = payload.message.trim();
       const uploadedFiles = Array.isArray(payload.uploadedFiles) ? payload.uploadedFiles : [];
-      const targetConversationId = payload.conversationId.trim();
+      let targetConversationId = payload.conversationId.trim();
       const queuePolicy = normalizeQueuePolicy(payload.queuePolicy);
       let resolvedConversationId = targetConversationId;
       let gatewayBridgeRequest: ActiveGatewayBridgeRequest | null = null;
+      let principal: PrincipalContext | undefined;
       let claimedRequest = false;
 
       if (!requestId) {
         return;
       }
+      if (payload.origin) {
+        try {
+          principal = await resolvePrincipalContext(
+            payload.origin,
+            requestId,
+            latestParamsRef.current.wecomAccessPolicy,
+          );
+          // The connector cannot select or reuse a conversation id. Derive the
+          // owner-scoped id from the authenticated principal instead.
+          targetConversationId = await derivePrincipalConversationId(principal);
+          resolvedConversationId = targetConversationId;
+        } catch (error) {
+          const message = asErrorMessage(error, "Invalid trusted channel identity.");
+          failClaimedRequest(requestId, targetConversationId, "invalid_channel_identity", message);
+          stopHeartbeat(requestId);
+          return;
+        }
+      }
+      if (principal?.chatType === "group" && !latestParamsRef.current.allowWecomGroupMessages) {
+        const message = "WeCom group messages are disabled in this desktop app.";
+        latestParamsRef.current.queueGatewayBridgeEventForRequest(
+          requestId,
+          { type: "error", message, conversation_id: targetConversationId },
+          { workerId },
+        );
+        failClaimedRequest(requestId, targetConversationId, "group_messages_disabled", message);
+        stopHeartbeat(requestId);
+        return;
+      }
+      if (principal?.channelCommand === "help") {
+        const message = "WeCom /help is handled by the authenticated connector.";
+        latestParamsRef.current.queueGatewayBridgeEventForRequest(
+          requestId,
+          { type: "error", message, conversation_id: targetConversationId },
+          { workerId },
+        );
+        failClaimedRequest(requestId, targetConversationId, "unsupported_channel_command", message);
+        stopHeartbeat(requestId);
+        return;
+      }
       startHeartbeat(requestId);
-      if (!message && uploadedFiles.length === 0) {
+      if (!message && uploadedFiles.length === 0 && !principal?.channelCommand) {
         latestParamsRef.current.queueGatewayBridgeEventForRequest(
           requestId,
           {
@@ -386,10 +442,29 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
         targetConversationId,
       );
       if (claimResult !== "claimed") {
+        if (principal?.channelCommand === "new" && claimResult === "conversation_busy") {
+          latestParamsRef.current.queueGatewayBridgeEventForRequest(
+            requestId,
+            {
+              type: "error",
+              message: GATEWAY_CHAT_CONVERSATION_BUSY_MESSAGE,
+              conversation_id: targetConversationId,
+            },
+            { workerId },
+          );
+          failClaimedRequest(
+            requestId,
+            targetConversationId,
+            "conversation_busy",
+            GATEWAY_CHAT_CONVERSATION_BUSY_MESSAGE,
+          );
+          stopHeartbeat(requestId);
+          return;
+        }
         if (claimResult === "conversation_busy") {
           if (targetConversationId) {
             try {
-              if (await markQueuedInGui(claimed, targetConversationId)) {
+              if (await markQueuedInGui(claimed, targetConversationId, principal)) {
                 return;
               }
             } catch (error) {
@@ -454,7 +529,10 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
             latestParamsRef.current.isConversationRunning(targetConversationId) ||
             latestParamsRef.current.getConversationAbortController(targetConversationId))
         ) {
-          if (await markQueuedInGui(claimed, targetConversationId)) {
+          if (principal?.channelCommand === "new") {
+            throw new Error(`Conversation is already running: ${targetConversationId}`);
+          }
+          if (await markQueuedInGui(claimed, targetConversationId, principal)) {
             return;
           }
           return;
@@ -466,6 +544,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
             {
               rebased: payload.rebased === true,
               baseMessageRef,
+              createIfMissing: Boolean(principal),
             },
           );
 
@@ -483,11 +562,53 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
           latestParamsRef.current.isConversationRunning(resolvedConversationId) ||
           latestParamsRef.current.getConversationAbortController(resolvedConversationId)
         ) {
+          if (principal?.channelCommand === "new") {
+            throw new Error(`Conversation is already running: ${resolvedConversationId}`);
+          }
           if (
-            await markQueuedInGui(claimed, runningRequest?.conversationId || resolvedConversationId)
+            await markQueuedInGui(
+              claimed,
+              runningRequest?.conversationId || resolvedConversationId,
+              principal,
+            )
           ) {
             return;
           }
+          return;
+        }
+
+        if (principal?.channelCommand === "new") {
+          await invoke("gateway_chat_mark_started", {
+            request_id: requestId,
+            conversation_id: resolvedConversationId,
+            worker_id: workerId,
+          } as any);
+          latestParamsRef.current.queueGatewayBridgeEventForRequest(
+            requestId,
+            {
+              type: "token",
+              text: "已开启新会话。",
+              conversation_id: resolvedConversationId,
+            },
+            { workerId },
+          );
+          // Flush the short token response before the terminal event reaches
+          // the channel subscriber.
+          await latestParamsRef.current.queueGatewayBridgeEventForRequest(
+            requestId,
+            {
+              type: "tool_status",
+              status: null,
+              isCompaction: false,
+              conversation_id: resolvedConversationId,
+            },
+            { workerId },
+          );
+          await invoke("gateway_chat_complete", {
+            request_id: requestId,
+            conversation_id: resolvedConversationId,
+            worker_id: workerId,
+          } as any);
           return;
         }
 
@@ -497,13 +618,18 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
           clientRequestId: clientRequestId || undefined,
           workerId,
           startedAt: Date.now(),
-          selectedModelOverride: payload.selectedModel,
+          selectedModelOverride: principal ? undefined : payload.selectedModel,
           runtimeControlsOverride: payload.runtimeControls
             ? normalizeChatRuntimeControls(payload.runtimeControls)
             : undefined,
-          executionModeOverride: normalizeGatewayExecutionMode(payload.executionMode),
-          workdirOverride: normalizeGatewayWorkdir(payload.workdir),
-          selectedSystemToolIdsOverride: normalizeSystemToolSelection(payload.selectedSystemTools),
+          executionModeOverride: principal
+            ? undefined
+            : normalizeGatewayExecutionMode(payload.executionMode),
+          workdirOverride: principal ? undefined : normalizeGatewayWorkdir(payload.workdir),
+          selectedSystemToolIdsOverride: principal
+            ? undefined
+            : normalizeSystemToolSelection(payload.selectedSystemTools),
+          principal,
         });
         const markRuntimeStarted = async () => {
           await invoke("gateway_chat_mark_started", {
@@ -704,10 +830,12 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
 
     void listen<GatewayChatCancelEvent>("gateway:chat-cancel", (event) => {
       const requestId = event.payload.requestId.trim();
-      const explicitConversationId = event.payload.conversationId.trim();
+      // A request id is the authenticated binding for channel requests. Local
+      // desktop requests may still use the conversation id supplied by the
+      // Rust transport when no active bridge entry exists yet.
       const conversationId =
         getActiveGatewayBridgeRequestByRequestId(requestId)?.conversationId ??
-        explicitConversationId;
+        event.payload.conversationId.trim();
       if (!conversationId) {
         return;
       }

@@ -1,5 +1,6 @@
 import type { Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 
+import type { PrincipalContext } from "../security/principalContext";
 import type {
   SubagentBatchDetails,
   SubagentCardDetails,
@@ -30,10 +31,14 @@ export type BuiltinToolMetadata = {
   kind: string;
   isReadOnly: boolean;
   displayCategory: BuiltinToolDisplayCategory;
+  /** Stable backing resource id, for example an MCP server id. */
+  resourceId?: string;
 };
 
 export type BuiltinToolExecutionContext = {
   parentToolCall: ToolCall;
+  /** Trusted channel identity. Never derive this from tool arguments or text. */
+  principal?: PrincipalContext;
   subagentScheduler?: SubagentScheduler;
   emitToolCall?: (toolCall: ToolCall) => void;
   emitToolExecutionStart?: (toolCall: ToolCall) => void;

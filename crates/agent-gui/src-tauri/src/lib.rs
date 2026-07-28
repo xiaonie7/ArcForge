@@ -130,6 +130,10 @@ macro_rules! app_invoke_handler {
             commands::settings::settings_apply_ssh_patch,
             commands::settings::settings_reset_ssh_known_host,
             commands::settings::settings_save_remote,
+            commands::settings::settings_save_wecom,
+            commands::wecom_runtime::wecom_runtime_status,
+            commands::wecom_runtime::wecom_runtime_restart,
+            commands::wecom_runtime::wecom_runtime_logs,
             commands::settings::settings_save_memory,
             commands::app::app_runtime_platform,
             commands::app::app_runtime_environment,
@@ -552,11 +556,19 @@ pub fn run() {
                 if let Err(error) = gateway_controller.start() {
                     eprintln!("failed to start remote gateway controller: {error}");
                 }
+                let wecom_supervisor = Arc::new(services::local_wecom::LocalWecomSupervisor::new(
+                    app.handle().clone(),
+                    Arc::clone(&gateway_controller),
+                ));
+                if let Err(error) = wecom_supervisor.start() {
+                    eprintln!("failed to start local WeCom runtime supervisor: {error}");
+                }
+                app.manage(Arc::clone(&wecom_supervisor));
                 tauri::async_runtime::spawn({
-                    let gateway_controller = Arc::clone(&gateway_controller);
+                    let wecom_supervisor = Arc::clone(&wecom_supervisor);
                     async move {
-                        if let Err(error) = gateway_controller.reload_from_db().await {
-                            eprintln!("failed to load remote gateway settings: {error}");
+                        if let Err(error) = wecom_supervisor.reload_from_db().await {
+                            eprintln!("failed to load WeCom runtime settings: {error}");
                         }
                     }
                 });
@@ -622,6 +634,11 @@ pub fn run() {
             } else {
                 // Real exit: reclaim every non-isolated managed process
                 // before the OS tears us down (Drop is not guaranteed).
+                if let Some(supervisor) =
+                    _app.try_state::<Arc<services::local_wecom::LocalWecomSupervisor>>()
+                {
+                    supervisor.shutdown_cleanup();
+                }
                 managed_process_registry.shutdown_cleanup();
                 power_activity.clear_all();
             }

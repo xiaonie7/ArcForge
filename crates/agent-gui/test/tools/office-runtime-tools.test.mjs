@@ -24,6 +24,14 @@ const buildScript = readFileSync(
   new URL("../../scripts/build-office-sidecar.ps1", import.meta.url),
   "utf8",
 );
+const gatewayBuildScript = readFileSync(
+  new URL("../../scripts/build-gateway-sidecar.ps1", import.meta.url),
+  "utf8",
+);
+const sidecarBuildScript = readFileSync(
+  new URL("../../scripts/build-sidecars.ps1", import.meta.url),
+  "utf8",
+);
 
 test("OfficeRuntime is registered as a structured builtin tool", () => {
   assert.match(toolSource, /name: OFFICE_RUNTIME_TOOL_NAME/);
@@ -46,11 +54,25 @@ test("OfficeRuntime Rust bridge enforces workspace paths and bounded execution",
   assert.match(rustSource, /required_path\(&input\.script_path, "scriptPath"\)/);
 });
 
-test("Windows desktop builds include the generated Office Runtime sidecar", () => {
-  assert.deepEqual(windowsConfig.bundle.externalBin, ["binaries/arcforge-office-runtime"]);
-  assert.match(packageJson.scripts["sidecar:build"], /build-office-sidecar\.ps1/);
+test("Windows desktop builds include all generated sidecars", () => {
+  assert.deepEqual(windowsConfig.bundle.externalBin, [
+    "binaries/arcforge-office-runtime",
+    "binaries/arcforge-gateway",
+    "binaries/arcforge-wecom-connector",
+  ]);
+  assert.match(packageJson.scripts["sidecar:build"], /build-sidecars\.ps1/);
   assert.match(packageJson.scripts["build:desktop"], /sidecar:build/);
   assert.match(packageJson.scripts["dev:desktop"], /sidecar:build/);
+  assert.match(sidecarBuildScript, /build-office-sidecar\.ps1/);
+  assert.match(sidecarBuildScript, /build-gateway-sidecar\.ps1/);
+  assert.match(sidecarBuildScript, /build-wecom-connector-sidecar\.ps1/);
   assert.match(buildScript, /PyInstaller/);
   assert.match(buildScript, /arcforge-office-runtime-\$TargetTriple\.exe/);
+  assert.match(gatewayBuildScript, /install --frozen-lockfile/);
+  assert.match(gatewayBuildScript, /run build/);
+  assert.match(gatewayBuildScript, /arcforge-gateway-\$TargetTriple\.exe/);
+
+  const webBuildOffset = gatewayBuildScript.lastIndexOf("Build-GatewayWebAssets");
+  const goBuildOffset = gatewayBuildScript.indexOf("& $resolvedGo build");
+  assert.ok(webBuildOffset >= 0 && webBuildOffset < goBuildOffset);
 });

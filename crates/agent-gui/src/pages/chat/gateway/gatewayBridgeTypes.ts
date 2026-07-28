@@ -3,6 +3,10 @@ import type { MentionComposerDraft } from "../../../components/chat/MentionCompo
 import type { HistoryMessageRef } from "../../../lib/chat/conversation/conversationState";
 import type { PendingUploadedFile } from "../../../lib/chat/messages/uploadedFiles";
 import type {
+  PrincipalContext,
+  TrustedChannelOrigin,
+} from "../../../lib/security/principalContext";
+import type {
   ChatRuntimeControls,
   ExecutionMode,
   ProviderId,
@@ -35,6 +39,8 @@ export type GatewayChatRequestEvent = {
   selectedSystemTools?: string[];
   uploadedFiles?: PendingUploadedFile[];
   queuePolicy?: "auto" | "append" | "interrupt" | string;
+  /** Gateway-authenticated channel origin. Never populated from message text. */
+  origin?: TrustedChannelOrigin;
 };
 
 export type GatewayChatClaimedRequest = {
@@ -55,6 +61,8 @@ export type GatewayChatRequestReadyEvent = {
 export type EnsureGatewayBridgeConversationReadyOptions = {
   rebased?: boolean;
   baseMessageRef?: HistoryMessageRef;
+  /** Allocate an empty runtime when a trusted channel owns a new derived id. */
+  createIfMissing?: boolean;
 };
 
 export type GatewayChatCancelEvent = {
@@ -73,6 +81,7 @@ export type ActiveGatewayBridgeRequest = {
   executionModeOverride?: ExecutionMode;
   workdirOverride?: string;
   selectedSystemToolIdsOverride?: SystemToolId[];
+  principal?: PrincipalContext;
 };
 
 export type SendChatAction = (overrides?: {

@@ -16,22 +16,29 @@ const (
 )
 
 type Config struct {
-	Token                    string
-	HTTPAddr                 string
-	TLSCert                  string
-	TLSKey                   string
-	RequestTimeout           time.Duration
-	ChatPrepareTimeout       time.Duration
-	ChatDeliveryTimeout      time.Duration
-	ChatStartTimeout         time.Duration
-	ChatRenderStartTimeout   time.Duration
-	HeartbeatPeriod          time.Duration
-	WebSocketHeartbeatPeriod time.Duration
-	WebSocketHeartbeatGrace  time.Duration
-	WebSocketWriteTimeout    time.Duration
-	WebSocketWriteQueueSize  int
-	GRPCMaxMessageBytes      int
-	RelayBufferSeconds       int
+	Token string
+	// ChannelToken authenticates the restricted /ws/v2/channel connector.
+	// It is intentionally separate from Token (the browser/API credential).
+	ChannelToken              string
+	ChannelTenantID           string
+	ChannelBotID              string
+	ChannelConnectorID        string
+	ChannelAllowGroupMessages bool
+	HTTPAddr                  string
+	TLSCert                   string
+	TLSKey                    string
+	RequestTimeout            time.Duration
+	ChatPrepareTimeout        time.Duration
+	ChatDeliveryTimeout       time.Duration
+	ChatStartTimeout          time.Duration
+	ChatRenderStartTimeout    time.Duration
+	HeartbeatPeriod           time.Duration
+	WebSocketHeartbeatPeriod  time.Duration
+	WebSocketHeartbeatGrace   time.Duration
+	WebSocketWriteTimeout     time.Duration
+	WebSocketWriteQueueSize   int
+	GRPCMaxMessageBytes       int
+	RelayBufferSeconds        int
 
 	// GRPCAddr is accepted but unused.
 	//
@@ -48,6 +55,11 @@ func Load() *Config {
 	cfg := &Config{}
 
 	flag.StringVar(&cfg.Token, "token", getenv("ARCFORGE_GATEWAY_TOKEN", ""), "shared authentication token")
+	flag.StringVar(&cfg.ChannelToken, "channel-token", getenv("ARCFORGE_GATEWAY_CHANNEL_TOKEN", ""), "restricted channel WebSocket authentication token")
+	flag.StringVar(&cfg.ChannelTenantID, "channel-tenant-id", getenv("ARCFORGE_GATEWAY_CHANNEL_TENANT_ID", ""), "optional tenant binding for channel connectors")
+	flag.StringVar(&cfg.ChannelBotID, "channel-bot-id", getenv("ARCFORGE_GATEWAY_CHANNEL_BOT_ID", ""), "optional bot binding for channel connectors")
+	flag.StringVar(&cfg.ChannelConnectorID, "channel-connector-id", getenv("ARCFORGE_GATEWAY_CHANNEL_CONNECTOR_ID", ""), "optional connector binding for channel connectors")
+	flag.BoolVar(&cfg.ChannelAllowGroupMessages, "channel-allow-group-messages", getenvBool("ARCFORGE_GATEWAY_CHANNEL_ALLOW_GROUP_MESSAGES", false), "allow restricted channel group messages")
 	flag.StringVar(&cfg.GRPCAddr, "grpc-addr", getenv("ARCFORGE_GATEWAY_GRPC_ADDR", ""), "deprecated, no-op (v1 gRPC removed; kept for startup-script compatibility)")
 	flag.StringVar(&cfg.HTTPAddr, "http-addr", getenv("ARCFORGE_GATEWAY_HTTP_ADDR", defaultHTTPAddr()), "HTTP listen address")
 	flag.StringVar(&cfg.TLSCert, "tls-cert", getenv("ARCFORGE_GATEWAY_TLS_CERT", ""), "TLS certificate path")
@@ -68,6 +80,10 @@ func Load() *Config {
 	flag.Parse()
 
 	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.ChannelToken = strings.TrimSpace(cfg.ChannelToken)
+	cfg.ChannelTenantID = strings.TrimSpace(cfg.ChannelTenantID)
+	cfg.ChannelBotID = strings.TrimSpace(cfg.ChannelBotID)
+	cfg.ChannelConnectorID = strings.TrimSpace(cfg.ChannelConnectorID)
 	cfg.TLSCert = strings.TrimSpace(cfg.TLSCert)
 	cfg.TLSKey = strings.TrimSpace(cfg.TLSKey)
 
@@ -165,4 +181,16 @@ func getenvInt(key string, fallback int) int {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvBool(key string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(getenv(key, "")))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }

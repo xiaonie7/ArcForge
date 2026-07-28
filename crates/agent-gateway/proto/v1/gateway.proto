@@ -573,6 +573,25 @@ message GitResponse {
   string result_json = 2;
 }
 
+// TrustedOrigin is created by an authenticated gateway channel connection.
+// User-authored message content must never be used to populate these fields.
+message TrustedOrigin {
+  string channel = 1;
+  string tenant_id = 2;
+  string bot_id = 3;
+  string external_user_id = 4;
+  string chat_id = 5;
+  string chat_type = 6;
+  string external_message_id = 7;
+  string connector_id = 8;
+  int64 authenticated_at = 9;
+  string gateway_request_id = 10;
+  string channel_session_id = 11;
+  // Gateway-validated channel command. This field is never populated from
+  // ordinary user message text by the desktop runtime.
+  string channel_command = 12;
+}
+
 message ChatRequest {
   string conversation_id = 1;
   string message = 2;
@@ -584,6 +603,7 @@ message ChatRequest {
   string client_request_id = 8;
   ChatRuntimeControls runtime_controls = 9;
   string queue_policy = 10;
+  TrustedOrigin trusted_origin = 11;
 }
 
 message ChatMessageRef {

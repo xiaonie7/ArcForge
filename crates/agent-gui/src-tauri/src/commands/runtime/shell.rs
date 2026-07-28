@@ -3,9 +3,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use crate::runtime::shell_runner::{
-    run_native_shell_script, ShellRunRegistry, ShellRunResponse,
-};
+use crate::runtime::shell_runner::{run_native_shell_script, ShellRunRegistry, ShellRunResponse};
 
 #[derive(Debug, Serialize)]
 pub struct ShellCancelResponse {

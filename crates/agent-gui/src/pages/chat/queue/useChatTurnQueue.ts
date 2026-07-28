@@ -17,6 +17,7 @@ import {
   type SystemToolId,
 } from "../../../lib/settings";
 import { answerAskUserQuestion } from "../../../lib/tools/askUserQuestionTools";
+import type { PrincipalContext } from "../../../lib/security/principalContext";
 import type { ChatQueueTurnPreview } from "../components/ChatComposerBar";
 import { createTextComposerDraft } from "../composer/composerDraftText";
 import type { ActiveGatewayBridgeRequest, SendChatAction } from "../gateway/gatewayBridgeTypes";
@@ -28,6 +29,7 @@ import {
 import type { ConversationRuntimeEntry } from "../runtime/chatPageRuntime";
 import {
   appendQueuedChatTurn,
+  buildQueuedGatewayDisplayMessage,
   buildQueuedChatTurnPreview,
   type ChatQueueItemDetail,
   type ChatQueueSnapshot,
@@ -369,6 +371,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
               executionModeOverride: queuedTurn.executionMode,
               workdirOverride: queuedTurn.workdir,
               selectedSystemToolIdsOverride: queuedTurn.selectedSystemToolIds,
+              principal: gatewayRequest.principal,
             }
           : null;
         const markGatewayStarted =
@@ -382,6 +385,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
               }
             : undefined;
         const accepted = await sendActionRef.current({
+          textOverride: gatewayRequest?.principal?.channelCommand ? "" : undefined,
           composerDraftOverride: queuedTurn.draft,
           uploadedFilesOverride: queuedTurn.uploadedFiles,
           conversationIdOverride: targetConversationId,
@@ -543,31 +547,46 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
   async function enqueueGatewayChatRequest(
     claimed: GatewayChatClaimedRequest,
     conversationId: string,
+    principal?: PrincipalContext,
   ) {
     const payload = claimed.request;
     const requestId = payload.requestId.trim();
     const targetConversationId = conversationId.trim();
     const message = payload.message ?? "";
     const uploadedFiles = Array.isArray(payload.uploadedFiles) ? payload.uploadedFiles : [];
-    if (!requestId || !targetConversationId || (!message.trim() && uploadedFiles.length === 0)) {
+    const queueDisplayMessage = buildQueuedGatewayDisplayMessage(
+      message,
+      principal?.channelCommand,
+    );
+    if (
+      !requestId ||
+      !targetConversationId ||
+      (!queueDisplayMessage && uploadedFiles.length === 0)
+    ) {
       return false;
     }
 
-    const executionMode =
-      normalizeGatewayExecutionMode(payload.executionMode) ?? settings.system.executionMode;
+    const executionMode = principal
+      ? settings.system.executionMode
+      : (normalizeGatewayExecutionMode(payload.executionMode) ?? settings.system.executionMode);
     const workdir =
-      normalizeGatewayWorkdir(payload.workdir) ??
+      (principal ? undefined : normalizeGatewayWorkdir(payload.workdir)) ??
       conversationRuntimeCacheRef.current.get(targetConversationId)?.workdir ??
       displayedConversationWorkdir ??
       settings.system.workdir;
     const runtimeControls = payload.runtimeControls
       ? normalizeChatRuntimeControls(payload.runtimeControls)
       : settings.chatRuntimeControls;
-    const selectedSystemToolIds = normalizeSystemToolSelection(payload.selectedSystemTools);
+    const selectedSystemToolIds = principal
+      ? settings.system.selectedSystemTools
+      : normalizeSystemToolSelection(payload.selectedSystemTools);
     const queuedTurn = createQueuedChatTurn({
       id: `gateway-${requestId}`,
       conversationId: targetConversationId,
-      draft: createTextComposerDraft(message),
+      // The label makes a queued control command visible in the prompt queue.
+      // The trusted command branch executes before composer text is consumed,
+      // so this value is never appended to conversation history.
+      draft: createTextComposerDraft(queueDisplayMessage),
       uploadedFiles,
       executionMode,
       workdir: isAgentExecutionMode(executionMode) ? workdir : "",
@@ -585,8 +604,9 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
           payload.queuePolicy === "append" || payload.queuePolicy === "interrupt"
             ? payload.queuePolicy
             : "auto",
-        selectedModel: payload.selectedModel,
+        selectedModel: principal ? undefined : payload.selectedModel,
         runtimeControls: payload.runtimeControls,
+        principal,
       },
     });
 

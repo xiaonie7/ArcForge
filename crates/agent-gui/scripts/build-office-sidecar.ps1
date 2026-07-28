@@ -62,7 +62,7 @@ if (-not $Force -and (Test-Path -LiteralPath $binaryPath -PathType Leaf) -and (T
     $existingFingerprint = (Get-Content -LiteralPath $binaryStamp -Raw).Trim()
     if ($existingFingerprint -eq $sourceFingerprint) {
         Write-Host "ArcForge Office Runtime is up to date: $binaryPath"
-        exit 0
+        return
     }
 }
 

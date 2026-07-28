@@ -5,6 +5,7 @@ import type {
   GatewayChatRuntimeControlsEvent,
   GatewaySelectedModelEvent,
 } from "../gateway/gatewayBridgeTypes";
+import type { PrincipalContext } from "../../../lib/security/principalContext";
 
 export type QueuedGatewayChatRequest = {
   requestId: string;
@@ -13,6 +14,7 @@ export type QueuedGatewayChatRequest = {
   queuePolicy?: "auto" | "append" | "interrupt";
   selectedModel?: GatewaySelectedModelEvent;
   runtimeControls?: GatewayChatRuntimeControlsEvent;
+  principal?: PrincipalContext;
 };
 
 export type QueuedChatTurn = {
@@ -72,7 +74,14 @@ export function createQueuedChatTurn(input: QueuedChatTurnInput): QueuedChatTurn
     selectedSystemToolIds: input.selectedSystemToolIds.slice(),
     runtimeControls: { ...input.runtimeControls },
     createdAt,
-    gatewayRequest: input.gatewayRequest ? { ...input.gatewayRequest } : undefined,
+    gatewayRequest: input.gatewayRequest
+      ? {
+          ...input.gatewayRequest,
+          principal: input.gatewayRequest.principal
+            ? { ...input.gatewayRequest.principal }
+            : undefined,
+        }
+      : undefined,
   };
 }
 
@@ -81,6 +90,13 @@ export function queuedChatTurnHasContent(
   uploadedFiles: readonly PendingUploadedFile[],
 ): draft is MentionComposerDraft {
   return Boolean(draft && (!draft.isEmpty || draft.text.trim() || uploadedFiles.length > 0));
+}
+
+export function buildQueuedGatewayDisplayMessage(message: string, channelCommand?: string) {
+  const normalizedMessage = message.trim();
+  if (normalizedMessage) return normalizedMessage;
+  const normalizedCommand = channelCommand?.trim() ?? "";
+  return normalizedCommand ? `/${normalizedCommand}` : "";
 }
 
 export function buildQueuedChatTurnPreview(draft: MentionComposerDraft) {

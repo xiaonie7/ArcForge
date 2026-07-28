@@ -1,3 +1,4 @@
+use super::controller::set_runner_restarting_status;
 use super::{
     build_chat_event_envelope, build_chat_runtime_snapshot_envelope,
     build_gateway_runtime_status_envelope, build_local_settings_update_event_payload,
@@ -34,6 +35,7 @@ fn gateway_chat_request(
         selected_system_tools: Vec::new(),
         uploaded_files: Vec::new(),
         queue_policy: String::new(),
+        origin: None,
     }
 }
 
@@ -100,6 +102,42 @@ fn gateway_chat_command_mapping_preserves_rebase_signal() {
     assert_eq!(event.execution_mode, "tools");
     assert_eq!(event.workdir, "/workspace");
     assert_eq!(event.selected_system_tools, vec!["http_get_test"]);
+}
+
+#[test]
+fn gateway_chat_command_mapping_preserves_trusted_channel_command() {
+    let request = proto::ChatRequest {
+        conversation_id: "gateway-conversation".to_string(),
+        client_request_id: "client-compact".to_string(),
+        trusted_origin: Some(proto::TrustedOrigin {
+            channel: "wecom".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            bot_id: "bot-1".to_string(),
+            external_user_id: "user-1".to_string(),
+            chat_type: "direct".to_string(),
+            external_message_id: "message-1".to_string(),
+            connector_id: "connector-1".to_string(),
+            authenticated_at: 1_700_000_000,
+            gateway_request_id: "request-compact".to_string(),
+            channel_session_id: "session-1".to_string(),
+            channel_command: "compact".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let event = GatewayController::build_gateway_chat_request_event(
+        "request-compact".to_string(),
+        request,
+        false,
+        None,
+    );
+    let origin = event.origin.expect("trusted channel origin");
+    assert_eq!(origin.channel, "wecom");
+    assert_eq!(origin.external_user_id, "user-1");
+    assert_eq!(origin.channel_session_id, "session-1");
+    assert_eq!(origin.channel_command, "compact");
+    assert_eq!(origin.request_id, "request-compact");
 }
 
 #[test]
@@ -515,6 +553,42 @@ fn set_disconnected_status_resets_runtime_fields_for_new_config() {
     assert_eq!(status.connected_since, None);
     assert_eq!(status.last_heartbeat, None);
     assert_eq!(status.last_error.as_deref(), Some("connect gateway failed"));
+}
+
+#[test]
+fn runner_restart_clears_stale_online_status_before_reauthentication() {
+    let config = RemoteSettingsPayload {
+        enabled: true,
+        gateway_url: "http://127.0.0.1:18780".to_string(),
+        token: "dev-token".to_string(),
+        agent_id: "local-agent".to_string(),
+        ..RemoteSettingsPayload::default()
+    };
+    let mut status = GatewayStatusSnapshot {
+        online: true,
+        enabled: true,
+        configured: true,
+        gateway_url: config.gateway_url.clone(),
+        agent_id: config.agent_id.clone(),
+        session_id: Some("old-session".to_string()),
+        connected_since: Some(123),
+        last_heartbeat: Some(456),
+        last_error: Some("old error".to_string()),
+        protocol: Some("v2".to_string()),
+    };
+
+    set_runner_restarting_status(&mut status, &config);
+
+    assert!(!status.online);
+    assert!(status.enabled);
+    assert!(status.configured);
+    assert_eq!(status.gateway_url, config.gateway_url);
+    assert_eq!(status.agent_id, config.agent_id);
+    assert_eq!(status.session_id, None);
+    assert_eq!(status.connected_since, None);
+    assert_eq!(status.last_heartbeat, None);
+    assert_eq!(status.last_error, None);
+    assert_eq!(status.protocol, None);
 }
 
 #[test]

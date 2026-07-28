@@ -50,6 +50,10 @@ import type { StreamDebugLogger } from "../../../lib/debug/agentDebug";
 import { assistantMessageToText } from "../../../lib/providers/llm";
 import { resolveRuntimeEnvironmentSnapshot } from "../../../lib/runtimePlatform";
 import {
+  buildTrustedPrincipalSystemPrompt,
+  type PrincipalContext,
+} from "../../../lib/security/principalContext";
+import {
   type AppSettings,
   type McpSettingsOp,
   type ProviderId,
@@ -216,6 +220,9 @@ export type RunAgentConversationTurnParams = {
   showSilentMemoryExtraction: boolean;
   skillsRootDir?: string;
   skillAccessPolicy?: SkillAccessPolicy;
+  /** Disable shared memory and extraction for channel principals by default. */
+  memoryEnabled?: boolean;
+  principal?: PrincipalContext;
   onManagedSkillsChanged?: (change: {
     action: "install" | "create";
     names: string[];
@@ -286,6 +293,8 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     showSilentMemoryExtraction,
     skillsRootDir,
     skillAccessPolicy,
+    memoryEnabled = true,
+    principal,
     onManagedSkillsChanged,
     agentTemplates,
     selectedSystemToolIds,
@@ -333,7 +342,9 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
 
   // Reset per-turn dedup state so <already-written-this-turn> reflects only
   // this turn. In-flight extraction from the previous turn keeps running.
-  memoryExtraction.noteTurnBoundary(conversationId);
+  if (memoryEnabled) {
+    memoryExtraction.noteTurnBoundary(conversationId);
+  }
 
   const loadParentBusSnapshot = async () => {
     if (!subagentStore) return "";
@@ -376,8 +387,15 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     parentMessageBusSnapshot = await loadParentBusSnapshot();
     return parentMessageBusSnapshot;
   };
+  const trustedPrincipalSystemPrompt = buildTrustedPrincipalSystemPrompt(principal);
   const withSubagentRuntimeContext = (context: Context): Context => {
     let systemPrompt = context.systemPrompt;
+    if (
+      trustedPrincipalSystemPrompt &&
+      !(systemPrompt ?? "").includes("<trusted-wecom-principal-context>")
+    ) {
+      systemPrompt = appendSystemPrompt(systemPrompt, trustedPrincipalSystemPrompt);
+    }
     if (subagentReminder) {
       systemPrompt = appendSystemPrompt(systemPrompt, subagentReminder);
     }
@@ -408,6 +426,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     skillsEnabled: effectiveSkillsEnabled,
     skillsRootDir,
     skillAccessPolicy,
+    principal,
     onManagedSkillsChanged,
     runtimeScope: "chat",
     currentChatModel: selectedModel,
@@ -970,7 +989,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     });
   }
   const shouldRunMemoryExtraction =
-    assistantStopReason !== "error" && assistantStopReason !== "aborted";
+    memoryEnabled && assistantStopReason !== "error" && assistantStopReason !== "aborted";
   const memoryRoundOffset = Math.max(
     activeAgentRound || pendingTerminalAssistantMetaRef.current?.round || 1,
     1,

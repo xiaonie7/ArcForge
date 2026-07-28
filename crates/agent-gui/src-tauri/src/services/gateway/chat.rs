@@ -173,6 +173,7 @@ impl GatewayController {
             selected_system_tools,
             uploaded_files,
             queue_policy,
+            trusted_origin,
         } = request;
         let selected_model = selected_model.map(|selected_model| GatewaySelectedModelEvent {
             custom_provider_id: selected_model.custom_provider_id,
@@ -217,6 +218,20 @@ impl GatewayController {
                 })
                 .collect(),
             queue_policy,
+            origin: trusted_origin.map(|origin| GatewayTrustedOriginEvent {
+                channel: origin.channel,
+                tenant_id: origin.tenant_id,
+                bot_id: origin.bot_id,
+                external_user_id: origin.external_user_id,
+                chat_id: origin.chat_id,
+                chat_type: origin.chat_type,
+                external_message_id: origin.external_message_id,
+                connector_id: origin.connector_id,
+                auth_time: origin.authenticated_at,
+                request_id: origin.gateway_request_id,
+                channel_session_id: origin.channel_session_id,
+                channel_command: origin.channel_command,
+            }),
         }
     }
 

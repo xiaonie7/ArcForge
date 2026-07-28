@@ -7,6 +7,7 @@ use crate::services::gateway::{
     GatewayChatClaimedRequest, GatewayChatQueueEventInput, GatewayChatQueueResponseInput,
     GatewayChatRuntimeSnapshot, GatewayController, GatewayStatusSnapshot,
 };
+use crate::services::local_wecom::LocalWecomSupervisor;
 use crate::services::tunnel::{
     GatewayTunnelCreateInput, GatewayTunnelUpdateInput, TunnelStatePayload,
 };
@@ -16,7 +17,11 @@ use crate::services::workspace_watch::WatchSource;
 pub async fn gateway_connect(
     payload: Option<Value>,
     gateway_controller: tauri::State<'_, Arc<GatewayController>>,
+    wecom_supervisor: tauri::State<'_, Arc<LocalWecomSupervisor>>,
 ) -> Result<(), String> {
+    if wecom_supervisor.is_local_mode() {
+        return Ok(());
+    }
     let mut config = match payload {
         Some(value) => parse_remote_settings_payload(value)?,
         None => tauri::async_runtime::spawn_blocking(move || {
@@ -33,7 +38,11 @@ pub async fn gateway_connect(
 #[tauri::command]
 pub fn gateway_disconnect(
     gateway_controller: tauri::State<'_, Arc<GatewayController>>,
+    wecom_supervisor: tauri::State<'_, Arc<LocalWecomSupervisor>>,
 ) -> Result<(), String> {
+    if wecom_supervisor.is_local_mode() {
+        return Ok(());
+    }
     gateway_controller.disconnect_runtime()
 }
 

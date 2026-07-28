@@ -11,6 +11,9 @@ type ProtoUsage struct {
 	V2AgentConnectsTotal       atomic.Int64
 	V2AgentActive              atomic.Int64
 	V2TerminalConnectsTotal    atomic.Int64
+	V2ChannelConnectionsTotal  atomic.Int64
+	V2ChannelConnectionsActive atomic.Int64
+	V2ChannelRequestsTotal     atomic.Int64
 }
 
 // Usage 是进程级单例；各协议层直接打点。
@@ -35,5 +38,8 @@ func (u *ProtoUsage) Snapshot() map[string]int64 {
 		"v2_agent_connects_total":       u.V2AgentConnectsTotal.Load(),
 		"v2_agent_active":               u.V2AgentActive.Load(),
 		"v2_terminal_connects_total":    u.V2TerminalConnectsTotal.Load(),
+		"v2_channel_connections_total":  u.V2ChannelConnectionsTotal.Load(),
+		"v2_channel_connections_active": u.V2ChannelConnectionsActive.Load(),
+		"v2_channel_requests_total":     u.V2ChannelRequestsTotal.Load(),
 	}
 }

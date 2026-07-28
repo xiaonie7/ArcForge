@@ -3027,9 +3027,8 @@ mod tests {
         make_repo(".hidden/skipped");
         fs::create_dir_all(temp.path().join("plain/dir")).expect("create plain dir");
 
-        let discovery =
-            git_discover_repositories_sync(temp.path().to_string_lossy().to_string())
-                .expect("discover repositories");
+        let discovery = git_discover_repositories_sync(temp.path().to_string_lossy().to_string())
+            .expect("discover repositories");
         let relative_paths: Vec<&str> = discovery
             .repositories
             .iter()

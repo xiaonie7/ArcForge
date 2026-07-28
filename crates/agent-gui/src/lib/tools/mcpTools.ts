@@ -175,6 +175,7 @@ export async function createMcpTools(params: {
         kind: string;
         isReadOnly: boolean;
         displayCategory: "mcp";
+        resourceId: string;
       },
     ]
   > = [];
@@ -201,6 +202,7 @@ export async function createMcpTools(params: {
         kind: "mcp",
         isReadOnly: false,
         displayCategory: "mcp",
+        resourceId: info.serverId,
       },
     ]);
   }

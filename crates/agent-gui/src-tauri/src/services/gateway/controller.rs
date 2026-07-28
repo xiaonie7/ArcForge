@@ -6,9 +6,7 @@ use serde_json::{json, Value};
 use tauri::Emitter;
 use tokio::sync::watch;
 
-use crate::commands::settings::{
-    load_remote_settings, normalize_remote_settings_payload, open_db, RemoteSettingsPayload,
-};
+use crate::commands::settings::{normalize_remote_settings_payload, RemoteSettingsPayload};
 use crate::runtime::managed_process::ManagedProcessRegistry;
 use crate::runtime::sftp::SftpSessionRegistry;
 use crate::runtime::terminal::TerminalSessionRegistry;
@@ -219,6 +217,9 @@ impl GatewayController {
     }
 
     pub(crate) fn restart_runner(self: &Arc<Self>) -> Result<(), String> {
+        let config = self.config_tx.borrow().clone();
+        self.publish_status(|status| set_runner_restarting_status(status, &config));
+        self.emit_local_tunnel_state();
         self.set_outbound_sender(None);
         self.set_outbound_control_sender(None);
         self.set_terminal_stream_sender(None);
@@ -282,16 +283,6 @@ impl GatewayController {
 
         self.restart_runner()?;
         Ok(true)
-    }
-
-    pub async fn reload_from_db(self: &Arc<Self>) -> Result<(), String> {
-        let config = tauri::async_runtime::spawn_blocking(move || {
-            let conn = open_db()?;
-            load_remote_settings(&conn)
-        })
-        .await
-        .map_err(|e| format!("reload remote settings join failed: {e}"))??;
-        self.apply_config(config)
     }
 
     pub fn apply_config(self: &Arc<Self>, config: RemoteSettingsPayload) -> Result<(), String> {
@@ -447,4 +438,11 @@ impl GatewayController {
         let envelope = build_settings_sync_envelope(snapshot)?;
         self.send_agent_envelope(envelope).await
     }
+}
+
+pub(crate) fn set_runner_restarting_status(
+    status: &mut GatewayStatusSnapshot,
+    config: &RemoteSettingsPayload,
+) {
+    set_disconnected_status(status, config, None);
 }

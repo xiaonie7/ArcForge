@@ -1247,6 +1247,8 @@ export function ChatPage(props: ChatPageProps) {
   }, [currentRequestContext, setContext]);
 
   useGatewayBridgeListeners({
+    allowWecomGroupMessages: settings.wecom.allowGroupMessages,
+    wecomAccessPolicy: settings.wecom.accessPolicy,
     currentConversationIdRef,
     conversationRuntimeCacheRef,
     ensureGatewayBridgeConversationReadyRef,

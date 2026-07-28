@@ -103,6 +103,7 @@ export type RunTextConversationTurnParams = {
   ) => ConversationRuntimeEntry;
   persistConversationWithHistorySync: (params: PersistConversationParams) => Promise<boolean>;
   memoryExtractionModel?: MemoryExtractionModelConfig;
+  memoryEnabled?: boolean;
   onMemoryExtractionModelFailure?: (model: MemoryExtractionModelConfig) => void;
   memoryExtractionStatusText?: MemoryExtractionStatusText;
 };
@@ -139,13 +140,16 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     updateConversationRuntimeEntry,
     persistConversationWithHistorySync,
     memoryExtractionModel,
+    memoryEnabled = true,
     onMemoryExtractionModelFailure,
     memoryExtractionStatusText,
   } = params;
 
   // Reset per-turn dedup state so <already-written-this-turn> reflects only
   // this turn. In-flight extraction from the previous turn keeps running.
-  memoryExtraction.noteTurnBoundary(conversationId);
+  if (memoryEnabled) {
+    memoryExtraction.noteTurnBoundary(conversationId);
+  }
 
   let finalAssistant: AssistantMessage | null = null;
   let contextWithSkills = buildPreparedContext(getNextConversationState());
@@ -391,7 +395,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
   }
   const finalState = appendMessagesToConversation(getNextConversationState(), [finalAssistant]);
   const shouldRunMemoryExtraction =
-    finalAssistant.stopReason !== "error" && finalAssistant.stopReason !== "aborted";
+    memoryEnabled && finalAssistant.stopReason !== "error" && finalAssistant.stopReason !== "aborted";
   commitAssistantRoundMeta(finalAssistant, textRound);
   resetLiveTranscript(transcriptStore);
   updateConversationRuntimeEntry(conversationId, (prev) => ({

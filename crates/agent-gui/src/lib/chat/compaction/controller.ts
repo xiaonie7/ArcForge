@@ -144,6 +144,7 @@ export class CompactionController {
     budgetContext: Context;
     tools?: Context["tools"];
     includeUploadedFilesMetadata?: boolean;
+    force?: boolean;
   }): Promise<boolean> {
     const binding = this.binding;
     const presend = binding?.presend;
@@ -171,7 +172,15 @@ export class CompactionController {
       : params.budgetContext;
     this.ledger.rebase(budgetContext);
     this.updateTurnMeta(workingState);
-    const decision = this.decide("optimization", this.ledger.total(), now);
+    const policyDecision = this.decide("optimization", this.ledger.total(), now);
+    const forceable =
+      policyDecision.reason !== "disabled" &&
+      policyDecision.reason !== "no-active-messages" &&
+      policyDecision.reason !== "in-flight";
+    const decision: CompactionDecision =
+      params.force && forceable
+        ? { ...policyDecision, shouldCompact: true, reason: "forced" }
+        : policyDecision;
     this.logDecision(decision);
 
     if (!decision.shouldCompact) {

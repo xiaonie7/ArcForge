@@ -1,5 +1,5 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { getBuiltinModels, type BuiltinProvider } from "@earendil-works/pi-ai/providers/all";
+import { type BuiltinProvider, getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { DEFAULT_LOCALE, type Locale, normalizeLocale } from "../../i18n/config";
 import {
   ANTHROPIC_LONG_CONTEXT_WINDOW,
@@ -10,6 +10,10 @@ import {
   shouldSendAnthropicLongContextHeader,
 } from "../providers/anthropicModels";
 import { getAvailableThinkingLevelsForModel } from "../providers/runtime/modelFactory";
+import {
+  normalizeWeComAccessPolicy,
+  type WeComAccessPolicy,
+} from "../security/wecomAccessPolicy";
 import { createUuid } from "../shared/id";
 import { mergeAlwaysEnabledSkillNames } from "../skills/builtin";
 import { SYSTEM_TOOL_OPTIONS, type SystemToolId } from "../tools/systemToolOptions";
@@ -302,6 +306,27 @@ export type RemoteSettings = {
   enableWebTunnels: boolean;
 };
 
+export type WecomGatewayMode = "local" | "external";
+
+/**
+ * Enterprise WeChat channel settings. Secrets are write-only from the
+ * webview: the persisted settings response contains only their configured
+ * flags, never the credential values.
+ */
+export type WecomSettings = {
+  enabled: boolean;
+  gatewayMode: WecomGatewayMode;
+  localGatewayPort: number;
+  botId: string;
+  secretConfigured: boolean;
+  channelTokenConfigured: boolean;
+  tenantId: string;
+  connectorId: string;
+  allowGroupMessages: boolean;
+  /** Local, exact-match grants for authenticated WeCom principals. */
+  accessPolicy: WeComAccessPolicy;
+};
+
 export type AppSettings = {
   system: SystemSettings;
   customProviders: CustomProvider[];
@@ -309,6 +334,7 @@ export type AppSettings = {
   agents: AgentPromptTemplate[];
   ssh: SshSettings;
   remote: RemoteSettings;
+  wecom: WecomSettings;
   memory: MemorySettings;
   customSettings: CustomSettings;
   skills: SkillsSettings;
@@ -1015,6 +1041,29 @@ export function normalizeRemoteSettings(input: unknown): RemoteSettings {
     enableWebSshTerminal: obj.enableWebSshTerminal === true,
     enableWebGit: obj.enableWebGit === true,
     enableWebTunnels: obj.enableWebTunnels === true,
+  };
+}
+
+const DEFAULT_WECOM_CONNECTOR_ID = "wecom-desktop";
+
+export function normalizeWecomSettings(input: unknown): WecomSettings {
+  const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+  const botId = normalizeOptionalText(obj.botId);
+  const tenantId = normalizeOptionalText(obj.tenantId) || botId;
+  const connectorId = normalizeOptionalText(obj.connectorId) || DEFAULT_WECOM_CONNECTOR_ID;
+  return {
+    enabled: obj.enabled === true,
+    gatewayMode: obj.gatewayMode === "external" ? "external" : "local",
+    localGatewayPort: normalizeIntegerInRange(obj.localGatewayPort, 1, 65_535, 18_780),
+    botId,
+    secretConfigured: obj.secretConfigured === true,
+    channelTokenConfigured: obj.channelTokenConfigured === true,
+    tenantId,
+    connectorId,
+    // Group messages are opt-in because a response is visible to every
+    // participant and cannot provide private per-user history isolation.
+    allowGroupMessages: obj.allowGroupMessages === true,
+    accessPolicy: normalizeWeComAccessPolicy(obj.accessPolicy),
   };
 }
 
@@ -2011,6 +2060,7 @@ export function getDefaultSettings(): AppSettings {
       enableWebGit: false,
       enableWebTunnels: false,
     },
+    wecom: normalizeWecomSettings({}),
     memory: normalizeMemorySettings({}, customProviders),
     customSettings: normalizeCustomSettings({}, customProviders),
     skills: {
@@ -2043,6 +2093,7 @@ export function normalizeSettings(input?: Partial<AppSettings> | null): AppSetti
     agents: normalizeAgentPromptTemplates(obj.agents ?? defaults.agents),
     ssh: normalizeSshSettings(obj.ssh ?? defaults.ssh),
     remote: normalizeRemoteSettings(obj.remote ?? defaults.remote),
+    wecom: normalizeWecomSettings(obj.wecom ?? defaults.wecom),
     memory: normalizeMemorySettings(obj.memory ?? defaults.memory, customProviders),
     customSettings: normalizeCustomSettings(
       obj.customSettings ?? defaults.customSettings,

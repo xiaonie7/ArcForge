@@ -116,6 +116,7 @@ export function useGatewayBridgeReadiness(params: UseGatewayBridgeReadinessParam
     const requestedConversationId = targetConversationId.trim();
     const baseMessageRef = options?.baseMessageRef;
     const rebased = options?.rebased === true || Boolean(baseMessageRef);
+    const createIfMissing = options?.createIfMissing === true;
     if (!requestedConversationId) {
       const nextIdentity = createConversationIdentity();
       setConversationRuntimeCacheEntry(
@@ -140,6 +141,23 @@ export function useGatewayBridgeReadiness(params: UseGatewayBridgeReadinessParam
       gatewayBridgeHistorySummaryRef.current.has(requestedConversationId);
     if (isConversationRunning(requestedConversationId)) {
       throw new Error(`Conversation is already running: ${requestedConversationId}`);
+    }
+
+    if (!knownConversation && createIfMissing) {
+      const identity = createConversationIdentity();
+      setConversationRuntimeCacheEntry(
+        conversationRuntimeCacheRef.current,
+        requestedConversationId,
+        createConversationRuntimeEntry({
+          state: createConversationStateFromContext({
+            tools: conversationState.meta.tools,
+            messages: [],
+          }),
+          sessionId: identity.sessionId,
+          createdAt: identity.createdAt,
+        }),
+      );
+      return requestedConversationId;
     }
 
     const cached = conversationRuntimeCacheRef.current.get(requestedConversationId);

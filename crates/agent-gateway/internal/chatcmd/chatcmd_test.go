@@ -7,6 +7,7 @@ import (
 
 	"github.com/liveagent/agent-gateway/internal/config"
 	"github.com/liveagent/agent-gateway/internal/handler"
+	gatewayv1 "github.com/liveagent/agent-gateway/internal/proto/v1"
 	"github.com/liveagent/agent-gateway/internal/session"
 )
 
@@ -92,5 +93,23 @@ func TestChatStartupWatchdogUsesShortCombinedWindow(t *testing.T) {
 	last := sub.Events[len(sub.Events)-1]
 	if last.Type != session.StreamEventRunFinished || last.Payload["error_code"] != "startup_timeout" {
 		t.Fatalf("startup watchdog terminal = %s %#v", last.Type, last.Payload)
+	}
+}
+
+func TestTrustedOriginRequestBindingMatchesCommandEnvelope(t *testing.T) {
+	origin := &gatewayv1.TrustedOrigin{GatewayRequestId: "channel-run-1"}
+	envelope := buildCommandEnvelope(
+		"channel-run-1",
+		"chat.submit",
+		handler.ChatRequestBody{
+			ConversationID:  "conversation-1",
+			ClientRequestID: "client-1",
+			Message:         "hello",
+		},
+		nil,
+		origin,
+	)
+	if envelope.GetRequestId() != origin.GetGatewayRequestId() {
+		t.Fatalf("envelope request id = %q, origin request id = %q", envelope.GetRequestId(), origin.GetGatewayRequestId())
 	}
 }

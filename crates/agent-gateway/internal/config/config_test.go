@@ -10,12 +10,22 @@ import (
 
 func TestLoadNormalizesTokenAndTLSPaths(t *testing.T) {
 	t.Setenv("ARCFORGE_GATEWAY_TOKEN", "  secret-token\r\n")
+	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_TOKEN", "  channel-secret\r\n")
+	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_TENANT_ID", " tenant-1 ")
+	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_BOT_ID", " bot-1 ")
+	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_CONNECTOR_ID", " connector-1 ")
+	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_ALLOW_GROUP_MESSAGES", "true")
 	t.Setenv("ARCFORGE_GATEWAY_TLS_CERT", " cert.pem ")
 	t.Setenv("ARCFORGE_GATEWAY_TLS_KEY", "\tkey.pem\r\n")
 	resetFlagsForTest(t)
 	cfg := Load()
 	if cfg.Token != "secret-token" {
 		t.Fatalf("Token = %q, want %q", cfg.Token, "secret-token")
+	}
+	if cfg.ChannelToken != "channel-secret" || cfg.ChannelTenantID != "tenant-1" ||
+		cfg.ChannelBotID != "bot-1" || cfg.ChannelConnectorID != "connector-1" || !cfg.ChannelAllowGroupMessages {
+		t.Fatalf("channel config = token:%q tenant:%q bot:%q connector:%q",
+			cfg.ChannelToken, cfg.ChannelTenantID, cfg.ChannelBotID, cfg.ChannelConnectorID)
 	}
 	if cfg.TLSCert != "cert.pem" {
 		t.Fatalf("TLSCert = %q, want %q", cfg.TLSCert, "cert.pem")

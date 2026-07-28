@@ -41,6 +41,7 @@ import type { ScrollFollowHandle } from "../../../lib/chat-scroll/useScrollFollo
 import { createStreamDebugLogger } from "../../../lib/debug/agentDebug";
 import { buildMemoryOverviewSection } from "../../../lib/memory/prompts/injection";
 import { createModelFromConfig } from "../../../lib/providers/llm";
+import { principalCanUseSkill } from "../../../lib/security/wecomAccessPolicy";
 import {
   type AppSettings,
   applyMcpOpsToAppSettings,
@@ -278,6 +279,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         : null);
 
     const gatewayBridgeRequest = overrides?.gatewayBridgeRequestOverride ?? null;
+    const principal = gatewayBridgeRequest?.principal;
     const effectiveExecutionMode =
       overrides?.executionModeOverride ??
       gatewayBridgeRequest?.executionModeOverride ??
@@ -308,6 +310,8 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       gatewayBridgeRequest?.requestId ?? createLocalGatewayChatRunId(conversationId);
     const gatewayBridgeWorkerId =
       gatewayBridgeRequest?.workerId ?? (mirrorsLocalRunToGateway ? "gui-live" : undefined);
+    const transcriptStore = getConversationLiveTranscriptStore(conversationId);
+    const compaction = getCompactionController(conversationId);
     const gatewayBridgeEvents = createGatewayBridgeEventController({
       conversationId,
       requestId: gatewayBridgeRequestId,
@@ -401,6 +405,142 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       overrides?.runtimeControlsOverride ??
       settings.chatRuntimeControls;
     const providerConfig = buildProviderRuntimeConfig(provider, model, runtimeControls);
+    if (principal?.channelCommand === "compact") {
+      const commandBaseState = runtimeEntry.state;
+      let commandState = commandBaseState;
+      let commandCompactionFailure = "";
+      const commandCancellation = createTurnCancellation();
+      const commandConversationCwd = effectiveWorkdir || undefined;
+      const existingHistoryItem =
+        sidebarStore.peek(conversationId) ??
+        gatewayBridgeHistorySummaryRef.current.get(conversationId);
+      const commandFallbackTitle =
+        existingHistoryItem?.title.trim() ||
+        buildFallbackConversationTitle(
+          getFirstUserMessageText(buildRequestContext(commandBaseState)) || "企业微信会话",
+        );
+
+      const buildCommandPreparedContext = (
+        state: ConversationViewState,
+        tools?: Context["tools"],
+        options?: { includeAbortedMessages?: boolean; includeUploadedFilesMetadata?: boolean },
+      ) =>
+        buildPreparedConversationContext({
+          state,
+          tools,
+          activeAgentPrompt,
+          skillsPrompt: "",
+          memoryPrompt: "",
+          includeAbortedMessages: options?.includeAbortedMessages,
+          includeUploadedFilesMetadata: options?.includeUploadedFilesMetadata,
+        });
+      const buildCommandResumeContext = (
+        state: ConversationViewState,
+        resumeMessage?: UserMessage,
+        tools?: Context["tools"],
+        options?: { includeAbortedMessages?: boolean; includeUploadedFilesMetadata?: boolean },
+      ) =>
+        buildResumeConversationContext({
+          state,
+          resumeMessage,
+          tools,
+          activeAgentPrompt,
+          skillsPrompt: "",
+          memoryPrompt: "",
+          includeAbortedMessages: options?.includeAbortedMessages,
+          includeUploadedFilesMetadata: options?.includeUploadedFilesMetadata,
+        });
+      const persistCommandState = (state: ConversationViewState) =>
+        persistConversationWithHistorySync({
+          conversationId,
+          sessionId: runtimeEntry.sessionId,
+          providerId,
+          model,
+          selectedModel,
+          cwd: commandConversationCwd,
+          state,
+          fallbackTitle: commandFallbackTitle,
+          createdAt: runtimeEntry.createdAt,
+          titlePromise: null,
+        });
+
+      compaction.bindTurn({
+        providerId,
+        model,
+        runtime: {
+          baseUrl: providerConfig.baseUrl,
+          apiKey: providerConfig.apiKey,
+          requestFormat: providerConfig.requestFormat,
+          reasoning: providerConfig.reasoning,
+          promptCachingEnabled: providerConfig.promptCachingEnabled,
+          nativeWebSearchEnabled: providerConfig.nativeWebSearchEnabled,
+          useSystemProxy: providerConfig.useSystemProxy,
+          modelConfig: providerConfig.modelConfig,
+        },
+        cancellation: commandCancellation,
+        buildPreparedContext: buildCommandPreparedContext,
+        buildResumeContext: buildCommandResumeContext,
+        presend: {
+          baseState: commandBaseState,
+          pendingUserText: "",
+          composeAppliedState: (state) => state,
+        },
+        sinks: {
+          applyState: (state) => {
+            commandState = state;
+            updateConversationRuntimeEntry(conversationId, (prev) => ({
+              ...prev,
+              state,
+            }));
+          },
+          publishStatus: (status) => {
+            if (status.phase === "failed") {
+              commandCompactionFailure = status.message;
+            }
+            updateConversationRuntimeEntry(conversationId, (prev) => ({
+              ...prev,
+              compactionStatus: status,
+            }));
+          },
+          setBridgeToolStatus: updateGatewayBridgeToolStatus,
+          persist: persistCommandState,
+        },
+      });
+      setConversationAbortController(conversationId, commandCancellation.userStop);
+      setConversationSendingState(conversationId, true);
+      try {
+        if (overrides?.beforeRuntimeStart) {
+          await overrides.beforeRuntimeStart();
+        }
+        const applied = await compaction.maybeCompactPreSend({
+          budgetContext: buildCommandPreparedContext(commandBaseState),
+          force: true,
+        });
+        if (applied && !(await persistCommandState(commandState))) {
+          throw new Error("压缩后的会话保存失败。");
+        }
+        if (commandCompactionFailure) {
+          throw new Error(commandCompactionFailure);
+        }
+        gatewayBridgeEvents.queueToken(
+          applied ? "已压缩当前会话上下文。" : "当前会话暂无可压缩的上下文。",
+        );
+        await gatewayBridgeEvents.queueEvent({
+          type: "tool_status",
+          status: null,
+          isCompaction: false,
+          conversation_id: conversationId,
+        });
+        gatewayBridgeEvents.close();
+        return true;
+      } finally {
+        compaction.unbindTurn();
+        setConversationAbortController(conversationId, null);
+        setConversationSendingState(conversationId, false);
+        pruneIdleConversationCaches([conversationId]);
+        requestQueuedChatTurnProcessing(conversationId);
+      }
+    }
     const memorySummaryModelSelection = resolveMemorySummaryModelSelection(settings);
     const memoryExtractionModel = memorySummaryModelSelection
       ? {
@@ -506,8 +646,6 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       ...prev,
       workdir: conversationCwd,
     }));
-    const transcriptStore = getConversationLiveTranscriptStore(conversationId);
-    const compaction = getCompactionController(conversationId);
     const isConversationVisible = () => currentConversationIdRef.current === conversationId;
     // 轮次级取消：会话 abort controller 只注册 userStop 一次；每个 LLM 请求
     // （主请求/压缩摘要/标题任务）各自派生子 scope，杜绝 abort 换代丢停止的窗口。
@@ -956,7 +1094,10 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         return true;
       }
 
-      const selectedSkills = selectedSkillNames.map((n) => byName.get(n)!).filter(Boolean);
+      const selectedSkills = selectedSkillNames
+        .map((n) => byName.get(n)!)
+        .filter(Boolean)
+        .filter((skill) => !principal || principalCanUseSkill(principal, skill));
       const allowBuiltinSkillManagement = selectedSkills.some(
         (skill) => skill.name === "skills-creator" || skill.name === "skills-installer",
       );
@@ -989,15 +1130,19 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       });
     }
 
-    try {
-      memoryPrompt = await buildMemoryOverviewSection(effectiveWorkdir);
-    } catch (error) {
-      console.warn("Failed to build memory overview prompt", error);
-      memoryPrompt = "";
+    if (!principal) {
+      try {
+        memoryPrompt = await buildMemoryOverviewSection(effectiveWorkdir);
+      } catch (error) {
+        console.warn("Failed to build memory overview prompt", error);
+        memoryPrompt = "";
+      }
     }
 
     const hookScope = createHookRunScope({
-      hooks: getAutomationState().hooks.hooks,
+      // Hooks are desktop-owned automation and may execute arbitrary actions;
+      // they are never inherited by an authenticated WeCom principal.
+      hooks: principal ? [] : getAutomationState().hooks.hooks,
       conversationId,
       workdir: effectiveWorkdir,
       onWarning: (warning) => {
@@ -1135,11 +1280,13 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionModel,
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
+            memoryEnabled: !principal,
             effectiveWorkdir,
             effectiveSkillsEnabled,
             showSilentMemoryExtraction: effectiveIsAgentDevExecutionMode,
             skillsRootDir: skillsRootDirForTools,
             skillAccessPolicy: skillAccessPolicyForTools,
+            principal,
             onManagedSkillsChanged: (change) => {
               enableManagedSkills(change.names);
             },
@@ -1149,12 +1296,13 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             applyMcpOps: (ops) => {
               setSettings((prev) => applyMcpOpsToAppSettings(prev, ops));
             },
-            remoteWebTunnelsEnabled: settings.remote.enableWebTunnels,
+            remoteWebTunnelsEnabled: principal ? false : settings.remote.enableWebTunnels,
             tunnelPublicBaseUrl: settings.remote.gatewayUrl.trim(),
             sshHosts: settings.ssh.hosts,
             associatedSshHostIds: effectiveAssociatedSshHostIds,
             sshManagerRemoteAllowed:
-              !gatewayBridgeRequest || settings.remote.enableWebSshTerminal === true,
+              !principal &&
+              (!gatewayBridgeRequest || settings.remote.enableWebSshTerminal === true),
             onSshSessionsChanged: (change) => {
               if (change.action === "create") {
                 ensureSshTunnelToolTab(change.projectPathKey);
@@ -1214,6 +1362,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionModel,
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
+            memoryEnabled: !principal,
             sessionId,
             conversationId,
             conversationCwd,

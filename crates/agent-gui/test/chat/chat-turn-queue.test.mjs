@@ -142,3 +142,9 @@ test("queued chat turn preview keeps structured draft hints compact", () => {
   assert.equal(queue.queuedChatTurnHasContent(richDraft, []), true);
   assert.equal(queue.queuedChatTurnHasContent(draft(""), [{ fileName: "a.txt" }]), true);
 });
+
+test("trusted channel commands have a queue label without becoming message content", () => {
+  assert.equal(queue.buildQueuedGatewayDisplayMessage("", "compact"), "/compact");
+  assert.equal(queue.buildQueuedGatewayDisplayMessage("  hello  ", "compact"), "hello");
+  assert.equal(queue.buildQueuedGatewayDisplayMessage("", ""), "");
+});

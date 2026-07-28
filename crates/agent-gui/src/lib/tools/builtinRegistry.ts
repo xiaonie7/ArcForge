@@ -1,6 +1,11 @@
 import type { ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { homeDir } from "@tauri-apps/api/path";
 import type { RuntimeEnvironmentSnapshot, RuntimePlatform } from "../runtimePlatform";
+import type { PrincipalContext } from "../security/principalContext";
+import {
+  createBuiltinToolAuthorizationPolicy,
+  formatToolAuthorizationError,
+} from "../security/toolAuthorizationPolicy";
 import {
   type McpSettings,
   type McpSettingsOp,
@@ -48,11 +53,16 @@ export type BuiltinToolRegistry = {
   hasTool: (toolName: string) => boolean;
 };
 
-function createBuiltinToolRegistry(bundles: BuiltinToolBundle[]): BuiltinToolRegistry {
+function createBuiltinToolRegistry(
+  bundles: BuiltinToolBundle[],
+  principal?: PrincipalContext,
+): BuiltinToolRegistry {
   const tools: BuiltinToolBundle["tools"] = [];
   const metadataByName = new Map<string, BuiltinToolMetadata>();
+  const allMetadataByName = new Map<string, BuiltinToolMetadata>();
   const executorsByName = new Map<string, BuiltinToolBundle["executeToolCall"]>();
   const canonicalToolNameByLookupKey = new Map<string, string | null>();
+  const authorizationPolicy = createBuiltinToolAuthorizationPolicy(principal);
 
   const registerCanonicalToolName = (toolName: string) => {
     const key = toolName.trim().toLowerCase();
@@ -76,12 +86,17 @@ function createBuiltinToolRegistry(bundles: BuiltinToolBundle[]): BuiltinToolReg
       if (executorsByName.has(tool.name)) {
         throw new Error(`Duplicate builtin tool name detected: ${tool.name}`);
       }
-      tools.push(tool);
       executorsByName.set(tool.name, bundle.executeToolCall);
       registerCanonicalToolName(tool.name);
       const metadata = bundle.metadataByName.get(tool.name);
       if (metadata) {
-        metadataByName.set(tool.name, metadata);
+        allMetadataByName.set(tool.name, metadata);
+      }
+      if (authorizationPolicy.isToolVisible({ toolName: tool.name, metadata, principal })) {
+        tools.push(tool);
+        if (metadata) {
+          metadataByName.set(tool.name, metadata);
+        }
       }
     }
   }
@@ -117,7 +132,34 @@ function createBuiltinToolRegistry(bundles: BuiltinToolBundle[]): BuiltinToolReg
       }
       const effectiveToolCall =
         resolvedToolName === toolCall.name ? toolCall : { ...toolCall, name: resolvedToolName };
-      return execute(effectiveToolCall, signal, context);
+      const decision = authorizationPolicy.authorize({
+        toolName: resolvedToolName,
+        metadata: allMetadataByName.get(resolvedToolName),
+        principal,
+      });
+      if (!decision.allowed) {
+        return {
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [{ type: "text", text: formatToolAuthorizationError(toolCall.name, decision) }],
+          details: {
+            authorization: {
+              code: decision.code,
+              principalId: principal?.principalId,
+              channel: principal?.channel,
+            },
+          },
+          isError: true,
+          timestamp: Date.now(),
+        };
+      }
+      const effectiveContext = principal
+        ? context
+          ? { ...context, principal }
+          : { parentToolCall: effectiveToolCall, principal }
+        : context;
+      return execute(effectiveToolCall, signal, effectiveContext);
     },
   };
 }
@@ -155,6 +197,8 @@ type BuildBuiltinBaseToolRegistryParams = {
   sshHosts?: SshHostConfig[];
   associatedSshHostIds?: string[];
   sshManagerRemoteAllowed?: boolean;
+  /** Trusted identity for a channel run. Browser/local runs leave this empty. */
+  principal?: PrincipalContext;
   onSshSessionsChanged?: (change: SshManagerSessionChange) => void | Promise<void>;
   onTunnelsChanged?: (change: TunnelManagerChange) => void | Promise<void>;
 };
@@ -240,7 +284,14 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
       : []),
   ];
 
-  const enabledServers = selectEnabledMcpServers(params.getMcpSettings());
+  const enabledServers = selectEnabledMcpServers(params.getMcpSettings()).filter((server) => {
+    if (!params.principal) return true;
+    return (
+      params.principal.chatType === "direct" &&
+      params.principal.scopes.includes("mcp:invoke") &&
+      params.principal.allowedMcpServerIds.includes(server.id)
+    );
+  });
   if (enabledServers.length > 0) {
     baseBundles.push(
       await createMcpTools({
@@ -275,10 +326,10 @@ export async function buildBuiltinToolRegistry(
 
   const subagentRuntime = params.subagentRuntime;
   if (!subagentRuntime) {
-    return createBuiltinToolRegistry([...baseBundles, ...chatBundles]);
+    return createBuiltinToolRegistry([...baseBundles, ...chatBundles], params.principal);
   }
 
-  const baseRegistry = createBuiltinToolRegistry(baseBundles);
+  const baseRegistry = createBuiltinToolRegistry(baseBundles, params.principal);
   // The Agent tool description embeds the roster, so the store must be
   // hydrated before the bundle is created. Roster load failures degrade to an
   // empty roster instead of blocking the whole registry.
@@ -325,6 +376,7 @@ export async function buildBuiltinToolRegistry(
             mcpLoadFailureMode: "continue",
             memoryToolMode: "ro",
           }),
+          params.principal,
         ),
     }),
   ]);

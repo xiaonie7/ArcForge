@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Blend,
   BookOpen,
+  Bot,
   Brain,
   Cable,
   Cloud,
@@ -18,7 +19,6 @@ import { isMacOsTauri, MacOsTitleBarSpacer } from "../components/MacOsTitleBarSp
 import { useLocale } from "../i18n";
 import { isAgentExecutionMode } from "../lib/settings";
 import { McpHubPage } from "./mcp-hub/McpHubPage";
-import { SkillsHubPage } from "./skills-hub/SkillsHubPage";
 import { AboutSection } from "./settings/AboutSection";
 import { AgentsSection } from "./settings/AgentsSection";
 import { GlobalShortcutsSection } from "./settings/GlobalShortcutsSection";
@@ -29,6 +29,8 @@ import { SshSection } from "./settings/SshSection";
 import { SystemSettingsForm } from "./settings/SystemSettingsForm";
 import { SystemToolsSection } from "./settings/SystemToolsSection";
 import type { SectionId, SettingsPageProps } from "./settings/types";
+import { WecomSection } from "./settings/WecomSection";
+import { SkillsHubPage } from "./skills-hub/SkillsHubPage";
 
 function getSaveIndicator(state: SettingsPageProps["saveState"], t: (key: string) => string) {
   switch (state.status) {
@@ -44,8 +46,6 @@ function getSaveIndicator(state: SettingsPageProps["saveState"], t: (key: string
         text: t("settings.saveError"),
         title: state.message,
       };
-    case "saved":
-    case "idle":
     default:
       return {
         dotClass: "bg-emerald-500",
@@ -115,6 +115,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { id: "ssh", icon: <Key className="h-3.5 w-3.5" /> },
       { id: "remote", icon: <Cloud className="h-3.5 w-3.5" /> },
+      { id: "wecom", icon: <Bot className="h-3.5 w-3.5" /> },
     ],
   },
   {
@@ -138,19 +139,23 @@ export function SettingsPage(props: SettingsPageProps) {
   const { t } = useLocale();
   const [section, setSection] = useState<SectionId>(initialSection);
 
-  const sectionLabels: Record<SectionId, string> = {
-    system: t("settings.navSystem"),
-    shortcuts: t("settings.navShortcuts"),
-    systemTools: t("settings.navSystemTools"),
-    providers: t("settings.navProviders"),
-    agents: t("settings.navAgents"),
-    skills: t("settings.navSkills"),
-    mcp: "MCP",
-    ssh: t("settings.navSsh"),
-    memory: t("settings.navMemory"),
-    remote: t("settings.navRemote"),
-    about: t("settings.navAbout"),
-  };
+  const sectionLabels = useMemo<Record<SectionId, string>>(
+    () => ({
+      system: t("settings.navSystem"),
+      shortcuts: t("settings.navShortcuts"),
+      systemTools: t("settings.navSystemTools"),
+      providers: t("settings.navProviders"),
+      agents: t("settings.navAgents"),
+      skills: t("settings.navSkills"),
+      mcp: "MCP",
+      ssh: t("settings.navSsh"),
+      memory: t("settings.navMemory"),
+      remote: t("settings.navRemote"),
+      wecom: t("settings.navWecom"),
+      about: t("settings.navAbout"),
+    }),
+    [t],
+  );
 
   const hiddenSectionSet = useMemo(() => new Set(hiddenSections), [hiddenSections]);
   const navGroups = useMemo(
@@ -215,6 +220,14 @@ export function SettingsPage(props: SettingsPageProps) {
         return <SshSection settings={settings} setSettings={setSettings} />;
       case "remote":
         return <RemoteSection settings={settings} setSettings={setSettings} />;
+      case "wecom":
+        return (
+          <WecomSection
+            settings={settings}
+            setSettings={setSettings}
+            onOpenRemote={() => setSection("remote")}
+          />
+        );
       case "memory":
         return (
           <MemoryPanel

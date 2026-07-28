@@ -265,16 +265,19 @@ export default function App() {
         .catch(() => undefined)
         .then(() => persistSettings(prev, next))
         .then(async (persistResult) => {
-          const publishTarget = persistResult.ssh
+          const hasReconciledSettings = Boolean(persistResult.ssh || persistResult.wecom);
+          const publishTarget = hasReconciledSettings
             ? normalizeSettings({
                 ...next,
-                ssh: persistResult.ssh,
+                ...(persistResult.ssh ? { ssh: persistResult.ssh } : {}),
+                ...(persistResult.wecom ? { wecom: persistResult.wecom } : {}),
               })
             : next;
-          if (persistResult.ssh && saveSequenceRef.current === saveSequence) {
+          if (hasReconciledSettings && saveSequenceRef.current === saveSequence) {
             const merged = normalizeSettings({
               ...settingsRef.current,
-              ssh: persistResult.ssh,
+              ...(persistResult.ssh ? { ssh: persistResult.ssh } : {}),
+              ...(persistResult.wecom ? { wecom: persistResult.wecom } : {}),
             });
             settingsRef.current = merged;
             setSettingsState(merged);

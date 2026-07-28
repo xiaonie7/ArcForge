@@ -29,6 +29,7 @@ func NewHTTPServer(cfg *config.Config, sm *session.Manager) http.Handler {
 	v2 := pbws.NewServer(cfg, sm)
 	rootMux.Handle("/ws/v2", v2.BrowserHandler())
 	rootMux.Handle("/ws/v2/agent", v2.AgentHandler())
+	rootMux.Handle("/ws/v2/channel", v2.ChannelHandler())
 	rootMux.Handle("/ws/v2/terminal", v2.TerminalHandler())
 
 	// v1 路由（JSON 信封 /ws、二进制终端流 /ws/terminal）已移除：显式回 410，

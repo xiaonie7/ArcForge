@@ -30,6 +30,7 @@ mod tests {
             AGENT_PROMPT_TEMPLATES_TABLE,
             SSH_SETTINGS_TABLE,
             REMOTE_SETTINGS_TABLE,
+            WECOM_SETTINGS_TABLE,
             MEMORY_SETTINGS_TABLE,
             SSH_PROJECT_HOST_ASSOCIATIONS_TABLE,
             SSH_KNOWN_HOSTS_TABLE,
@@ -43,6 +44,372 @@ mod tests {
                 .expect("query sqlite_master");
             assert_eq!(exists, 1, "table {table} should exist");
         }
+    }
+
+    #[test]
+    fn wecom_settings_keep_credentials_out_of_public_payloads() {
+        let mut conn = open_memory_db();
+        let saved = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": false,
+                "gatewayMode": "external",
+                "localGatewayPort": 18780,
+                "botId": " bot-a ",
+                "tenantId": " ",
+                "connectorId": " ",
+                "allowGroupMessages": true,
+                "accessPolicy": {
+                    "rules": [{
+                        "tenantId": "bot-a",
+                        "botId": "bot-a",
+                        "externalUserId": "alice",
+                        "scopes": ["tool:read"],
+                        "allowedToolNames": ["Read"]
+                    }]
+                },
+                "secretUpdate": " aibot-secret ",
+                "channelTokenUpdate": " channel-token "
+            }),
+        )
+        .expect("save WeCom credentials");
+
+        assert_eq!(saved.bot_id, "bot-a");
+        assert_eq!(saved.tenant_id, "bot-a");
+        assert_eq!(saved.connector_id, "wecom-desktop");
+        assert!(saved.secret_configured);
+        assert!(saved.channel_token_configured);
+        assert!(!saved.enabled);
+        assert_eq!(saved.access_policy["rules"][0]["externalUserId"], "alice");
+
+        let public = serde_json::to_value(&saved).expect("serialize public WeCom settings");
+        assert!(public.get("secret").is_none());
+        assert!(public.get("channelToken").is_none());
+        assert!(public.get("secretUpdate").is_none());
+        assert!(public.get("channelTokenUpdate").is_none());
+
+        let runtime = load_wecom_runtime_settings(&conn).expect("load runtime WeCom settings");
+        assert_eq!(runtime.secret, "aibot-secret");
+        assert_eq!(runtime.channel_token, "channel-token");
+        assert!(runtime.allow_group_messages);
+        assert_eq!(
+            serde_json::from_str::<Value>(&runtime.access_policy_json)
+                .expect("parse stored access policy")["rules"][0]["externalUserId"],
+            "alice"
+        );
+
+        save_remote(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayUrl": "not-a-gateway-url",
+                "token": "agent-token"
+            }),
+        )
+        .expect("save invalid remote Gateway");
+        let invalid_gateway_error = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayMode": "external",
+                "localGatewayPort": 18780,
+                "botId": "bot-a",
+                "tenantId": "bot-a",
+                "connectorId": "wecom-desktop",
+                "allowGroupMessages": false,
+                "secretConfigured": true,
+                "channelTokenConfigured": true
+            }),
+        )
+        .expect_err("reject invalid remote Gateway");
+        assert!(invalid_gateway_error.contains("valid http(s) or ws(s)"));
+
+        save_remote(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayUrl": "https://gateway.example",
+                "token": "agent-token"
+            }),
+        )
+        .expect("save remote Gateway");
+        let enabled = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayMode": "external",
+                "localGatewayPort": 18780,
+                "botId": "bot-a",
+                "tenantId": "bot-a",
+                "connectorId": "wecom-desktop",
+                "allowGroupMessages": false,
+                "secretConfigured": true,
+                "channelTokenConfigured": true
+            }),
+        )
+        .expect("enable WeCom connector");
+        assert!(enabled.enabled);
+        assert!(enabled.secret_configured);
+        assert!(enabled.channel_token_configured);
+        assert_eq!(enabled.access_policy["rules"][0]["externalUserId"], "alice");
+
+        let cleared = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayMode": "external",
+                "localGatewayPort": 18780,
+                "botId": "bot-a",
+                "secretUpdate": null
+            }),
+        )
+        .expect("clear WeCom secret");
+        assert!(!cleared.enabled);
+        assert!(!cleared.secret_configured);
+        assert!(cleared.channel_token_configured);
+        assert_eq!(cleared.access_policy["rules"][0]["externalUserId"], "alice");
+    }
+
+    #[test]
+    fn initialize_schema_migrates_wecom_access_policy_column() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE wecom_settings (
+                config_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                bot_id TEXT NOT NULL DEFAULT '',
+                tenant_id TEXT NOT NULL DEFAULT '',
+                connector_id TEXT NOT NULL DEFAULT 'wecom-desktop',
+                allow_group_messages INTEGER NOT NULL DEFAULT 0,
+                aibot_secret TEXT NOT NULL DEFAULT '',
+                channel_token TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );",
+        )
+        .expect("create legacy WeCom schema");
+        conn.execute(
+            "INSERT INTO wecom_settings (
+                config_id, enabled, bot_id, tenant_id, connector_id,
+                allow_group_messages, aibot_secret, channel_token, updated_at
+             ) VALUES ('default', 0, 'legacy-bot', 'legacy-tenant',
+                       'legacy-connector', 0, '', '', 0)",
+            [],
+        )
+        .expect("insert legacy WeCom settings");
+
+        initialize_schema(&conn).expect("migrate WeCom schema");
+        assert!(table_columns(&conn, WECOM_SETTINGS_TABLE)
+            .iter()
+            .any(|column| column == "access_policy_json"));
+        let columns = table_columns(&conn, WECOM_SETTINGS_TABLE);
+        assert!(columns.iter().any(|column| column == "gateway_mode"));
+        assert!(columns.iter().any(|column| column == "local_gateway_port"));
+        let migrated = load_wecom_runtime_settings(&conn).expect("load migrated WeCom settings");
+        assert_eq!(migrated.gateway_mode, WecomGatewayMode::Local);
+        assert_eq!(migrated.local_gateway_port, 18_780);
+    }
+
+    #[test]
+    fn initialize_schema_serializes_concurrent_file_migrations() {
+        const MIGRATOR_COUNT: usize = 8;
+
+        let temp_dir = tempfile::tempdir().expect("create temporary settings directory");
+        let db_path = temp_dir.path().join("concurrent-settings.sqlite");
+        let setup_conn = Connection::open(&db_path).expect("open legacy settings database");
+        setup_conn
+            .execute_batch(
+                "CREATE TABLE wecom_settings (
+                    config_id TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    bot_id TEXT NOT NULL DEFAULT '',
+                    tenant_id TEXT NOT NULL DEFAULT '',
+                    connector_id TEXT NOT NULL DEFAULT 'wecom-desktop',
+                    allow_group_messages INTEGER NOT NULL DEFAULT 0,
+                    aibot_secret TEXT NOT NULL DEFAULT '',
+                    channel_token TEXT NOT NULL DEFAULT '',
+                    updated_at INTEGER NOT NULL
+                );
+                INSERT INTO wecom_settings (
+                    config_id, enabled, bot_id, tenant_id, connector_id,
+                    allow_group_messages, aibot_secret, channel_token, updated_at
+                ) VALUES (
+                    'default', 0, 'legacy-bot', 'legacy-tenant',
+                    'legacy-connector', 0, '', '', 0
+                );",
+            )
+            .expect("create legacy settings schema");
+        drop(setup_conn);
+
+        let start = Arc::new(std::sync::Barrier::new(MIGRATOR_COUNT));
+        let migrators = (0..MIGRATOR_COUNT)
+            .map(|_| {
+                let db_path = db_path.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let conn = Connection::open(db_path).expect("open concurrent settings database");
+                    conn.busy_timeout(Duration::from_secs(10))
+                        .expect("configure concurrent migration busy timeout");
+                    start.wait();
+                    initialize_schema(&conn)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for migrator in migrators {
+            migrator
+                .join()
+                .expect("concurrent schema migrator should not panic")
+                .expect("concurrent schema migration should succeed");
+        }
+
+        let conn = Connection::open(&db_path).expect("reopen migrated settings database");
+        let columns = table_columns(&conn, WECOM_SETTINGS_TABLE);
+        for column in [
+            "access_policy_json",
+            "gateway_mode",
+            "local_gateway_port",
+        ] {
+            assert_eq!(
+                columns
+                    .iter()
+                    .filter(|candidate| candidate.as_str() == column)
+                    .count(),
+                1,
+                "concurrent migration should add {column} exactly once",
+            );
+        }
+        let migrated = load_wecom_runtime_settings(&conn).expect("load concurrently migrated row");
+        assert_eq!(migrated.bot_id, "legacy-bot");
+        assert_eq!(migrated.gateway_mode, WecomGatewayMode::Local);
+        assert_eq!(migrated.local_gateway_port, 18_780);
+        assert_eq!(
+            conn.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .expect("check migrated database integrity"),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn wecom_mode_migration_preserves_configured_external_gateway() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE remote_settings (
+                config_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO remote_settings VALUES (
+                'default', '{\"gatewayUrl\":\"https://gateway.example\"}', 0
+            );
+            CREATE TABLE wecom_settings (
+                config_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                bot_id TEXT NOT NULL DEFAULT '',
+                tenant_id TEXT NOT NULL DEFAULT '',
+                connector_id TEXT NOT NULL DEFAULT 'wecom-desktop',
+                allow_group_messages INTEGER NOT NULL DEFAULT 0,
+                aibot_secret TEXT NOT NULL DEFAULT '',
+                channel_token TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO wecom_settings VALUES (
+                'default', 0, 'legacy-bot', 'legacy-tenant',
+                'legacy-connector', 0, '', '', 0
+            );",
+        )
+        .expect("create configured legacy settings");
+
+        initialize_schema(&conn).expect("migrate configured legacy settings");
+        let migrated = load_wecom_runtime_settings(&conn).expect("load migrated WeCom settings");
+        assert_eq!(migrated.gateway_mode, WecomGatewayMode::External);
+    }
+
+    #[test]
+    fn local_wecom_mode_does_not_require_external_gateway_credentials() {
+        let mut conn = open_memory_db();
+        let saved = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayMode": "local",
+                "localGatewayPort": 18780,
+                "botId": "bot-local",
+                "tenantId": "tenant-local",
+                "connectorId": "wecom-desktop",
+                "secretUpdate": "local-secret"
+            }),
+        )
+        .expect("enable local WeCom runtime without external tokens");
+
+        assert!(saved.enabled);
+        assert_eq!(saved.gateway_mode, WecomGatewayMode::Local);
+        assert_eq!(saved.local_gateway_port, 18_780);
+        assert!(!saved.channel_token_configured);
+    }
+
+    #[test]
+    fn external_wecom_mode_requires_enabled_remote_with_agent_token() {
+        let mut conn = open_memory_db();
+        save_wecom(
+            &mut conn,
+            json!({
+                "enabled": false,
+                "gatewayMode": "external",
+                "localGatewayPort": 18780,
+                "botId": "bot-external",
+                "tenantId": "tenant-external",
+                "connectorId": "wecom-desktop",
+                "secretUpdate": "aibot-secret",
+                "channelTokenUpdate": "channel-token"
+            }),
+        )
+        .expect("save external WeCom credentials while disabled");
+
+        save_remote(
+            &mut conn,
+            json!({
+                "enabled": false,
+                "gatewayUrl": "https://gateway.example",
+                "token": "agent-token"
+            }),
+        )
+        .expect("save disabled Remote settings");
+        let remote_disabled_error = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayMode": "external",
+                "localGatewayPort": 18780,
+                "botId": "bot-external",
+                "tenantId": "tenant-external",
+                "connectorId": "wecom-desktop"
+            }),
+        )
+        .expect_err("reject external WeCom when Remote is disabled");
+        assert!(remote_disabled_error.contains("Remote access to be enabled"));
+
+        save_remote(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayUrl": "https://gateway.example",
+                "token": ""
+            }),
+        )
+        .expect("save Remote settings without an Agent token");
+        let missing_agent_token_error = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": true,
+                "gatewayMode": "external",
+                "localGatewayPort": 18780,
+                "botId": "bot-external",
+                "tenantId": "tenant-external",
+                "connectorId": "wecom-desktop"
+            }),
+        )
+        .expect_err("reject external WeCom without a Remote Agent token");
+        assert!(missing_agent_token_error.contains("Remote Agent token"));
     }
 
     #[test]
@@ -1101,8 +1468,8 @@ mod tests {
     #[test]
     fn load_system_with_defaults_returns_agent_mode_and_default_project() {
         let conn = open_memory_db();
-        let loaded = load_system_with_defaults(&conn, "/tmp/arcforge-default-project")
-            .expect("load system");
+        let loaded =
+            load_system_with_defaults(&conn, "/tmp/arcforge-default-project").expect("load system");
 
         assert_eq!(
             loaded,

@@ -14,6 +14,7 @@ export type SectionId =
   | "ssh"
   | "memory"
   | "remote"
+  | "wecom"
   | "about";
 
 export type SettingsPageProps = {

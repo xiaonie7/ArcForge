@@ -1,3 +1,4 @@
+use reqwest::Url;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
@@ -11,7 +12,7 @@ use std::{
 
 use crate::runtime::project_path::project_path_key as normalize_project_path_key;
 use crate::services::automation::AutomationScheduler;
-use crate::services::gateway::GatewayController;
+use crate::services::local_wecom::LocalWecomSupervisor;
 
 const DB_FILENAME: &str = "config.sqlite";
 const DEFAULT_PROJECT_DIRNAME: &str = "default-project";
@@ -23,6 +24,7 @@ const SSH_SETTINGS_TABLE: &str = "ssh_settings";
 const SSH_PROJECT_HOST_ASSOCIATIONS_TABLE: &str = "ssh_project_host_associations";
 const SSH_KNOWN_HOSTS_TABLE: &str = "ssh_known_hosts";
 const REMOTE_SETTINGS_TABLE: &str = "remote_settings";
+const WECOM_SETTINGS_TABLE: &str = "wecom_settings";
 const MEMORY_SETTINGS_TABLE: &str = "memory_settings";
 
 const SYSTEM_EXECUTION_MODE_KEY: &str = "executionMode";
@@ -146,6 +148,7 @@ const SSH_KNOWN_HOSTS_DELETE_SQL: &str = "
 
 include!("types.rs");
 include!("remote.rs");
+include!("wecom.rs");
 include!("db.rs");
 include!("json.rs");
 include!("providers.rs");

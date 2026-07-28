@@ -106,6 +106,35 @@ func DispatchAcceptedCommand(
 	baseMessageRef *MessageRef,
 	traceID string,
 ) {
+	DispatchAcceptedCommandWithOrigin(
+		parent,
+		cfg,
+		sm,
+		cleanupWatch,
+		start,
+		body,
+		baseMessageRef,
+		traceID,
+		nil,
+	)
+}
+
+// DispatchAcceptedCommandWithOrigin is the channel-only variant of
+// DispatchAcceptedCommand. The origin is supplied by the authenticated gateway
+// transport and is copied into the desktop request without passing through the
+// user/LLM-controlled request body. Browser callers should use the wrapper
+// above and therefore always send a nil origin.
+func DispatchAcceptedCommandWithOrigin(
+	parent context.Context,
+	cfg *config.Config,
+	sm *session.Manager,
+	cleanupWatch func(),
+	start session.ChatCommandStart,
+	body handler.ChatRequestBody,
+	baseMessageRef *MessageRef,
+	traceID string,
+	origin *gatewayv1.TrustedOrigin,
+) {
 	if cleanupWatch != nil {
 		defer cleanupWatch()
 	}
@@ -117,7 +146,7 @@ func DispatchAcceptedCommand(
 	if baseMessageRef != nil {
 		commandType = "chat.edit_resend"
 	}
-	if err := sm.SendToAgentContext(ctx, buildCommandEnvelope(start.RunID, commandType, body, baseMessageRef)); err != nil {
+	if err := sm.SendToAgentContext(ctx, buildCommandEnvelope(start.RunID, commandType, body, baseMessageRef, origin)); err != nil {
 		message := "chat command failed"
 		if err != nil && strings.TrimSpace(err.Error()) != "" {
 			message = strings.TrimSpace(err.Error())
@@ -284,6 +313,7 @@ func buildCommandEnvelope(
 	commandType string,
 	body handler.ChatRequestBody,
 	baseMessageRef *MessageRef,
+	origin *gatewayv1.TrustedOrigin,
 ) *gatewayv1.GatewayEnvelope {
 	return &gatewayv1.GatewayEnvelope{
 		RequestId: strings.TrimSpace(requestID),
@@ -291,7 +321,7 @@ func buildCommandEnvelope(
 		Payload: &gatewayv1.GatewayEnvelope_ChatCommand{
 			ChatCommand: &gatewayv1.ChatCommandRequest{
 				Type:           strings.TrimSpace(commandType),
-				Request:        buildProtoRequest(body),
+				Request:        buildProtoRequest(body, origin),
 				BaseMessageRef: BuildProtoMessageRef(baseMessageRef),
 			},
 		},
@@ -310,7 +340,7 @@ func BuildCancelCommandPayload(conversationID string) *gatewayv1.GatewayEnvelope
 	}
 }
 
-func buildProtoRequest(body handler.ChatRequestBody) *gatewayv1.ChatRequest {
+func buildProtoRequest(body handler.ChatRequestBody, origin *gatewayv1.TrustedOrigin) *gatewayv1.ChatRequest {
 	return &gatewayv1.ChatRequest{
 		ConversationId:      body.ConversationID,
 		ClientRequestId:     body.ClientRequestID,
@@ -322,6 +352,7 @@ func buildProtoRequest(body handler.ChatRequestBody) *gatewayv1.ChatRequest {
 		SelectedSystemTools: body.SelectedSystemTools,
 		UploadedFiles:       handler.ToProtoChatUploadedFiles(body.UploadedFiles),
 		QueuePolicy:         body.QueuePolicy,
+		TrustedOrigin:       origin,
 	}
 }
 

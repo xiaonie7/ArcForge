@@ -78,6 +78,9 @@ pub(crate) fn build_client_hello(
         agent_version: agent_version.clone(),
         client_name: "desktop".to_string(),
         client_version: agent_version,
+        channel_tenant_id: String::new(),
+        channel_bot_id: String::new(),
+        connector_id: String::new(),
     }
 }
 

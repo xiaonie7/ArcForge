@@ -29,6 +29,7 @@ pub use history_commands::subagent_store;
 pub use integration_commands::gateway;
 pub use integration_commands::mcp;
 pub use integration_commands::memory;
+pub use integration_commands::wecom_runtime;
 
 pub use runtime_commands::execution_broker;
 pub use runtime_commands::process;

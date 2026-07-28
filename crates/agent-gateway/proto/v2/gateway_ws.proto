@@ -19,6 +19,7 @@ enum ClientRole {
   CLIENT_ROLE_UNSPECIFIED = 0;
   CLIENT_ROLE_BROWSER = 1;
   CLIENT_ROLE_AGENT = 2;
+  CLIENT_ROLE_CHANNEL = 3;
 }
 
 // ClientHello 是所有 v2 连接的第一帧。
@@ -34,6 +35,10 @@ message ClientHello {
   // 客户端标识（如 "webui" / "desktop"），仅用于观测与日志。
   string client_name = 6;
   string client_version = 7;
+  // CHANNEL connections are bound to one authenticated connector and bot.
+  string channel_tenant_id = 8;
+  string channel_bot_id = 9;
+  string connector_id = 10;
 }
 
 // ServerHello 是服务端对 ClientHello 的应答；ok=false 时随即关闭连接。
@@ -142,6 +147,78 @@ message AgentServerFrame {
   oneof payload {
     ServerHello hello = 1;
     liveagent.gateway.v1.GatewayEnvelope envelope = 2;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Restricted channel link (/ws/v2/channel).
+// ---------------------------------------------------------------------------
+
+// ChannelInboundMessage contains only channel-authenticated message metadata.
+// Conversation ids, workdirs, roles, scopes, models and tools are intentionally
+// absent: the gateway and desktop policy layer resolve them from this identity.
+message ChannelInboundMessage {
+  string external_message_id = 1;
+  string external_user_id = 2;
+  string chat_id = 3;
+  // WeCom values are "single" and "group".
+  string chat_type = 4;
+  string text = 5;
+  int64 timestamp = 6;
+  // Restricted control command parsed by the Connector. The Gateway accepts
+  // only its built-in allowlist; arbitrary desktop command types are never
+  // exposed on this channel.
+  string command = 7;
+  // Connector-owned opaque session id, isolated by channel user/chat. It
+  // changes on /new while the authenticated principal remains unchanged.
+  string channel_session_id = 8;
+}
+
+message ChannelAccepted {
+  string external_message_id = 1;
+  string run_id = 2;
+  string conversation_id = 3;
+  bool deduped = 4;
+}
+
+// ChannelDelta is the only streaming content exposed to a channel connector.
+// Tool calls, tool results, thinking and internal transcript events are never
+// forwarded on this link.
+message ChannelDelta {
+  string run_id = 1;
+  string conversation_id = 2;
+  int64 seq = 3;
+  string text = 4;
+}
+
+message ChannelFinal {
+  string run_id = 1;
+  string conversation_id = 2;
+  string status = 3;
+  string error_code = 4;
+  string message = 5;
+}
+
+message ChannelClientFrame {
+  string request_id = 1;
+
+  oneof payload {
+    ClientHello hello = 2;
+    ChannelInboundMessage inbound = 3;
+    PongFrame pong = 4;
+  }
+}
+
+message ChannelServerFrame {
+  string request_id = 1;
+
+  oneof payload {
+    ServerHello hello = 2;
+    ChannelAccepted accepted = 3;
+    ChannelDelta delta = 4;
+    ChannelFinal final = 5;
+    liveagent.gateway.v1.ErrorResponse local_error = 6;
+    PingFrame ping = 7;
   }
 }
 

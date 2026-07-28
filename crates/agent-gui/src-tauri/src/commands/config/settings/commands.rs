@@ -10,6 +10,10 @@ pub async fn settings_load_all() -> Result<SettingsLoadResponse, String> {
             agents: load_agents(&conn)?,
             ssh: load_ssh(&conn)?,
             remote: load_remote(&conn)?,
+            wecom: Some(
+                serde_json::to_value(load_wecom_settings(&conn)?)
+                    .map_err(|e| format!("serialize WeCom settings failed: {e}"))?,
+            ),
             memory: load_memory(&conn)?,
             default_workdir,
         })
@@ -60,7 +64,7 @@ pub async fn settings_save_mcp(payload: Value) -> Result<(), String> {
 #[tauri::command]
 pub async fn settings_save_remote(
     payload: Value,
-    gateway_controller: tauri::State<'_, Arc<GatewayController>>,
+    wecom_supervisor: tauri::State<'_, Arc<LocalWecomSupervisor>>,
 ) -> Result<(), String> {
     let normalized = parse_remote_settings_payload(payload)?;
     let persisted = serde_json::to_value(&normalized)
@@ -71,7 +75,25 @@ pub async fn settings_save_remote(
     })
     .await
     .map_err(|e| format!("settings_save_remote join 失败：{e}"))??;
-    gateway_controller.apply_config(normalized)
+    wecom_supervisor.inner().clone().reload_from_db().await
+}
+
+/// Save non-secret WeCom settings, or apply an explicit write-only secret
+/// update supplied by the desktop settings panel. The response is always
+/// redacted and safe to keep in webview state.
+#[tauri::command]
+pub async fn settings_save_wecom(
+    payload: Value,
+    wecom_supervisor: tauri::State<'_, Arc<LocalWecomSupervisor>>,
+) -> Result<WecomSettingsPayload, String> {
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_db()?;
+        save_wecom(&mut conn, payload)
+    })
+    .await
+    .map_err(|e| format!("settings_save_wecom join failed: {e}"))??;
+    wecom_supervisor.inner().clone().reload_from_db().await?;
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -126,4 +148,3 @@ pub async fn settings_reset_ssh_known_host(
     .await
     .map_err(|e| format!("settings_reset_ssh_known_host join 失败：{e}"))?
 }
-
