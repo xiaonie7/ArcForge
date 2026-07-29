@@ -13,7 +13,7 @@ const {
 const { createBuiltinToolAuthorizationPolicy } = loader.loadModule(
   "src/lib/security/toolAuthorizationPolicy.ts",
 );
-const { normalizeWeComAccessPolicy, principalCanUseSkill } = loader.loadModule(
+const { normalizeWeComAccessPolicy, principalCanUseSkill, resolveWeComGrant } = loader.loadModule(
   "src/lib/security/wecomAccessPolicy.ts",
 );
 
@@ -106,8 +106,11 @@ test("trusted channel session and command fields are strictly validated", () => 
 test("WeCom principals carry the external user id without default MCP access", async () => {
   const principal = await resolvePrincipalContext(trustedOrigin({ externalUserId: "alice" }));
   assert.equal(principal.externalUserId, "alice");
+  assert.equal(principal.policyVersion, 3);
   assert.equal(principal.scopes.includes("mcp:invoke"), false);
   assert.deepEqual(principal.scopes, ["interaction:respond"]);
+  assert.equal(principal.defaultSkillName, "");
+  assert.deepEqual(principal.allowedDatabaseProfileIds, []);
   const policy = createBuiltinToolAuthorizationPolicy(principal);
   const decision = policy.authorize({
     toolName: "mcp_docs_search",
@@ -177,6 +180,57 @@ test("WeCom ACL is default-deny for read tools and requires an exact identity tu
   );
 });
 
+test("WeCom grants DatabaseQuery only to direct chats with scope and profile resources", async () => {
+  const principal = await resolvePrincipalContext(
+    trustedOrigin({ externalUserId: "alice" }),
+    undefined,
+    {
+      rules: [
+        {
+          tenantId: "tenant-1",
+          botId: "bot-1",
+          externalUserId: "alice",
+          scopes: ["database:read"],
+          allowedDatabaseProfileIds: ["finance-readonly"],
+        },
+      ],
+    },
+  );
+  const policy = createBuiltinToolAuthorizationPolicy(principal);
+  const queryInput = {
+    toolName: "DatabaseQuery",
+    metadata: {
+      groupId: "database",
+      kind: "database_query",
+      isReadOnly: true,
+      displayCategory: "system",
+    },
+    principal,
+  };
+  assert.equal(policy.isToolVisible(queryInput), true);
+  assert.equal(policy.authorize(queryInput).allowed, true);
+
+  const executeInput = {
+    toolName: "DatabaseExecute",
+    metadata: { ...queryInput.metadata, kind: "database_execute", isReadOnly: false },
+    principal,
+  };
+  assert.equal(policy.isToolVisible(executeInput), false);
+  assert.match(policy.authorize(executeInput).reason, /disabled for WeCom/);
+
+  for (const deniedPrincipal of [
+    { ...principal, chatType: "group" },
+    { ...principal, scopes: [] },
+    { ...principal, allowedDatabaseProfileIds: [] },
+  ]) {
+    const deniedPolicy = createBuiltinToolAuthorizationPolicy(deniedPrincipal);
+    assert.equal(
+      deniedPolicy.authorize({ ...queryInput, principal: deniedPrincipal }).allowed,
+      false,
+    );
+  }
+});
+
 test("WeCom ACL independently grants Skill and MCP resources", async () => {
   const principal = await resolvePrincipalContext(
     trustedOrigin({ externalUserId: "alice" }),
@@ -224,6 +278,56 @@ test("WeCom ACL independently grants Skill and MCP resources", async () => {
     }).allowed,
     false,
   );
+});
+
+test("WeCom ACL grants database profiles and fails closed on conflicting default Skills", () => {
+  const origin = { tenantId: "tenant-1", botId: "bot-1", externalUserId: "alice" };
+  const grant = resolveWeComGrant(origin, {
+    rules: [
+      {
+        ...origin,
+        scopes: ["skill:use", "database:read"],
+        allowedSkillNames: ["finance-report"],
+        defaultSkillName: "finance-report",
+        allowedDatabaseProfileIds: ["finance-readonly", "finance-readonly"],
+      },
+      {
+        ...origin,
+        scopes: ["skill:use", "database:read"],
+        allowedSkillNames: ["hr-report"],
+        defaultSkillName: "hr-report",
+        allowedDatabaseProfileIds: ["hr-readonly"],
+      },
+    ],
+  });
+
+  assert.equal(grant.defaultSkillName, "");
+  assert.deepEqual(grant.allowedDatabaseProfileIds, ["finance-readonly", "hr-readonly"]);
+  assert.equal(grant.scopes.includes("database:read"), true);
+});
+
+test("WeCom ACL retains a default Skill only when the exact name is allowed", () => {
+  const normalized = normalizeWeComAccessPolicy({
+    rules: [
+      {
+        tenantId: "tenant-1",
+        botId: "bot-1",
+        externalUserId: "alice",
+        allowedSkillNames: ["finance-report"],
+        defaultSkillName: "Finance-Report",
+      },
+      {
+        tenantId: "tenant-1",
+        botId: "bot-1",
+        externalUserId: "bob",
+        allowedSkillNames: ["finance-report"],
+        defaultSkillName: " finance-report ",
+      },
+    ],
+  });
+
+  assert.equal(normalized.rules[0].defaultSkillName, "");
+  assert.equal(normalized.rules[1].defaultSkillName, "finance-report");
 });
 
 test("malformed or wildcard WeCom ACL rules fail closed", () => {

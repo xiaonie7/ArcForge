@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   CircleHelp,
   Clock3,
+  Database,
   Eye,
   FilePenLine,
   FileText,
@@ -77,6 +78,7 @@ const TOOL_ICONS: Record<ToolCatalogIconId, IconComponent> = {
   wrench: Wrench,
   checklist: ListChecks,
   circleHelp: CircleHelp,
+  database: Database,
 };
 
 type CategoryAccent = {

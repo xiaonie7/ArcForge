@@ -1,6 +1,7 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { invoke } from "@tauri-apps/api/core";
 import { normalizeConversationSystemPrompt } from "../context/systemPrompt";
+import { redactDatabaseSecretsForPersistence } from "../../security/databaseToolSecrets";
 import {
   type ConversationViewState,
   type HistoryMessageRef,
@@ -327,7 +328,7 @@ function buildChatHistorySegmentInput(segment: StoredContextSegment): ChatHistor
     segmentIndex: segment.segmentIndex,
     segmentId: segment.segmentId,
     summaryJson: segment.summary ? JSON.stringify(segment.summary) : undefined,
-    messagesJson: JSON.stringify(segment.messages),
+    messagesJson: JSON.stringify(redactDatabaseSecretsForPersistence(segment.messages)),
     messageCount: segment.messageCount,
     startMessageId: segment.startMessageId,
     endMessageId: segment.endMessageId,

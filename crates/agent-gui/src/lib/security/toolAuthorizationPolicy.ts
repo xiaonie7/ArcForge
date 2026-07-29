@@ -32,6 +32,7 @@ const ALWAYS_DENIED_REMOTE_TOOLS = new Set([
   "TunnelManager",
   "Agent",
   "AgentBatch",
+  "DatabaseExecute",
 ]);
 
 function denied(reason: string, code = "principal_tool_denied"): ToolAuthorizationDecision {
@@ -58,6 +59,7 @@ export function createBuiltinToolAuthorizationPolicy(
   const isGroup = principal.chatType === "group";
   const allowedToolNames = principal.allowedToolNames ?? [];
   const allowedMcpServerIds = principal.allowedMcpServerIds ?? [];
+  const allowedDatabaseProfileIds = principal.allowedDatabaseProfileIds ?? [];
 
   const authorize = ({ toolName, metadata }: ToolAuthorizationInput) => {
     const normalizedName = toolName.trim();
@@ -69,6 +71,17 @@ export function createBuiltinToolAuthorizationPolicy(
       return hasScope("interaction:respond")
         ? { allowed: true }
         : denied("Interactive responses are not enabled for this principal.");
+    }
+    if (normalizedName === "DatabaseQuery") {
+      if (isGroup || !hasScope("database:read")) {
+        return denied(
+          "Database queries require a direct WeCom chat and an explicit read-only database grant.",
+        );
+      }
+      if (allowedDatabaseProfileIds.length === 0) {
+        return denied("No database profiles are granted to this principal.");
+      }
+      return { allowed: true };
     }
     if (!metadata) return denied(`Tool ${normalizedName} has no authorization metadata.`);
 

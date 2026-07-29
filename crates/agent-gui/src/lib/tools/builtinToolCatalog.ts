@@ -39,7 +39,8 @@ export type ToolCatalogIconId =
   | "plug"
   | "wrench"
   | "checklist"
-  | "circleHelp";
+  | "circleHelp"
+  | "database";
 
 export type BuiltinToolCatalogEntry = {
   /** Catalog id (snake_case). Used for React keys and i18n key derivation. */
@@ -260,6 +261,22 @@ export const BUILTIN_TOOL_CATALOG: readonly BuiltinToolCatalogEntry[] = [
     isReadOnly: false,
     runtimeScopes: CHAT_ONLY,
     conditional: true,
+  },
+  {
+    id: "database_query",
+    toolName: "DatabaseQuery",
+    icon: "database",
+    categoryId: "connectivity",
+    isReadOnly: true,
+    runtimeScopes: CHAT_AND_CRON,
+  },
+  {
+    id: "database_execute",
+    toolName: "DatabaseExecute",
+    icon: "database",
+    categoryId: "connectivity",
+    isReadOnly: false,
+    runtimeScopes: CHAT_ONLY,
   },
 ];
 

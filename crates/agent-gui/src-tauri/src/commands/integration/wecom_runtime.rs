@@ -1,6 +1,17 @@
 use std::sync::Arc;
 
-use crate::services::local_wecom::{LocalWecomLogs, LocalWecomStatus, LocalWecomSupervisor};
+use serde::Deserialize;
+
+use crate::services::local_wecom::{
+    LocalWecomLogs, LocalWecomSendReceipt, LocalWecomStatus, LocalWecomSupervisor,
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WecomRuntimeSendMessageRequest {
+    chat_id: String,
+    content: String,
+}
 
 #[tauri::command]
 pub fn wecom_runtime_status(
@@ -21,4 +32,15 @@ pub fn wecom_runtime_logs(
     supervisor: tauri::State<'_, Arc<LocalWecomSupervisor>>,
 ) -> Result<LocalWecomLogs, String> {
     Ok(supervisor.logs())
+}
+
+#[tauri::command]
+pub async fn wecom_runtime_send_message(
+    request: WecomRuntimeSendMessageRequest,
+    supervisor: tauri::State<'_, Arc<LocalWecomSupervisor>>,
+) -> Result<LocalWecomSendReceipt, String> {
+    supervisor
+        .inner()
+        .send_markdown(request.chat_id, request.content)
+        .await
 }

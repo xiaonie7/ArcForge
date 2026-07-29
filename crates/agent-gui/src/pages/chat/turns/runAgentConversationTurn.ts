@@ -216,6 +216,8 @@ export type RunAgentConversationTurnParams = {
     model: string;
   };
   effectiveWorkdir: string;
+  /** True only for an explicitly selected cwd-empty scope or a trusted channel principal. */
+  allowEmptyWorkdir?: boolean;
   effectiveSkillsEnabled: boolean;
   showSilentMemoryExtraction: boolean;
   skillsRootDir?: string;
@@ -289,6 +291,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     runtimeModel,
     selectedModel,
     effectiveWorkdir,
+    allowEmptyWorkdir = false,
     effectiveSkillsEnabled,
     showSilentMemoryExtraction,
     skillsRootDir,
@@ -336,7 +339,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     memoryExtractionStatusText,
   } = params;
 
-  if (!effectiveWorkdir) {
+  if (!effectiveWorkdir && !allowEmptyWorkdir) {
     throw new Error("Tool mode requires a project directory from the chat sidebar.");
   }
 
@@ -691,6 +694,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
         runtimeEnvironment,
         context: agentContext,
         workdir: effectiveWorkdir,
+        allowEmptyWorkdir,
         sessionId,
         nativeWebSearch: nativeWebSearchEnabled,
         tools: combinedTools,
@@ -1169,7 +1173,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     createdAt,
     titlePromise,
   });
-  gatewayBridgeEvents.queueEvent({
+  await gatewayBridgeEvents.queueEvent({
     type: "done",
     conversation_id: conversationId,
   });

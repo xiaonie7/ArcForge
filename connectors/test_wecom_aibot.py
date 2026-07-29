@@ -1,4 +1,6 @@
 import asyncio
+import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -23,10 +25,17 @@ from connectors.wecom_aibot.protocol import (
 )
 from connectors.wecom_aibot.worker import (
     CONNECTOR_READY_MARKER,
+    CONTROL_RESULT_MARKER,
+    _RedactingSdkLogger,
+    _WecomConnectionState,
     _external_message_id,
     _handle_text,
+    _handle_control_line,
+    _register_connection_handlers,
     _routing,
+    _serve_control_requests,
     _text,
+    _wait_for_initial_authentication,
     run,
 )
 
@@ -434,6 +443,28 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
             "session-1",
         )
 
+    async def test_completed_without_text_is_failed_and_not_cached(self):
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        dedupe = DedupeStore()
+        wecom = SimpleNamespace(reply_stream=AsyncMock())
+        result = SimpleNamespace(status="completed", text="", message="")
+        channel = SimpleNamespace(submit=AsyncMock(return_value=result))
+        config = _config()
+        frame = self._frame("message-1", "hello")
+
+        with patch("connectors.wecom_aibot.worker.logger.exception"):
+            await _handle_text(wecom, channel, dedupe, sessions, config, frame)
+            await _handle_text(wecom, channel, dedupe, sessions, config, frame)
+
+        self.assertEqual(channel.submit.await_count, 2)
+        final_replies = [
+            call.args[2]
+            for call in wecom.reply_stream.await_args_list
+            if call.args[3]
+        ]
+        self.assertEqual(len(final_replies), 2)
+        self.assertNotIn("(empty response)", final_replies)
+
     async def test_new_and_followup_are_submitted_in_session_order(self):
         ids = iter(("session-1", "session-2"))
         sessions = SessionStore(id_factory=lambda: next(ids))
@@ -531,9 +562,270 @@ class ChannelClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(socket.closed)
 
 
+class ConnectorControlTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _line(request_id="request-1", **overrides):
+        request = {
+            "v": 1,
+            "type": "send_markdown",
+            "requestId": request_id,
+            "chatId": "alice",
+            "content": "hello **world**",
+        }
+        request.update(overrides)
+        return json.dumps(request) + "\n"
+
+    @staticmethod
+    def _result(print_mock):
+        output = print_mock.call_args.args[0]
+        if not output.startswith(CONTROL_RESULT_MARKER):
+            raise AssertionError(f"unexpected control output: {output!r}")
+        return output, json.loads(output[len(CONTROL_RESULT_MARKER) :])
+
+    async def test_send_markdown_uses_authenticated_singleton_and_redacted_result(self):
+        authenticated = asyncio.Event()
+        authenticated.set()
+        client = SimpleNamespace(send_message=AsyncMock(return_value={"errcode": 0}))
+
+        with patch("builtins.print") as print_mock:
+            await _handle_control_line(
+                client,
+                authenticated,
+                self._line(chatId=" alice "),
+                max_text_bytes=1024,
+            )
+
+        client.send_message.assert_awaited_once_with(
+            "alice",
+            {
+                "msgtype": "markdown",
+                "markdown": {"content": "hello **world**"},
+            },
+        )
+        output, result = self._result(print_mock)
+        self.assertEqual(
+            result,
+            {"requestId": "request-1", "ok": True, "error": ""},
+        )
+        self.assertEqual(set(result), {"requestId", "ok", "error"})
+        self.assertNotIn("alice", output)
+        self.assertNotIn("hello", output)
+
+    async def test_send_failure_does_not_expose_sdk_error_or_message(self):
+        authenticated = asyncio.Event()
+        authenticated.set()
+        client = SimpleNamespace(
+            send_message=AsyncMock(
+                side_effect=RuntimeError("secret-credential and private-message")
+            )
+        )
+
+        with (
+            patch("builtins.print") as print_mock,
+            patch("connectors.wecom_aibot.worker.logger.warning") as warning_mock,
+        ):
+            await _handle_control_line(
+                client,
+                authenticated,
+                self._line(content="private-message"),
+                max_text_bytes=1024,
+            )
+
+        output, result = self._result(print_mock)
+        self.assertEqual(
+            result,
+            {"requestId": "request-1", "ok": False, "error": "send_failed"},
+        )
+        self.assertNotIn("private-message", output)
+        self.assertNotIn("secret-credential", output)
+        warning_mock.assert_called_once_with("WeCom proactive message failed")
+
+    async def test_nonzero_ack_is_reported_as_send_failure(self):
+        authenticated = asyncio.Event()
+        authenticated.set()
+        client = SimpleNamespace(
+            send_message=AsyncMock(
+                return_value={"errcode": 40013, "errmsg": "private remote detail"}
+            )
+        )
+
+        with (
+            patch("builtins.print") as print_mock,
+            patch("connectors.wecom_aibot.worker.logger.warning"),
+        ):
+            await _handle_control_line(
+                client,
+                authenticated,
+                self._line(),
+                max_text_bytes=1024,
+            )
+
+        output, result = self._result(print_mock)
+        self.assertEqual(result["error"], "send_failed")
+        self.assertNotIn("private remote detail", output)
+
+    async def test_invalid_and_unauthenticated_requests_are_rejected_before_send(self):
+        cases = (
+            ("not-json", "invalid_json", ""),
+            (json.dumps([]), "invalid_request", ""),
+            (self._line(request_id="bad request"), "invalid_request_id", ""),
+            (self._line(v=2), "unsupported_version", "request-1"),
+            (self._line(type="send_text"), "unsupported_type", "request-1"),
+            (self._line(chatId=" \n "), "invalid_chat_id", "request-1"),
+            (self._line(content="\u00e9\u00e9"), "invalid_content", "request-1"),
+        )
+        authenticated = asyncio.Event()
+        client = SimpleNamespace(send_message=AsyncMock())
+        for line, expected_error, expected_request_id in cases:
+            with self.subTest(error=expected_error), patch("builtins.print") as print_mock:
+                await _handle_control_line(
+                    client,
+                    authenticated,
+                    line,
+                    max_text_bytes=3,
+                )
+                _output, result = self._result(print_mock)
+                self.assertEqual(result["requestId"], expected_request_id)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"], expected_error)
+                self.assertEqual(set(result), {"requestId", "ok", "error"})
+
+        with patch("builtins.print") as print_mock:
+            await _handle_control_line(
+                client,
+                authenticated,
+                self._line(content="ok"),
+                max_text_bytes=3,
+            )
+        _output, result = self._result(print_mock)
+        self.assertEqual(result["error"], "not_authenticated")
+        client.send_message.assert_not_awaited()
+
+    async def test_disconnected_event_clears_outbound_authentication(self):
+        handlers = {}
+
+        class FakeWecom:
+            def on(self, event):
+                return lambda handler: handlers.setdefault(event, handler)
+
+        state = _WecomConnectionState()
+        _register_connection_handlers(FakeWecom(), state)
+        handlers["authenticated"]()
+        self.assertTrue(state.authenticated.is_set())
+        with patch("connectors.wecom_aibot.worker.logger.warning"):
+            handlers["disconnected"]("connection lost")
+        self.assertFalse(state.authenticated.is_set())
+
+    async def test_jsonl_server_correlates_concurrent_requests_and_finishes_at_eof(self):
+        authenticated = asyncio.Event()
+        authenticated.set()
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        started = []
+
+        async def send_message(chat_id, body):
+            started.append((chat_id, body))
+            if len(started) == 2:
+                both_started.set()
+            await release.wait()
+            return {"errcode": 0}
+
+        client = SimpleNamespace(send_message=AsyncMock(side_effect=send_message))
+        stream = io.StringIO(self._line("request-1") + self._line("request-2"))
+        with patch("builtins.print") as print_mock:
+            task = asyncio.create_task(
+                _serve_control_requests(
+                    client,
+                    authenticated,
+                    max_text_bytes=1024,
+                    stream=stream,
+                )
+            )
+            await asyncio.wait_for(both_started.wait(), timeout=1)
+            release.set()
+            await asyncio.wait_for(task, timeout=1)
+
+        results = []
+        for call in print_mock.call_args_list:
+            output = call.args[0]
+            self.assertTrue(output.startswith(CONTROL_RESULT_MARKER))
+            results.append(json.loads(output[len(CONTROL_RESULT_MARKER) :]))
+        self.assertEqual(
+            {result["requestId"] for result in results},
+            {"request-1", "request-2"},
+        )
+        self.assertTrue(all(result["ok"] for result in results))
+        self.assertEqual(client.send_message.await_count, 2)
+
+    async def test_binary_stdin_is_decoded_as_utf8(self):
+        authenticated = asyncio.Event()
+        authenticated.set()
+        client = SimpleNamespace(send_message=AsyncMock(return_value={"errcode": 0}))
+        request = {
+            "v": 1,
+            "type": "send_markdown",
+            "requestId": "request-utf8",
+            "chatId": "alice",
+            "content": "\u4e2d\u6587 Markdown",
+        }
+        stream = io.BytesIO((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
+
+        with patch("builtins.print"):
+            await _serve_control_requests(
+                client,
+                authenticated,
+                max_text_bytes=1024,
+                stream=stream,
+            )
+
+        client.send_message.assert_awaited_once_with(
+            "alice",
+            {
+                "msgtype": "markdown",
+                "markdown": {"content": "\u4e2d\u6587 Markdown"},
+            },
+        )
+
+
+class SdkLoggerTests(unittest.TestCase):
+    def test_sdk_logger_never_forwards_dynamic_messages_or_arguments(self):
+        sdk_logger = _RedactingSdkLogger()
+        with (
+            patch("connectors.wecom_aibot.worker.logger.debug") as debug_mock,
+            patch("connectors.wecom_aibot.worker.logger.info") as info_mock,
+            patch("connectors.wecom_aibot.worker.logger.warning") as warning_mock,
+            patch("connectors.wecom_aibot.worker.logger.error") as error_mock,
+        ):
+            sdk_logger.debug("private debug %s", "secret")
+            sdk_logger.info("private info %s", "secret")
+            sdk_logger.warn("private warning %s", "secret")
+            sdk_logger.error("private errmsg %s", "secret")
+
+        debug_mock.assert_called_once_with("WeCom SDK debug event")
+        info_mock.assert_called_once_with("WeCom SDK status event")
+        warning_mock.assert_called_once_with("WeCom SDK warning")
+        error_mock.assert_called_once_with("WeCom SDK error")
+        all_calls = repr(
+            debug_mock.call_args_list
+            + info_mock.call_args_list
+            + warning_mock.call_args_list
+            + error_mock.call_args_list
+        )
+        self.assertNotIn("private", all_calls)
+        self.assertNotIn("secret", all_calls)
+
+
 class ConnectorReadinessTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ready_marker_waits_for_gateway_and_wecom_connections(self):
+    async def test_initial_authentication_wait_times_out(self):
+        with self.assertRaisesRegex(TimeoutError, "authentication timed out"):
+            await _wait_for_initial_authentication(
+                _WecomConnectionState(),
+                timeout=0.01,
+            )
+
+    async def test_ready_marker_waits_for_gateway_and_wecom_authentication(self):
         events = []
+        wecom_instances = []
 
         class FakeChannel:
             def __init__(self, _config):
@@ -550,13 +842,19 @@ class ConnectorReadinessTests(unittest.IsolatedAsyncioTestCase):
 
         class FakeWecom:
             def __init__(self, _options):
-                pass
+                self.options = _options
+                self.handlers = {}
+                wecom_instances.append(self)
 
-            def on(self, _event):
-                return lambda handler: handler
+            def on(self, event):
+                return lambda handler: self.handlers.setdefault(event, handler)
+
+            def emit(self, event, *args):
+                self.handlers[event](*args)
 
             async def connect(self):
                 events.append("wecom")
+                self.emit("connected")
 
             def disconnect(self):
                 events.append("disconnected")
@@ -568,17 +866,123 @@ class ConnectorReadinessTests(unittest.IsolatedAsyncioTestCase):
         ):
             task = asyncio.create_task(run(_config()))
             for _ in range(100):
-                if print_mock.call_args_list:
+                if "wecom" in events:
                     break
                 await asyncio.sleep(0)
 
             self.assertEqual(events[:2], ["gateway", "wecom"])
-            print_mock.assert_called_once_with(CONNECTOR_READY_MARKER, flush=True)
+            print_mock.assert_not_called()
 
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
+            wecom_instances[0].emit("authenticated")
+            for _ in range(100):
+                if print_mock.call_args_list:
+                    break
+                await asyncio.sleep(0)
+            print_mock.assert_called_once_with(CONNECTOR_READY_MARKER, flush=True)
+            self.assertIsInstance(wecom_instances[0].options.logger, _RedactingSdkLogger)
+
+            with patch("connectors.wecom_aibot.worker.logger.warning"):
+                wecom_instances[0].emit("disconnected", "private remote reason")
+            with self.assertRaisesRegex(RuntimeError, "connection lost"):
                 await task
             self.assertIn("disconnected", events)
+            print_mock.assert_called_once_with(CONNECTOR_READY_MARKER, flush=True)
+
+    async def test_connection_error_after_ready_exits_without_second_marker(self):
+        wecom_instances = []
+
+        class FakeChannel:
+            def __init__(self, _config):
+                self.closed = asyncio.Event()
+
+            async def connect(self):
+                return None
+
+            async def wait_closed(self):
+                await self.closed.wait()
+
+            async def close(self):
+                self.closed.set()
+
+        class FakeWecom:
+            def __init__(self, _options):
+                self.handlers = {}
+                self.connected = False
+                wecom_instances.append(self)
+
+            def on(self, event):
+                return lambda handler: self.handlers.setdefault(event, handler)
+
+            def emit(self, event, *args):
+                self.handlers[event](*args)
+
+            async def connect(self):
+                self.connected = True
+                self.emit("connected")
+
+            def disconnect(self):
+                return None
+
+        with (
+            patch("connectors.wecom_aibot.worker.ChannelClient", FakeChannel),
+            patch("connectors.wecom_aibot.worker.WSClient", FakeWecom),
+            patch("builtins.print") as print_mock,
+        ):
+            task = asyncio.create_task(run(_config()))
+            for _ in range(100):
+                if wecom_instances and wecom_instances[0].connected:
+                    break
+                await asyncio.sleep(0)
+            wecom_instances[0].emit("authenticated")
+            for _ in range(100):
+                if print_mock.call_args_list:
+                    break
+                await asyncio.sleep(0)
+            print_mock.assert_called_once_with(CONNECTOR_READY_MARKER, flush=True)
+
+            with patch("connectors.wecom_aibot.worker.logger.warning"):
+                wecom_instances[0].emit("error", RuntimeError("private remote error"))
+            with self.assertRaisesRegex(RuntimeError, "connection lost"):
+                await task
+        print_mock.assert_called_once_with(CONNECTOR_READY_MARKER, flush=True)
+
+    async def test_authentication_error_exits_without_ready_marker(self):
+        class FakeChannel:
+            def __init__(self, _config):
+                self.closed = asyncio.Event()
+
+            async def connect(self):
+                return None
+
+            async def wait_closed(self):
+                await self.closed.wait()
+
+            async def close(self):
+                self.closed.set()
+
+        class FakeWecom:
+            def __init__(self, _options):
+                self.handlers = {}
+
+            def on(self, event):
+                return lambda handler: self.handlers.setdefault(event, handler)
+
+            async def connect(self):
+                self.handlers["connected"]()
+                self.handlers["error"](RuntimeError("credential details"))
+
+            def disconnect(self):
+                return None
+
+        with (
+            patch("connectors.wecom_aibot.worker.ChannelClient", FakeChannel),
+            patch("connectors.wecom_aibot.worker.WSClient", FakeWecom),
+            patch("connectors.wecom_aibot.worker.logger.warning"),
+            patch("builtins.print") as print_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "authentication failed"):
+                await asyncio.wait_for(run(_config()), timeout=1)
+        print_mock.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ import type {
 import { assistantMessageToText } from "../../providers/llm";
 import { isProviderNativeWebSearchToolName } from "../../providers/nativeWebSearch";
 import { isSubagentCardToolCall } from "../../subagents/card";
+import { redactDatabaseToolArguments } from "../../security/databaseToolSecrets";
 import {
   buildSubagentCardToolCallId,
   type SubagentBatchDetails,
@@ -466,7 +467,7 @@ function summarizeImageArgValue(key: string, value: unknown) {
 }
 
 export function toolCallArgsForDisplay(toolCall: ToolCall) {
-  const args = toolCall.arguments || {};
+  const args = redactDatabaseToolArguments(toolCall.name, toolCall.arguments || {});
   const name = toolCall.name;
 
   switch (name) {

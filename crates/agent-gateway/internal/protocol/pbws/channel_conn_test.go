@@ -7,6 +7,7 @@ import (
 	"github.com/liveagent/agent-gateway/internal/config"
 	"github.com/liveagent/agent-gateway/internal/handler"
 	gatewayv2 "github.com/liveagent/agent-gateway/internal/proto/v2"
+	"github.com/liveagent/agent-gateway/internal/transport/wscore"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -152,6 +153,21 @@ func TestChannelControlCommandsDoNotSeedUserMessages(t *testing.T) {
 	}
 }
 
+func TestChannelChatRequestBodyDefaultsToAutoQueue(t *testing.T) {
+	inbound := &gatewayv2.ChannelInboundMessage{Text: "  hello from WeCom  "}
+	body := channelChatRequestBody("conversation-1", "client-request-1", inbound)
+
+	if body.ConversationID != "conversation-1" || body.ClientRequestID != "client-request-1" {
+		t.Fatalf("channel chat request identity = %#v", body)
+	}
+	if body.Message != "hello from WeCom" {
+		t.Fatalf("channel chat request message = %q", body.Message)
+	}
+	if body.QueuePolicy != "auto" {
+		t.Fatalf("channel chat request queue policy = %q, want auto", body.QueuePolicy)
+	}
+}
+
 func TestChannelVisibleTokenTextFiltersInternalCompactionCheckpoints(t *testing.T) {
 	if text, ok := channelVisibleTokenText(map[string]any{"text": "answer"}); !ok || text != "answer" {
 		t.Fatalf("visible assistant token was filtered: %q %v", text, ok)
@@ -164,6 +180,42 @@ func TestChannelVisibleTokenTextFiltersInternalCompactionCheckpoints(t *testing.
 		if text, ok := channelVisibleTokenText(payload); ok || text != "" {
 			t.Fatalf("internal token was exposed: %#v => %q %v", payload, text, ok)
 		}
+	}
+}
+
+func TestChannelRunDeltaAndFinalShareOrderedResponseQueue(t *testing.T) {
+	core := wscore.NewConn(nil, wscore.Config{QueueSize: 2, CtrlQueueSize: 2})
+	c := &channelConn{core: core}
+
+	if err := c.sendRunDelta("request-1", "run-1", "conversation-1", 7, "answer"); err != nil {
+		t.Fatalf("sendRunDelta() = %v", err)
+	}
+	if err := c.sendRunFinal("request-1", "run-1", "conversation-1", "completed", "", ""); err != nil {
+		t.Fatalf("sendRunFinal() = %v", err)
+	}
+	if got := len(core.CtrlOutbox); got != 0 {
+		t.Fatalf("control queue depth = %d, want 0", got)
+	}
+
+	first := <-core.Outbox
+	second := <-core.Outbox
+	if first.Class != wscore.FrameResponse || first.Kind != "channel_delta" {
+		t.Fatalf("first frame = %#v, want response delta", first)
+	}
+	if second.Class != wscore.FrameResponse || second.Kind != "channel_final" {
+		t.Fatalf("second frame = %#v, want response final", second)
+	}
+
+	var delta gatewayv2.ChannelServerFrame
+	if err := proto.Unmarshal(first.Data, &delta); err != nil {
+		t.Fatalf("decode delta: %v", err)
+	}
+	var final gatewayv2.ChannelServerFrame
+	if err := proto.Unmarshal(second.Data, &final); err != nil {
+		t.Fatalf("decode final: %v", err)
+	}
+	if delta.GetDelta().GetText() != "answer" || final.GetFinal().GetStatus() != "completed" {
+		t.Fatalf("ordered frames = %#v then %#v", delta.GetDelta(), final.GetFinal())
 	}
 }
 

@@ -121,6 +121,23 @@ fn initialize_schema_locked(conn: &Connection) -> Result<(), String> {
             payload_json TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS database_profiles (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            driver TEXT NOT NULL,
+            host TEXT NOT NULL DEFAULT '',
+            port INTEGER NOT NULL DEFAULT 0,
+            database_name TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            ssl_mode TEXT NOT NULL DEFAULT 'prefer',
+            sqlite_path TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            allow_writes INTEGER NOT NULL DEFAULT 0,
+            query_timeout_ms INTEGER NOT NULL DEFAULT 15000,
+            max_rows INTEGER NOT NULL DEFAULT 200,
+            max_affected_rows INTEGER NOT NULL DEFAULT 100,
+            updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS tunnel_settings (
             tunnel_id TEXT PRIMARY KEY,
             payload_json TEXT NOT NULL,

@@ -48,13 +48,15 @@ export type PrincipalContext = Readonly<{
   /** Exact resource grants resolved from the local WeCom ACL. */
   allowedToolNames: readonly string[];
   allowedSkillNames: readonly string[];
+  defaultSkillName: string;
   allowedSkillBaseDirs: readonly string[];
+  allowedDatabaseProfileIds: readonly string[];
   allowedMcpServerIds: readonly string[];
 }>;
 
 const MAX_ID_LENGTH = 512;
 const MAX_CHANNEL_SESSION_ID_LENGTH = 128;
-const PRINCIPAL_POLICY_VERSION = 2;
+const PRINCIPAL_POLICY_VERSION = 3;
 
 function requiredId(value: unknown, field: string, maxLength = MAX_ID_LENGTH) {
   if (typeof value !== "string") {
@@ -219,7 +221,9 @@ export async function resolvePrincipalContext(
     scopes: Object.freeze(scopes),
     allowedToolNames: grant.allowedToolNames,
     allowedSkillNames: grant.allowedSkillNames,
+    defaultSkillName: grant.defaultSkillName,
     allowedSkillBaseDirs: grant.allowedSkillBaseDirs,
+    allowedDatabaseProfileIds: grant.allowedDatabaseProfileIds,
     allowedMcpServerIds: grant.allowedMcpServerIds,
   });
 }

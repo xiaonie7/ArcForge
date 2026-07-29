@@ -16,7 +16,8 @@ export type BuiltinToolGroupId =
   | "office"
   | "mcp"
   | "subagent"
-  | "memory";
+  | "memory"
+  | "database";
 
 export type BuiltinToolDisplayCategory =
   | "file"

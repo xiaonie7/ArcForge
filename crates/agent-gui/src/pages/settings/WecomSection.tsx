@@ -15,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Send,
   Server,
   Shield,
   Terminal,
@@ -22,12 +23,20 @@ import {
 } from "../../components/icons";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
+import { Textarea } from "../../components/ui/textarea";
 import { useLocale } from "../../i18n";
 import type { WeComAccessRule, WeComAccessScope } from "../../lib/security/wecomAccessPolicy";
 import type { AppSettings, WecomGatewayMode, WecomSettings } from "../../lib/settings";
 import { isSupportedGatewayUrl } from "../../lib/settings/normalize";
 import { AgentActivationSwitch } from "./shared";
 import type { SettingsSectionProps } from "./types";
+import {
+  commitWeComAccessRuleDraft,
+  createWeComAccessRuleDraft,
+  editWeComAccessRuleDraft,
+  isCompleteWeComAccessRuleDraft,
+  type WeComAccessRuleDraft,
+} from "./wecomAccessDraft";
 
 type WecomWritePayload = WecomSettings & {
   secretUpdate?: string | null;
@@ -57,6 +66,19 @@ type WecomRuntimeLogs = {
 type WecomRuntimeLogsResponse = {
   gateway: string[] | string;
   connector: string[] | string;
+};
+
+type DatabaseProfileOption = {
+  id: string;
+  name: string;
+  driver: string;
+  enabled: boolean;
+};
+
+type WecomRuntimeSendMessageResponse = {
+  requestId: string;
+  chatId: string;
+  sentAt: number;
 };
 
 type Translate = (key: string) => string;
@@ -109,6 +131,11 @@ function runtimeStateClasses(state: string | null | undefined) {
     return "bg-destructive/10 text-destructive";
   }
   return "bg-muted/50 text-muted-foreground";
+}
+
+function isRuntimeReadyState(state: string | null | undefined) {
+  const normalized = state?.trim().toLowerCase();
+  return normalized === "running" || normalized === "connected";
 }
 
 function formatRuntimeTimestamp(value?: number | null) {
@@ -204,6 +231,16 @@ export function WecomSection(props: WecomSectionProps) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [runtimeLogs, setRuntimeLogs] = useState<WecomRuntimeLogs | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [sendPanelOpen, setSendPanelOpen] = useState(false);
+  const [sendChatId, setSendChatId] = useState("");
+  const [sendContent, setSendContent] = useState("");
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [sendMessageError, setSendMessageError] = useState<string | null>(null);
+  const [sendMessageResult, setSendMessageResult] =
+    useState<WecomRuntimeSendMessageResponse | null>(null);
+  const [accessRuleDraft, setAccessRuleDraft] = useState<WeComAccessRuleDraft | null>(null);
+  const [databaseProfiles, setDatabaseProfiles] = useState<DatabaseProfileOption[]>([]);
+  const [databaseProfilesLoading, setDatabaseProfilesLoading] = useState(true);
 
   const gatewayUrl = settings.remote.gatewayUrl.trim();
   const isLocalMode = settings.wecom.gatewayMode === "local";
@@ -213,6 +250,11 @@ export function WecomSection(props: WecomSectionProps) {
     runtimeStatus?.mode === "local" && runtimeGatewayUrl
       ? runtimeGatewayUrl
       : `http://127.0.0.1:${settings.wecom.localGatewayPort}`;
+  const runtimeCanSendMessage =
+    !runtimeLoading &&
+    isRuntimeReadyState(runtimeStatus?.overall) &&
+    isRuntimeReadyState(runtimeStatus?.gatewayState) &&
+    isRuntimeReadyState(runtimeStatus?.connectorState);
   const missingConfiguration = useMemo<MissingConfiguration | null>(() => {
     if (!settings.wecom.botId.trim()) {
       return { fieldId: "wecom-bot-id", label: t("settings.wecomMissingBotId") };
@@ -264,20 +306,20 @@ export function WecomSection(props: WecomSectionProps) {
   );
 
   const addAccessRule = useCallback(() => {
-    const rule: WeComAccessRule = {
-      tenantId: settings.wecom.tenantId.trim() || settings.wecom.botId.trim(),
-      botId: settings.wecom.botId.trim(),
-      externalUserId: "",
-      enabled: true,
-      roles: [],
-      scopes: [],
-      allowedToolNames: [],
-      allowedSkillNames: [],
-      allowedSkillBaseDirs: [],
-      allowedMcpServerIds: [],
-    };
-    replaceAccessRules([...settings.wecom.accessPolicy.rules, rule]);
-  }, [replaceAccessRules, settings.wecom]);
+    setAccessRuleDraft(createWeComAccessRuleDraft(settings.wecom.tenantId, settings.wecom.botId));
+  }, [settings.wecom.botId, settings.wecom.tenantId]);
+
+  const updateAccessRuleDraft = useCallback((patch: Partial<WeComAccessRuleDraft>) => {
+    setAccessRuleDraft((current) => (current ? editWeComAccessRuleDraft(current, patch) : current));
+  }, []);
+
+  const saveAccessRuleDraft = useCallback(() => {
+    if (!accessRuleDraft) return;
+    const accessPolicy = commitWeComAccessRuleDraft(settings.wecom.accessPolicy, accessRuleDraft);
+    if (!accessPolicy) return;
+    updateWecomSettings(setSettings, { accessPolicy });
+    setAccessRuleDraft(null);
+  }, [accessRuleDraft, setSettings, settings.wecom.accessPolicy]);
 
   const updateAccessRule = useCallback(
     (index: number, patch: Partial<WeComAccessRule>) => {
@@ -311,6 +353,18 @@ export function WecomSection(props: WecomSectionProps) {
     [settings.wecom.accessPolicy.rules, updateAccessRule],
   );
 
+  const toggleAccessDatabaseProfile = useCallback(
+    (index: number, profileId: string) => {
+      const rule = settings.wecom.accessPolicy.rules[index];
+      if (!rule) return;
+      const allowedDatabaseProfileIds = rule.allowedDatabaseProfileIds.includes(profileId)
+        ? rule.allowedDatabaseProfileIds.filter((item) => item !== profileId)
+        : [...rule.allowedDatabaseProfileIds, profileId];
+      updateAccessRule(index, { allowedDatabaseProfileIds });
+    },
+    [settings.wecom.accessPolicy.rules, updateAccessRule],
+  );
+
   const refreshRuntimeStatus = useCallback(async () => {
     setRuntimeLoading(true);
     try {
@@ -327,6 +381,23 @@ export function WecomSection(props: WecomSectionProps) {
   useEffect(() => {
     void refreshRuntimeStatus();
   }, [refreshRuntimeStatus]);
+
+  useEffect(() => {
+    let active = true;
+    void invoke<DatabaseProfileOption[]>("database_profiles_list")
+      .then((profiles) => {
+        if (active) setDatabaseProfiles(profiles);
+      })
+      .catch(() => {
+        if (active) setDatabaseProfiles([]);
+      })
+      .finally(() => {
+        if (active) setDatabaseProfilesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -395,6 +466,36 @@ export function WecomSection(props: WecomSectionProps) {
       return next;
     });
   }, [loadRuntimeLogs]);
+
+  const sendRuntimeMessage = useCallback(async () => {
+    const chatId = sendChatId.trim();
+    const content = sendContent.trim();
+    if (!runtimeCanSendMessage || !chatId || !content || sendingMessage) return;
+
+    setSendingMessage(true);
+    setSendMessageError(null);
+    setSendMessageResult(null);
+    try {
+      const result = await invoke<WecomRuntimeSendMessageResponse>("wecom_runtime_send_message", {
+        request: { chatId, content },
+      });
+      setSendMessageResult(result);
+      setSendContent("");
+    } catch (error) {
+      setSendMessageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSendingMessage(false);
+    }
+  }, [runtimeCanSendMessage, sendChatId, sendContent, sendingMessage]);
+
+  const closeSendPanel = useCallback(() => {
+    if (sendingMessage) return;
+    setSendPanelOpen(false);
+    setSendChatId("");
+    setSendContent("");
+    setSendMessageError(null);
+    setSendMessageResult(null);
+  }, [sendingMessage]);
 
   const setGatewayMode = useCallback(
     (gatewayMode: WecomGatewayMode) => {
@@ -540,6 +641,26 @@ export function WecomSection(props: WecomSectionProps) {
               </span>
             </div>
             <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={!runtimeCanSendMessage}
+                aria-expanded={sendPanelOpen}
+                title={
+                  runtimeCanSendMessage
+                    ? t("settings.wecomSendMessage")
+                    : t("settings.wecomSendMessageUnavailable")
+                }
+                onClick={() => {
+                  setSendPanelOpen(true);
+                  setSendMessageError(null);
+                  setSendMessageResult(null);
+                }}
+              >
+                <Send className="h-3.5 w-3.5" />
+                {t("settings.wecomSendMessage")}
+              </Button>
               <Button type="button" size="sm" variant="outline" onClick={toggleRuntimeLogs}>
                 <FileText className="h-3.5 w-3.5" />
                 {logsOpen ? t("settings.wecomHideLogs") : t("settings.wecomShowLogs")}
@@ -637,6 +758,112 @@ export function WecomSection(props: WecomSectionProps) {
             <p className="whitespace-pre-wrap break-words rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
               {runtimeActionError || runtimeStatus?.lastError}
             </p>
+          ) : null}
+
+          {sendPanelOpen ? (
+            <div className="space-y-3 border-t border-border/60 pt-4">
+              <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                <Send className="h-3.5 w-3.5" />
+                {t("settings.wecomSendPanelTitle")}
+              </div>
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,240px)_minmax(0,1fr)]">
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="wecom-send-chat-id"
+                    className="text-xs font-medium text-muted-foreground"
+                  >
+                    {t("settings.wecomSendTargetId")}
+                  </label>
+                  <Input
+                    id="wecom-send-chat-id"
+                    value={sendChatId}
+                    disabled={sendingMessage}
+                    autoComplete="off"
+                    placeholder={t("settings.wecomSendTargetIdPlaceholder")}
+                    onChange={(event) => {
+                      setSendChatId(event.target.value);
+                      setSendMessageError(null);
+                      setSendMessageResult(null);
+                    }}
+                    className="font-mono text-[13px]"
+                  />
+                  <p className="text-[11px] leading-relaxed text-muted-foreground/70">
+                    {t("settings.wecomSendTargetIdHint")}
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="wecom-send-content"
+                    className="text-xs font-medium text-muted-foreground"
+                  >
+                    {t("settings.wecomSendMarkdown")}
+                  </label>
+                  <Textarea
+                    id="wecom-send-content"
+                    value={sendContent}
+                    disabled={sendingMessage}
+                    rows={4}
+                    placeholder={t("settings.wecomSendMarkdownPlaceholder")}
+                    onChange={(event) => {
+                      setSendContent(event.target.value);
+                      setSendMessageError(null);
+                      setSendMessageResult(null);
+                    }}
+                    className="min-h-24 resize-y text-[13px]"
+                  />
+                </div>
+              </div>
+
+              {sendMessageError ? (
+                <p className="whitespace-pre-wrap break-words rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  {sendMessageError}
+                </p>
+              ) : null}
+              {sendMessageResult ? (
+                <div className="rounded-lg bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+                  <p>
+                    {t("settings.wecomSendSuccess").replace("{chatId}", sendMessageResult.chatId)}
+                  </p>
+                  <p className="mt-1 font-mono text-[11px] opacity-80">
+                    {t("settings.wecomSendSuccessDetails")
+                      .replace("{requestId}", sendMessageResult.requestId)
+                      .replace("{time}", formatRuntimeTimestamp(sendMessageResult.sentAt))}
+                  </p>
+                </div>
+              ) : null}
+
+              <div className="flex justify-end gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={sendingMessage}
+                  onClick={closeSendPanel}
+                >
+                  {t("settings.wecomSendCancel")}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={
+                    sendingMessage ||
+                    !runtimeCanSendMessage ||
+                    !sendChatId.trim() ||
+                    !sendContent.trim()
+                  }
+                  onClick={() => void sendRuntimeMessage()}
+                >
+                  {sendingMessage ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Send className="h-3.5 w-3.5" />
+                  )}
+                  {sendingMessage
+                    ? t("settings.wecomSendingMessage")
+                    : t("settings.wecomSendSubmit")}
+                </Button>
+              </div>
+            </div>
           ) : null}
 
           {logsOpen ? (
@@ -1013,18 +1240,94 @@ export function WecomSection(props: WecomSectionProps) {
             <Shield className="h-4 w-4 text-muted-foreground" />
             {t("settings.wecomAccessControl")}
           </div>
-          <Button type="button" size="sm" variant="outline" onClick={addAccessRule}>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={accessRuleDraft !== null}
+            onClick={addAccessRule}
+          >
             <Plus className="h-3.5 w-3.5" />
             {t("settings.wecomAddAccessRule")}
           </Button>
         </div>
 
-        {settings.wecom.accessPolicy.rules.length === 0 ? (
+        {settings.wecom.accessPolicy.rules.length === 0 && accessRuleDraft === null ? (
           <div className="border-t border-border/60 py-6 text-center text-xs text-muted-foreground">
             {t("settings.wecomAccessControlEmpty")}
           </div>
         ) : (
           <div className="divide-y divide-border/60 border-t border-border/60">
+            {accessRuleDraft ? (
+              <div className="space-y-4 py-4">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs font-medium text-muted-foreground">
+                    {t("settings.wecomAccessRule").replace(
+                      "{index}",
+                      String(settings.wecom.accessPolicy.rules.length + 1),
+                    )}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!isCompleteWeComAccessRuleDraft(accessRuleDraft)}
+                      onClick={saveAccessRuleDraft}
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      {t("settings.save")}
+                    </Button>
+                    <button
+                      type="button"
+                      title={t("settings.wecomRemoveAccessRule")}
+                      aria-label={t("settings.wecomRemoveAccessRule")}
+                      onClick={() => setAccessRuleDraft(null)}
+                      className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 lg:grid-cols-3">
+                  {[
+                    {
+                      key: "tenantId",
+                      label: t("settings.wecomAccessTenantId"),
+                      value: accessRuleDraft.tenantId,
+                    },
+                    {
+                      key: "botId",
+                      label: t("settings.wecomAccessBotId"),
+                      value: accessRuleDraft.botId,
+                    },
+                    {
+                      key: "externalUserId",
+                      label: t("settings.wecomAccessUserId"),
+                      value: accessRuleDraft.externalUserId,
+                    },
+                  ].map((field) => (
+                    <div key={field.key} className="space-y-1.5">
+                      <label
+                        htmlFor={`wecom-access-draft-${field.key}`}
+                        className="text-xs font-medium text-muted-foreground"
+                      >
+                        {field.label}
+                      </label>
+                      <Input
+                        id={`wecom-access-draft-${field.key}`}
+                        value={field.value}
+                        onChange={(event) =>
+                          updateAccessRuleDraft({ [field.key]: event.target.value })
+                        }
+                        autoComplete="off"
+                        className="font-mono text-[13px]"
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             {settings.wecom.accessPolicy.rules.map((rule, index) => (
               <div
                 // Policy rows have no persisted UI identity and are replaced as a complete list.
@@ -1100,6 +1403,7 @@ export function WecomSection(props: WecomSectionProps) {
                     {[
                       ["tool:read", "settings.wecomAccessScopeTools"],
                       ["skill:use", "settings.wecomAccessScopeSkills"],
+                      ["database:read", "settings.wecomAccessScopeDatabase"],
                       ["mcp:invoke", "settings.wecomAccessScopeMcp"],
                     ].map(([scope, label]) => (
                       <label
@@ -1151,17 +1455,128 @@ export function WecomSection(props: WecomSectionProps) {
                       <Input
                         id={`wecom-access-${field.key}-${index}`}
                         value={formatAccessList(field.value)}
-                        onChange={(event) =>
+                        onChange={(event) => {
+                          const values = parseAccessList(event.target.value);
                           updateAccessRule(index, {
-                            [field.key]: parseAccessList(event.target.value),
-                          })
-                        }
+                            [field.key]: values,
+                            ...(field.key === "allowedSkillNames" &&
+                            !values.includes(rule.defaultSkillName)
+                              ? { defaultSkillName: "" }
+                              : {}),
+                          });
+                        }}
                         placeholder={t("settings.wecomAccessListPlaceholder")}
                         autoComplete="off"
                         className="font-mono text-[13px]"
                       />
                     </div>
                   ))}
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label className="space-y-1.5" htmlFor={`wecom-default-skill-${index}`}>
+                    <span className="text-xs font-medium text-muted-foreground">
+                      {t("settings.wecomDefaultSkill")}
+                    </span>
+                    <select
+                      id={`wecom-default-skill-${index}`}
+                      value={rule.defaultSkillName}
+                      onChange={(event) =>
+                        updateAccessRule(index, { defaultSkillName: event.target.value })
+                      }
+                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 font-mono text-[13px] text-foreground shadow-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    >
+                      <option value="">{t("settings.wecomDefaultSkillNone")}</option>
+                      {rule.allowedSkillNames.map((skillName) => (
+                        <option key={skillName} value={skillName}>
+                          {skillName}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="block text-[11px] leading-relaxed text-muted-foreground">
+                      {t("settings.wecomDefaultSkillHint")}
+                    </span>
+                  </label>
+
+                  <fieldset className="space-y-2">
+                    <legend className="text-xs font-medium text-muted-foreground">
+                      {t("settings.wecomAllowedDatabaseProfiles")}
+                    </legend>
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      {t("settings.wecomAllowedDatabaseProfilesHint")}
+                    </p>
+                    {databaseProfilesLoading ? (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {t("settings.wecomDatabaseProfilesLoading")}
+                      </div>
+                    ) : databaseProfiles.some((profile) => profile.enabled) ? (
+                      <div className="max-h-36 space-y-2 overflow-y-auto rounded-md border border-border/60 p-2.5">
+                        {databaseProfiles
+                          .filter((profile) => profile.enabled)
+                          .map((profile) => (
+                            <label
+                              key={profile.id}
+                              className="flex items-start gap-2 text-xs text-foreground"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={rule.allowedDatabaseProfileIds.includes(profile.id)}
+                                onChange={() => toggleAccessDatabaseProfile(index, profile.id)}
+                                className="mt-0.5 h-4 w-4 rounded border-input accent-primary"
+                              />
+                              <span className="min-w-0">
+                                <span className="block truncate">{profile.name}</span>
+                                <span className="block truncate font-mono text-[10px] text-muted-foreground">
+                                  {profile.driver} · {profile.id}
+                                </span>
+                              </span>
+                            </label>
+                          ))}
+                        {rule.allowedDatabaseProfileIds
+                          .filter(
+                            (profileId) =>
+                              !databaseProfiles.some(
+                                (profile) => profile.enabled && profile.id === profileId,
+                              ),
+                          )
+                          .map((profileId) => (
+                            <label
+                              key={profileId}
+                              className="flex items-start gap-2 text-xs text-muted-foreground"
+                            >
+                              <input
+                                type="checkbox"
+                                checked
+                                onChange={() => toggleAccessDatabaseProfile(index, profileId)}
+                                className="mt-0.5 h-4 w-4 rounded border-input accent-primary"
+                              />
+                              <span className="min-w-0 truncate font-mono">
+                                {profileId} ({t("settings.wecomDatabaseProfileUnavailable")})
+                              </span>
+                            </label>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <Input
+                          id={`wecom-access-allowedDatabaseProfileIds-${index}`}
+                          value={formatAccessList(rule.allowedDatabaseProfileIds)}
+                          onChange={(event) =>
+                            updateAccessRule(index, {
+                              allowedDatabaseProfileIds: parseAccessList(event.target.value),
+                            })
+                          }
+                          placeholder={t("settings.wecomAccessListPlaceholder")}
+                          autoComplete="off"
+                          className="font-mono text-[13px]"
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                          {t("settings.wecomDatabaseProfilesEmpty")}
+                        </p>
+                      </div>
+                    )}
+                  </fieldset>
                 </div>
               </div>
             ))}

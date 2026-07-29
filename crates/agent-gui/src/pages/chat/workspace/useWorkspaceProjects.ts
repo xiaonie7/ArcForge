@@ -79,6 +79,7 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
   const [activeWorkspaceProjectId, setActiveWorkspaceProjectId] = useState<string>(
     () => settings.system.activeWorkspaceProjectId?.trim() || DEFAULT_WORKSPACE_PROJECT_ID,
   );
+  const [isRecentScopeActive, setIsRecentScopeActive] = useState(false);
   const missingWorkspaceProjectPathKeys = useMemo(
     () => new Set(settings.system.missingWorkspaceProjectPaths.map(workspaceProjectPathKey)),
     [settings.system.missingWorkspaceProjectPaths],
@@ -96,23 +97,31 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
     return active.length > 0 ? active : workspaceProjects;
   }, [archivedWorkspaceProjectPathKeys, workspaceProjects]);
   const activeWorkspaceProject = useMemo(
-    () => findWorkspaceProject(selectableWorkspaceProjects, activeWorkspaceProjectId),
-    [activeWorkspaceProjectId, selectableWorkspaceProjects],
+    () =>
+      isRecentScopeActive
+        ? undefined
+        : findWorkspaceProject(selectableWorkspaceProjects, activeWorkspaceProjectId),
+    [activeWorkspaceProjectId, isRecentScopeActive, selectableWorkspaceProjects],
   );
   useEffect(() => {
+    if (isRecentScopeActive) {
+      return;
+    }
     if (activeWorkspaceProject?.id && activeWorkspaceProject.id !== activeWorkspaceProjectId) {
       setActiveWorkspaceProjectId(activeWorkspaceProject.id);
     }
-  }, [activeWorkspaceProject?.id, activeWorkspaceProjectId]);
+  }, [activeWorkspaceProject?.id, activeWorkspaceProjectId, isRecentScopeActive]);
   const activeWorkspaceProjectPath = activeWorkspaceProject?.path.trim() ?? "";
   const sidebarScope = useMemo<SidebarScope>(
     () =>
       isAgentMode
-        ? activeWorkspaceProjectPath
-          ? { kind: "workdir", cwd: activeWorkspaceProjectPath }
-          : { kind: "none" }
+        ? isRecentScopeActive
+          ? { kind: "unscoped" }
+          : activeWorkspaceProjectPath
+            ? { kind: "workdir", cwd: activeWorkspaceProjectPath }
+            : { kind: "none" }
         : { kind: "unscoped" },
-    [activeWorkspaceProjectPath, isAgentMode],
+    [activeWorkspaceProjectPath, isAgentMode, isRecentScopeActive],
   );
   useEffect(() => {
     sidebarStore.setScope(sidebarScope);
@@ -190,6 +199,7 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
         ) ?? project;
       // 目标工作区已完全激活时提前返回，避免流式进行中触发无谓的 settings 写入与重渲染
       if (
+        !isRecentScopeActive &&
         !options?.startConversation &&
         targetProject.id === activeWorkspaceProjectId &&
         settings.system.activeWorkspaceProjectId === targetProject.id &&
@@ -206,6 +216,7 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
       ) {
         return;
       }
+      setIsRecentScopeActive(false);
       setActiveWorkspaceProjectId(targetProject.id);
       setSettings((prev) => {
         const existing = prev.system.workspaceProjects.find(
@@ -262,7 +273,13 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
         startNewConversationActionRef.current({ workdir: targetProject.path });
       }
     },
-    [setSettings, workspaceProjects, activeWorkspaceProjectId, settings.system],
+    [
+      setSettings,
+      workspaceProjects,
+      activeWorkspaceProjectId,
+      isRecentScopeActive,
+      settings.system,
+    ],
   );
 
   const handleSelectWorkspaceProject = useCallback(
@@ -274,6 +291,18 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
     },
     [activateWorkspaceProject, checkWorkspaceProjectDirectory],
   );
+
+  const handleSelectRecentScope = useCallback(() => {
+    setActiveView("chat");
+    setIsRecentScopeActive(true);
+  }, [setActiveView]);
+
+  const handleNewConversationForRecentScope = useCallback(() => {
+    setActiveView("chat");
+    setIsRecentScopeActive(true);
+    prepareComposerForConversationChangeActionRef.current();
+    startNewConversationActionRef.current({ workdir: "" });
+  }, [prepareComposerForConversationChangeActionRef, setActiveView, startNewConversationActionRef]);
 
   const handleNewConversationForProject = useCallback(
     async (project: WorkspaceProject) => {
@@ -495,6 +524,7 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
     workspaceProjects,
     activeWorkspaceProjectId,
     setActiveWorkspaceProjectId,
+    isRecentScopeActive,
     missingWorkspaceProjectPathKeys,
     archivedWorkspaceProjectPathKeys,
     selectableWorkspaceProjects,
@@ -508,6 +538,8 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
     setProjectRenameDraft,
     checkWorkspaceProjectDirectory,
     activateWorkspaceProject,
+    handleSelectRecentScope,
+    handleNewConversationForRecentScope,
     handleSelectWorkspaceProject,
     handleNewConversationForProject,
     handleBrowseWorkspaceProjectInFileTree,

@@ -54,6 +54,20 @@ export type ExplicitSkillMentionReference = {
   baseDir?: string | null;
 };
 
+export type RoutedSkillResolution =
+  | { kind: "none" }
+  | {
+      kind: "matched";
+      source: "explicit" | "default";
+      requestedName: string;
+      skill: SkillSummary;
+    }
+  | {
+      kind: "denied" | "missing" | "ambiguous";
+      source: "explicit" | "default";
+      requestedName: string;
+    };
+
 const COMMON_SKILL_MENTION_ENV_VARS = new Set([
   "PATH",
   "HOME",
@@ -327,6 +341,58 @@ export function resolveExplicitSkillMentions(params: {
   return selected;
 }
 
+function normalizedSkillBaseDirRoot(value: string | null | undefined) {
+  return (value ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")[0];
+}
+
+/**
+ * Resolve the one installed Skill a trusted channel principal asked to run.
+ * An explicit `/skill-name` always wins over the ACL default, including when
+ * that explicit request is denied or missing; silently falling back would run
+ * a different workflow than the user requested.
+ */
+export function resolveAuthorizedSkillRoute(params: {
+  text?: string | null;
+  defaultSkillName?: string | null;
+  installedSkills: SkillSummary[];
+  principal: {
+    scopes: readonly string[];
+    allowedSkillNames: readonly string[];
+    allowedSkillBaseDirs: readonly string[];
+  };
+}): RoutedSkillResolution {
+  const explicitName = extractSkillMentionNamesFromText(params.text ?? "")[0]?.trim() ?? "";
+  const defaultName = params.defaultSkillName?.trim() ?? "";
+  const requestedName = explicitName || defaultName;
+  if (!requestedName) return { kind: "none" };
+
+  const source = explicitName ? "explicit" : "default";
+  const exactMatches = params.installedSkills.filter((skill) => skill.name === requestedName);
+  const matches =
+    exactMatches.length > 0
+      ? exactMatches
+      : params.installedSkills.filter(
+          (skill) => skill.name.toLowerCase() === requestedName.toLowerCase(),
+        );
+  if (matches.length === 0) return { kind: "missing", source, requestedName };
+  if (matches.length > 1) return { kind: "ambiguous", source, requestedName };
+
+  const skill = matches[0];
+  const allowedBaseDirs = new Set(
+    params.principal.allowedSkillBaseDirs.map(normalizedSkillBaseDirRoot).filter(Boolean),
+  );
+  const allowed =
+    params.principal.scopes.includes("skill:use") &&
+    (params.principal.allowedSkillNames.includes(skill.name) ||
+      allowedBaseDirs.has(normalizedSkillBaseDirRoot(skill.baseDir)));
+  if (!allowed) return { kind: "denied", source, requestedName };
+  return { kind: "matched", source, requestedName, skill };
+}
+
 function normalizeDisplayPath(path: string) {
   const normalized = normalizeRelPath(path);
   if (normalized.startsWith("//?/UNC/")) {
@@ -519,6 +585,44 @@ export async function readSkillText(params: {
   } as any);
 }
 
+const ROUTED_SKILL_READ_CHUNK_LINES = 10_000;
+const ROUTED_SKILL_READ_MAX_CHARS = 2 * 1024 * 1024;
+const ROUTED_SKILL_READ_MAX_CHUNKS = 32;
+
+function countTextLines(content: string) {
+  if (!content) return 0;
+  const newlineCount = content.match(/\n/g)?.length ?? 0;
+  return newlineCount + (content.endsWith("\n") ? 0 : 1);
+}
+
+/** Read an entire Skill entry file or fail instead of injecting partial instructions. */
+export async function readCompleteSkillText(path: string): Promise<string> {
+  const chunks: string[] = [];
+  let offset = 0;
+  let totalChars = 0;
+
+  for (let chunkIndex = 0; chunkIndex < ROUTED_SKILL_READ_MAX_CHUNKS; chunkIndex += 1) {
+    const response = await readSkillText({
+      path,
+      offset,
+      length: ROUTED_SKILL_READ_CHUNK_LINES,
+    });
+    const linesRead = countTextLines(response.content);
+    totalChars += response.content.length;
+    if (totalChars > ROUTED_SKILL_READ_MAX_CHARS) {
+      throw new Error("The routed Skill entry is too large to preload safely.");
+    }
+    chunks.push(response.content);
+    if (!response.truncated) return chunks.join("");
+    if (linesRead === 0) {
+      throw new Error("The routed Skill entry could not be read completely.");
+    }
+    offset += linesRead;
+  }
+
+  throw new Error("The routed Skill entry exceeded the safe preload chunk limit.");
+}
+
 export async function manageSkill(
   params: Record<string, unknown>,
 ): Promise<SystemManageSkillResponse> {
@@ -691,5 +795,31 @@ export function buildSkillsSystemPrompt(params: {
           : "",
       ].join("\n"),
     ),
+  ].join("\n");
+}
+
+/**
+ * WeCom uses a host-routed Skill and cannot call SkillsManager. Keep this
+ * prompt separate from the desktop progressive-disclosure prompt, whose
+ * instructions intentionally tell the model to read the Skill on demand.
+ */
+export function buildPreloadedRoutedSkillSystemPrompt(params: {
+  skill: SkillSummary;
+  content: string;
+}): string {
+  const { skill } = params;
+  return [
+    "<trusted-routed-skill>",
+    `name=${skill.name}`,
+    `skillFile=${skill.skillFile}`,
+    `baseDir=${skill.baseDir}`,
+    "ArcForge authenticated the channel principal, authorized this installed Skill, and loaded its complete entry file below.",
+    "Follow these instructions directly. Do not call SkillsManager to read, list, install, edit, or otherwise manage Skills.",
+    "Do not search a workspace or inspect project files to rediscover data, credentials, or instructions. Use only the tools and named resources exposed for this request.",
+    "Files referenced by the Skill are not automatically authorized; if a required reference is unavailable, explain what is missing instead of searching a workspace.",
+    "<skill-entry>",
+    params.content || "(empty Skill entry)",
+    "</skill-entry>",
+    "</trusted-routed-skill>",
   ].join("\n");
 }

@@ -245,6 +245,7 @@ export function ChatPage(props: ChatPageProps) {
   const {
     workspaceProjects,
     setActiveWorkspaceProjectId,
+    isRecentScopeActive,
     missingWorkspaceProjectPathKeys,
     archivedWorkspaceProjectPathKeys,
     activeWorkspaceProject,
@@ -256,6 +257,8 @@ export function ChatPage(props: ChatPageProps) {
     projectRenameDraft,
     setProjectRenameDraft,
     activateWorkspaceProject,
+    handleSelectRecentScope,
+    handleNewConversationForRecentScope,
     handleSelectWorkspaceProject,
     handleNewConversationForProject,
     handleBrowseWorkspaceProjectInFileTree,
@@ -514,7 +517,7 @@ export function ChatPage(props: ChatPageProps) {
   const displayedConversationWorkdir =
     currentConversationPersistedCwd ||
     currentConversationRuntimeWorkdir ||
-    (isAgentMode ? activeWorkspaceProjectPath || workdir : "");
+    (isAgentMode && !isRecentScopeActive ? activeWorkspaceProjectPath || workdir : "");
   // The dock preview belongs to one conversation transcript. Its payload does
   // not otherwise read the id, but switching conversations must discard it.
   // biome-ignore lint/correctness/useExhaustiveDependencies: currentConversationId is the reset signal.
@@ -848,6 +851,7 @@ export function ChatPage(props: ChatPageProps) {
     setPendingUploadsForConversation,
     clearCachedComposerDraft,
     displayedConversationWorkdir,
+    allowEmptyAgentWorkdir: isAgentMode && isRecentScopeActive,
     sendActionRef,
   });
 
@@ -967,7 +971,11 @@ export function ChatPage(props: ChatPageProps) {
       subagentStoresRef.current.dispose(conversationId);
     },
     getDefaultNewConversationWorkdir: () =>
-      isAgentMode ? activeWorkspaceProjectPath || undefined : undefined,
+      isAgentMode
+        ? isRecentScopeActive
+          ? ""
+          : activeWorkspaceProjectPath || undefined
+        : undefined,
     resolveConversationSelectedModel: (json) =>
       normalizeSelectedModelForProviders(parseSelectedModelJson(json), settings.customProviders),
     setCurrentConversationId,
@@ -1017,8 +1025,8 @@ export function ChatPage(props: ChatPageProps) {
   });
 
   useEffect(() => {
-    const nextWorkdir = activeWorkspaceProjectPath.trim();
-    if (!isAgentMode || !nextWorkdir) {
+    const nextWorkdir = isRecentScopeActive ? "" : activeWorkspaceProjectPath.trim();
+    if (!isAgentMode || (!isRecentScopeActive && !nextWorkdir)) {
       return;
     }
     const conversationId = currentConversationIdRef.current.trim();
@@ -1042,13 +1050,14 @@ export function ChatPage(props: ChatPageProps) {
     }
     updateConversationRuntimeEntry(conversationId, (prev) => ({
       ...prev,
-      workdir: nextWorkdir,
+      workdir: nextWorkdir || undefined,
     }));
   }, [
     activeWorkspaceProjectPath,
     conversationState.meta.totalMessageCount,
     isAgentMode,
     isConversationRunning,
+    isRecentScopeActive,
     isSending,
     pendingUploadedFiles.length,
     sidebarStore,
@@ -1314,6 +1323,7 @@ export function ChatPage(props: ChatPageProps) {
     persistConversation,
     pruneIdleConversationCaches,
     requestQueuedChatTurnProcessing,
+    allowEmptyAgentWorkdir: isAgentMode && isRecentScopeActive,
   });
 
   sendActionRef.current = send;
@@ -1335,9 +1345,13 @@ export function ChatPage(props: ChatPageProps) {
     openController.cancel();
     prepareComposerForConversationChange();
     startNewConversationActionRef.current({
-      workdir: isAgentMode ? activeWorkspaceProjectPath || undefined : undefined,
+      workdir: isAgentMode
+        ? isRecentScopeActive
+          ? ""
+          : activeWorkspaceProjectPath || undefined
+        : undefined,
     });
-  }, [activeWorkspaceProjectPath, isAgentMode, openController]);
+  }, [activeWorkspaceProjectPath, isAgentMode, isRecentScopeActive, openController]);
 
   // 全局快捷键「新建对话」：Rust 端呼出窗口后发事件，这里切回对话视图
   // （可能停在 Skills/MCP Hub）、开新会话并聚焦输入框，行为对齐侧栏按钮。
@@ -1518,6 +1532,7 @@ export function ChatPage(props: ChatPageProps) {
           showProjects={isAgentMode}
           projects={workspaceProjects}
           activeProjectId={activeWorkspaceProject?.id}
+          recentScopeActive={isRecentScopeActive}
           missingProjectPathKeys={missingWorkspaceProjectPathKeys}
           projectRenamingId={projectRenamingId}
           projectRenameDraft={projectRenameDraft}
@@ -1526,6 +1541,8 @@ export function ChatPage(props: ChatPageProps) {
           onProjectsCollapsedChange={handleSidebarProjectsCollapsedChange}
           onRecentCollapsedChange={handleSidebarRecentCollapsedChange}
           onCreateProject={handleOpenCreateWorkspaceProject}
+          onSelectRecentScope={handleSelectRecentScope}
+          onNewConversationForRecentScope={handleNewConversationForRecentScope}
           onSelectProject={handleSelectWorkspaceProject}
           onNewConversationForProject={handleNewConversationForProject}
           onBrowseProjectInFileTree={handleBrowseWorkspaceProjectInFileTree}

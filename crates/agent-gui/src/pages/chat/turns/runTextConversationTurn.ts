@@ -395,7 +395,9 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
   }
   const finalState = appendMessagesToConversation(getNextConversationState(), [finalAssistant]);
   const shouldRunMemoryExtraction =
-    memoryEnabled && finalAssistant.stopReason !== "error" && finalAssistant.stopReason !== "aborted";
+    memoryEnabled &&
+    finalAssistant.stopReason !== "error" &&
+    finalAssistant.stopReason !== "aborted";
   commitAssistantRoundMeta(finalAssistant, textRound);
   resetLiveTranscript(transcriptStore);
   updateConversationRuntimeEntry(conversationId, (prev) => ({
@@ -415,7 +417,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     createdAt,
     titlePromise,
   });
-  gatewayBridgeEvents.queueEvent({
+  await gatewayBridgeEvents.queueEvent({
     type: "done",
     conversation_id: conversationId,
   });

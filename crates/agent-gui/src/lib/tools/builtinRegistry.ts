@@ -27,6 +27,7 @@ import type {
 } from "./builtinTypes";
 import { createCronTools } from "./cronTools";
 import { createCustomSystemTools } from "./customSystemTools";
+import { createDatabaseTools } from "./databaseTools";
 import { createFileToolState, type FileToolState } from "./fileToolState";
 import { createFsTools } from "./fsTools";
 import { createMcpManagerTools } from "./mcpManagerTools";
@@ -166,6 +167,8 @@ function createBuiltinToolRegistry(
 
 type BuildBuiltinBaseToolRegistryParams = {
   workdir: string;
+  /** Exclude project/workdir-bound tools for unscoped conversations. */
+  workspaceAccess?: "full" | "none";
   providerId: ProviderId;
   runtimePlatform?: RuntimePlatform;
   runtimeEnvironment?: RuntimeEnvironmentSnapshot;
@@ -206,83 +209,111 @@ type BuildBuiltinBaseToolRegistryParams = {
 const resolveHomeDir = () => homeDir();
 
 async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryParams) {
-  const baseBundles: BuiltinToolBundle[] = [
-    createFsTools({
-      workdir: params.workdir,
-      fileState: params.fileState,
-      skillsRootEnabled: params.skillsEnabled,
-      skillsRootDir: params.skillsRootDir,
-      skillAccessPolicy: params.skillAccessPolicy,
-      resolveHomeDir,
-    }),
-    createOfficeRuntimeTools({ workdir: params.workdir }),
-    createShellTools({
-      workdir: params.workdir,
-      providerId: params.providerId,
-      runtimePlatform: params.runtimePlatform,
-      skillsRootEnabled: params.skillsEnabled,
-      skillsRootDir: params.skillsRootDir,
-      skillAccessPolicy: params.skillAccessPolicy,
-      managedProcessEnabled: params.runtimeScope === "chat",
-      resolveHomeDir,
-    }),
-    ...(params.skillsEnabled
-      ? [
-          createSkillTools({
-            workdir: params.workdir,
-            skillAccessPolicy: params.skillAccessPolicy,
-            onManagedSkillsChanged: params.onManagedSkillsChanged,
-          }),
-        ]
-      : []),
-    createCronTools({
-      currentChatModel: params.currentChatModel,
-      workdir: params.workdir,
-    }),
-    createMcpManagerTools({
-      workdir: params.workdir,
-      getMcpSettings: params.getMcpSettings,
-      applyMcpOps: params.applyMcpOps,
+  const workspaceAccess = params.workspaceAccess ?? "full";
+  const baseBundles: BuiltinToolBundle[] = [];
+
+  if (workspaceAccess === "full") {
+    baseBundles.push(
+      createFsTools({
+        workdir: params.workdir,
+        fileState: params.fileState,
+        skillsRootEnabled: params.skillsEnabled,
+        skillsRootDir: params.skillsRootDir,
+        skillAccessPolicy: params.skillAccessPolicy,
+        resolveHomeDir,
+      }),
+      createOfficeRuntimeTools({ workdir: params.workdir }),
+      createShellTools({
+        workdir: params.workdir,
+        providerId: params.providerId,
+        runtimePlatform: params.runtimePlatform,
+        skillsRootEnabled: params.skillsEnabled,
+        skillsRootDir: params.skillsRootDir,
+        skillAccessPolicy: params.skillAccessPolicy,
+        managedProcessEnabled: params.runtimeScope === "chat",
+        resolveHomeDir,
+      }),
+    );
+  }
+
+  if (params.skillsEnabled) {
+    baseBundles.push(
+      createSkillTools({
+        workdir: params.workdir,
+        skillAccessPolicy: params.skillAccessPolicy,
+        onManagedSkillsChanged: params.onManagedSkillsChanged,
+      }),
+    );
+  }
+
+  if (workspaceAccess === "full") {
+    baseBundles.push(
+      createCronTools({
+        currentChatModel: params.currentChatModel,
+        workdir: params.workdir,
+      }),
+    );
+  }
+
+  baseBundles.push(
+    createDatabaseTools({
       runtimeScope: params.runtimeScope,
-      resolveHomeDir,
+      principal: params.principal,
+      workspaceAccess,
     }),
+  );
+
+  if (workspaceAccess === "full") {
+    baseBundles.push(
+      createMcpManagerTools({
+        workdir: params.workdir,
+        getMcpSettings: params.getMcpSettings,
+        applyMcpOps: params.applyMcpOps,
+        runtimeScope: params.runtimeScope,
+        resolveHomeDir,
+      }),
+    );
+  }
+
+  baseBundles.push(
     createCustomSystemTools({
       selectedToolIds: params.selectedSystemToolIds,
       runtimeScope: params.runtimeScope,
       currentChatModel: params.currentChatModel,
     }),
-    createMemoryTools({
-      workdir: params.workdir,
-      mode: params.memoryToolMode ?? "rw",
-    }),
-    createTunnelManagerTools({
-      enabled: params.remoteWebTunnelsEnabled === true && params.runtimeScope === "chat",
-      runtimeScope: params.runtimeScope,
-      projectPathKey: params.tunnelProjectPathKey,
-      publicBaseUrl: params.tunnelPublicBaseUrl,
-      onTunnelsChanged: params.onTunnelsChanged,
-    }),
-    createSSHManagerTools({
-      enabled:
-        params.runtimeScope === "chat" &&
-        params.sshManagerRemoteAllowed !== false &&
-        (params.associatedSshHostIds?.length ?? 0) > 0,
-      runtimeScope: params.runtimeScope,
-      workdir: params.workdir,
-      projectPathKey: params.tunnelProjectPathKey,
-      hosts: params.sshHosts,
-      associatedHostIds: params.associatedSshHostIds,
-      resolveHomeDir,
-      onSshSessionsChanged: params.onSshSessionsChanged,
-    }),
-    ...(params.runtimeScope === "chat"
-      ? [
-          createTerminalTools({
-            workdir: params.workdir,
-          }),
-        ]
-      : []),
-  ];
+  );
+
+  if (workspaceAccess === "full") {
+    baseBundles.push(
+      createMemoryTools({
+        workdir: params.workdir,
+        mode: params.memoryToolMode ?? "rw",
+      }),
+      createTunnelManagerTools({
+        enabled: params.remoteWebTunnelsEnabled === true && params.runtimeScope === "chat",
+        runtimeScope: params.runtimeScope,
+        projectPathKey: params.tunnelProjectPathKey,
+        publicBaseUrl: params.tunnelPublicBaseUrl,
+        onTunnelsChanged: params.onTunnelsChanged,
+      }),
+      createSSHManagerTools({
+        enabled:
+          params.runtimeScope === "chat" &&
+          params.sshManagerRemoteAllowed !== false &&
+          (params.associatedSshHostIds?.length ?? 0) > 0,
+        runtimeScope: params.runtimeScope,
+        workdir: params.workdir,
+        projectPathKey: params.tunnelProjectPathKey,
+        hosts: params.sshHosts,
+        associatedHostIds: params.associatedSshHostIds,
+        resolveHomeDir,
+        onSshSessionsChanged: params.onSshSessionsChanged,
+      }),
+    );
+    if (params.runtimeScope === "chat") {
+      baseBundles.push(createTerminalTools({ workdir: params.workdir }));
+    }
+  }
 
   const enabledServers = selectEnabledMcpServers(params.getMcpSettings()).filter((server) => {
     if (!params.principal) return true;
@@ -325,7 +356,7 @@ export async function buildBuiltinToolRegistry(
   const chatBundles = [...todoBundles, ...askUserQuestionBundles];
 
   const subagentRuntime = params.subagentRuntime;
-  if (!subagentRuntime) {
+  if (!subagentRuntime || params.workspaceAccess === "none") {
     return createBuiltinToolRegistry([...baseBundles, ...chatBundles], params.principal);
   }
 

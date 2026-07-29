@@ -1192,6 +1192,14 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.builtinTool.ssh_manager.desc": "连接与操作已关联的 SSH 主机",
     "settings.builtinTool.ssh_manager.detail":
       "在已关联的 SSH 主机上执行远程操作，如远程命令与文件管理。需要先在设置中关联 SSH 主机；仅在对话场景注册。",
+    "settings.builtinTool.database_query.name": "数据库查询",
+    "settings.builtinTool.database_query.desc": "安全查询已配置的 PostgreSQL、MySQL 或 SQLite",
+    "settings.builtinTool.database_query.detail":
+      "列出连接与数据表、查看表结构或执行单条参数化只读查询。已保存密码位于系统凭据库；用户消息或 Skill 明确提供的临时连接只用于当次调用。查询受只读事务、超时、行数与返回大小限制，且不向企业微信会话开放。",
+    "settings.builtinTool.database_execute.name": "数据库写入",
+    "settings.builtinTool.database_execute.desc": "执行受限制的参数化 INSERT、UPDATE 或 DELETE",
+    "settings.builtinTool.database_execute.detail":
+      "仅在本机对话中、且连接明确开启写入后可用。拒绝多语句、DDL、存储过程与授权操作；UPDATE/DELETE 必须含 WHERE，超过影响行数上限会自动回滚。",
     "settings.customTool.http_get_test.name": "本地 HTTP 测试",
     "settings.customTool.http_get_test.desc": "调用本地网络测试端点并返回响应",
     "settings.customTool.http_get_test.detail":
@@ -3122,6 +3130,14 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.builtinTool.ssh_manager.desc": "Connect to and operate associated SSH hosts",
     "settings.builtinTool.ssh_manager.detail":
       "Performs remote operations — commands and file management — on associated SSH hosts. Requires an SSH host associated in settings; chat sessions only.",
+    "settings.builtinTool.database_query.name": "Database Query",
+    "settings.builtinTool.database_query.desc": "Safely query configured PostgreSQL, MySQL, or SQLite databases",
+    "settings.builtinTool.database_query.detail":
+      "Lists connections and tables, describes table schemas, or runs one parameterized read-only query. Saved passwords stay in the operating system credential store; a temporary connection explicitly supplied by the user or a Skill is used only for that call. Read-only transactions and timeout, row, cell, and payload limits constrain execution, and WeCom sessions cannot use this tool.",
+    "settings.builtinTool.database_execute.name": "Database Write",
+    "settings.builtinTool.database_execute.desc": "Run a constrained parameterized INSERT, UPDATE, or DELETE",
+    "settings.builtinTool.database_execute.detail":
+      "Available only in local chats after writes are explicitly enabled for the connection. Multiple statements, DDL, stored procedures, and grants are rejected; UPDATE and DELETE require WHERE, and the transaction rolls back above the affected-row limit.",
     "settings.customTool.http_get_test.name": "Local HTTP Test",
     "settings.customTool.http_get_test.desc":
       "Call the local network test endpoint and return its response",

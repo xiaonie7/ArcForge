@@ -231,12 +231,7 @@ func (c *channelConn) handleInbound(requestID string, inbound *gatewayv2.Channel
 	conversationID := channelConversationID(c.binding, inbound)
 	clientRequestID := channelRequestID(c.binding, inbound)
 	channelCommand := strings.ToLower(strings.TrimSpace(inbound.GetCommand()))
-	body := handler.ChatRequestBody{
-		ConversationID:  conversationID,
-		ClientRequestID: clientRequestID,
-		Message:         strings.TrimSpace(inbound.GetText()),
-		QueuePolicy:     "append",
-	}
+	body := channelChatRequestBody(conversationID, clientRequestID, inbound)
 	seededPayloads := channelSeededPayloads(channelCommand, body)
 	if existing, ok := c.sm.LookupChatCommand(clientRequestID); ok {
 		if err := c.sendAccepted(requestID, inbound.GetExternalMessageId(), existing); err != nil {
@@ -279,6 +274,22 @@ func (c *channelConn) handleInbound(requestID string, inbound *gatewayv2.Channel
 		context.Background(), c.cfg, c.sm, nil, start, body, nil,
 		chatcmd.NewTraceID(), origin,
 	)
+}
+
+func channelChatRequestBody(
+	conversationID string,
+	clientRequestID string,
+	inbound *gatewayv2.ChannelInboundMessage,
+) handler.ChatRequestBody {
+	return handler.ChatRequestBody{
+		ConversationID:  conversationID,
+		ClientRequestID: clientRequestID,
+		Message:         strings.TrimSpace(inbound.GetText()),
+		// The connector already serializes turns per WeCom session. "append"
+		// would park even the first turn of an idle conversation in the desktop
+		// GUI queue, which only auto-drains after an active run becomes idle.
+		QueuePolicy: "auto",
+	}
 }
 
 func channelTrustedOrigin(
@@ -490,23 +501,25 @@ func (c *channelConn) subscribeRun(requestID, externalMessageID string, start se
 				if !ok {
 					return false
 				}
-				_ = c.send(wscore.FrameData, "channel_delta", &gatewayv2.ChannelServerFrame{
-					RequestId: requestID,
-					Payload: &gatewayv2.ChannelServerFrame_Delta{Delta: &gatewayv2.ChannelDelta{
-						RunId: start.RunID, ConversationId: start.ConversationID, Seq: event.Seq, Text: text,
-					}},
-				})
+				_ = c.sendRunDelta(
+					requestID,
+					start.RunID,
+					start.ConversationID,
+					event.Seq,
+					text,
+				)
 			case session.StreamEventRunFinished:
 				status, _ := event.Payload["status"].(string)
 				errorCode, _ := event.Payload["error_code"].(string)
 				message, _ := event.Payload["message"].(string)
-				_ = c.send(wscore.FrameControl, "channel_final", &gatewayv2.ChannelServerFrame{
-					RequestId: requestID,
-					Payload: &gatewayv2.ChannelServerFrame_Final{Final: &gatewayv2.ChannelFinal{
-						RunId: start.RunID, ConversationId: start.ConversationID, Status: status,
-						ErrorCode: errorCode, Message: message,
-					}},
-				})
+				_ = c.sendRunFinal(
+					requestID,
+					start.RunID,
+					start.ConversationID,
+					status,
+					errorCode,
+					message,
+				)
 				return true
 			}
 			return false
@@ -533,6 +546,38 @@ func (c *channelConn) subscribeRun(requestID, externalMessageID string, start se
 			}
 		}
 	}()
+}
+
+func (c *channelConn) sendRunDelta(
+	requestID string,
+	runID string,
+	conversationID string,
+	seq int64,
+	text string,
+) error {
+	return c.send(wscore.FrameResponse, "channel_delta", &gatewayv2.ChannelServerFrame{
+		RequestId: requestID,
+		Payload: &gatewayv2.ChannelServerFrame_Delta{Delta: &gatewayv2.ChannelDelta{
+			RunId: runID, ConversationId: conversationID, Seq: seq, Text: text,
+		}},
+	})
+}
+
+func (c *channelConn) sendRunFinal(
+	requestID string,
+	runID string,
+	conversationID string,
+	status string,
+	errorCode string,
+	message string,
+) error {
+	return c.send(wscore.FrameResponse, "channel_final", &gatewayv2.ChannelServerFrame{
+		RequestId: requestID,
+		Payload: &gatewayv2.ChannelServerFrame_Final{Final: &gatewayv2.ChannelFinal{
+			RunId: runID, ConversationId: conversationID, Status: status,
+			ErrorCode: errorCode, Message: message,
+		}},
+	})
 }
 
 func channelVisibleTokenText(payload map[string]any) (string, bool) {

@@ -7,6 +7,7 @@ import type {
 } from "../../../components/chat/MentionComposer";
 import type { LiveTranscriptStore } from "../../../lib/chat/conversation/liveTranscriptStore";
 import type { PendingUploadedFile } from "../../../lib/chat/messages/uploadedFiles";
+import type { PrincipalContext } from "../../../lib/security/principalContext";
 import {
   type AppSettings,
   type ChatRuntimeControls,
@@ -17,7 +18,6 @@ import {
   type SystemToolId,
 } from "../../../lib/settings";
 import { answerAskUserQuestion } from "../../../lib/tools/askUserQuestionTools";
-import type { PrincipalContext } from "../../../lib/security/principalContext";
 import type { ChatQueueTurnPreview } from "../components/ChatComposerBar";
 import { createTextComposerDraft } from "../composer/composerDraftText";
 import type { ActiveGatewayBridgeRequest, SendChatAction } from "../gateway/gatewayBridgeTypes";
@@ -26,11 +26,15 @@ import {
   normalizeGatewayExecutionMode,
   normalizeGatewayWorkdir,
 } from "../gateway/gatewayBridgeTypes";
+import {
+  resolveGatewayQueuedTurnWorkdir,
+  resolveLocalQueuedTurnWorkdir,
+} from "../runtime/agentWorkdirScope";
 import type { ConversationRuntimeEntry } from "../runtime/chatPageRuntime";
 import {
   appendQueuedChatTurn,
-  buildQueuedGatewayDisplayMessage,
   buildQueuedChatTurnPreview,
+  buildQueuedGatewayDisplayMessage,
   type ChatQueueItemDetail,
   type ChatQueueSnapshot,
   createQueuedChatTurn,
@@ -66,6 +70,8 @@ type UseChatTurnQueueParams = {
   ) => void;
   clearCachedComposerDraft: (conversationId?: string) => void;
   displayedConversationWorkdir: string;
+  /** The visible Agent scope is the explicit cwd-empty "Recent" scope. */
+  allowEmptyAgentWorkdir: boolean;
   sendActionRef: MutableRefObject<SendChatAction>;
 };
 
@@ -94,6 +100,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     setPendingUploadsForConversation,
     clearCachedComposerDraft,
     displayedConversationWorkdir,
+    allowEmptyAgentWorkdir,
     sendActionRef,
   } = params;
 
@@ -292,14 +299,14 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         ? queuedChatTurnEditSlotRef.current
         : null;
     const executionMode = editSlot?.executionMode ?? settings.system.executionMode;
-    const workdirForTurn = isAgentExecutionMode(executionMode)
-      ? (
-          editSlot?.workdir ??
-          runtimeEntry.workdir ??
-          displayedConversationWorkdir ??
-          settings.system.workdir
-        ).trim()
-      : "";
+    const workdirForTurn = resolveLocalQueuedTurnWorkdir({
+      isAgentMode: isAgentExecutionMode(executionMode),
+      editedWorkdir: editSlot?.workdir,
+      unscopedAgent: allowEmptyAgentWorkdir,
+      conversationWorkdir: runtimeEntry.workdir,
+      displayedWorkdir: displayedConversationWorkdir,
+      defaultWorkdir: settings.system.workdir,
+    });
     const queuedTurn = createQueuedChatTurn({
       id: editSlot?.originalId,
       conversationId,
@@ -569,11 +576,13 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     const executionMode = principal
       ? settings.system.executionMode
       : (normalizeGatewayExecutionMode(payload.executionMode) ?? settings.system.executionMode);
-    const workdir =
-      (principal ? undefined : normalizeGatewayWorkdir(payload.workdir)) ??
-      conversationRuntimeCacheRef.current.get(targetConversationId)?.workdir ??
-      displayedConversationWorkdir ??
-      settings.system.workdir;
+    const workdir = resolveGatewayQueuedTurnWorkdir({
+      hasTrustedPrincipal: Boolean(principal),
+      requestedWorkdir: normalizeGatewayWorkdir(payload.workdir),
+      conversationWorkdir: conversationRuntimeCacheRef.current.get(targetConversationId)?.workdir,
+      displayedWorkdir: displayedConversationWorkdir,
+      defaultWorkdir: settings.system.workdir,
+    });
     const runtimeControls = payload.runtimeControls
       ? normalizeChatRuntimeControls(payload.runtimeControls)
       : settings.chatRuntimeControls;

@@ -72,6 +72,7 @@ type ChatHistorySidebarProps = {
   // Pre-sorted by the container (activity/running/pinned) — rendered as-is.
   projects?: WorkspaceProject[];
   activeProjectId?: string;
+  recentScopeActive?: boolean;
   missingProjectPathKeys?: ReadonlySet<string>;
   runningProjectPathKeys?: ReadonlySet<string>;
   projectRenamingId?: string | null;
@@ -81,6 +82,8 @@ type ChatHistorySidebarProps = {
   onProjectsCollapsedChange?: (collapsed: boolean) => void;
   onRecentCollapsedChange?: (collapsed: boolean) => void;
   onCreateProject?: () => void;
+  onSelectRecentScope?: () => void;
+  onNewConversationForRecentScope?: () => void;
   onSelectProject?: (project: WorkspaceProject) => void;
   onNewConversationForProject?: (project: WorkspaceProject) => void;
   onBrowseProjectInFileTree?: (project: WorkspaceProject) => void;
@@ -842,6 +845,55 @@ const ProjectRow = memo(function ProjectRow(props: {
   );
 });
 
+const RecentScopeRow = memo(function RecentScopeRow(props: {
+  isActive: boolean;
+  onSelect: () => void;
+  onNewConversation: () => void;
+}) {
+  const { isActive, onSelect, onNewConversation } = props;
+  const { t } = useLocale();
+
+  return (
+    <div
+      className={cn(
+        "group/project grid h-[30px] grid-cols-[minmax(0,1fr)_auto] items-center rounded-lg pl-1 transition-colors",
+        isActive
+          ? "bg-foreground/[0.07] text-foreground hover:bg-foreground/[0.09]"
+          : "text-foreground/85 hover:bg-foreground/[0.05] hover:text-foreground",
+      )}
+    >
+      <button
+        type="button"
+        className="flex h-[30px] min-w-0 items-center gap-3 rounded-md px-2 text-left outline-hidden transition-colors hover:text-foreground focus-visible:bg-foreground/[0.06] focus-visible:ring-2 focus-visible:ring-ring"
+        onClick={onSelect}
+      >
+        <Clock3
+          className={cn(
+            "h-4 w-4 shrink-0 transition-colors",
+            isActive ? "text-blue-500" : "text-foreground/65",
+          )}
+        />
+        <span className="sidebar-project-name-fade min-w-0 flex-1 overflow-hidden whitespace-nowrap text-[calc(14px*var(--zone-font-scale,1))] font-normal leading-5">
+          {t("chat.recentConversation")}
+        </span>
+      </button>
+      <div className="flex max-w-0 items-center justify-end overflow-hidden opacity-0 transition-[max-width,opacity] duration-200 ease-out group-hover/project:max-w-8 group-hover/project:opacity-100 group-focus-within/project:max-w-8 group-focus-within/project:opacity-100">
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className={PROJECT_ICON_BUTTON_CLASS}
+          title={t("chat.newConversation")}
+          aria-label={t("chat.newConversation")}
+          onClick={onNewConversation}
+        >
+          <Plus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+});
+
 function HistoryListLoadingSkeleton() {
   const { t } = useLocale();
 
@@ -944,6 +996,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     showProjects = false,
     projects = [],
     activeProjectId,
+    recentScopeActive = false,
     missingProjectPathKeys = EMPTY_PROJECT_PATH_KEYS,
     runningProjectPathKeys = EMPTY_PROJECT_PATH_KEYS,
     projectRenamingId = null,
@@ -953,6 +1006,8 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     onProjectsCollapsedChange,
     onRecentCollapsedChange,
     onCreateProject,
+    onSelectRecentScope,
+    onNewConversationForRecentScope,
     onSelectProject,
     onNewConversationForProject,
     onBrowseProjectInFileTree,
@@ -1003,6 +1058,12 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
   const handleDeleteConversation = useStableEvent(onDeleteConversation);
   const handleSelectProject = useStableEvent((project: WorkspaceProject) => {
     onSelectProject?.(project);
+  });
+  const handleSelectRecentScope = useStableEvent(() => {
+    onSelectRecentScope?.();
+  });
+  const handleNewConversationForRecentScope = useStableEvent(() => {
+    onNewConversationForRecentScope?.();
   });
   const handleBrowseProjectInFileTree = useStableEvent((project: WorkspaceProject) => {
     onBrowseProjectInFileTree?.(project);
@@ -1361,6 +1422,16 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
                 )}
               >
                 <div ref={projectsBodyRef} className="space-y-0.5 px-2 pb-0.5">
+                  {onSelectRecentScope && onNewConversationForRecentScope ? (
+                    <div>
+                      <RecentScopeRow
+                        isActive={recentScopeActive}
+                        onSelect={handleSelectRecentScope}
+                        onNewConversation={handleNewConversationForRecentScope}
+                      />
+                      {recentScopeActive ? projectHistoryContent : null}
+                    </div>
+                  ) : null}
                   {renderedProjects.map((project) => {
                     const pathKey = workspaceProjectPathKey(project.path);
                     const isActiveProject = activeProjectId === project.id;

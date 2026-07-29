@@ -11,6 +11,7 @@ import {
   type PreviewFieldMetrics,
   type StreamPreviewMeta,
 } from "../../../lib/chat/messages/toolPreview";
+import { redactDatabaseToolArguments } from "../../../lib/security/databaseToolSecrets";
 import { ensureAskUserQuestionDeadlineAt } from "../../../lib/tools/askUserQuestionTools";
 
 const GATEWAY_TOOL_TEXT_PREVIEW_MAX_CHARS = 4000;
@@ -54,7 +55,7 @@ function buildHeadTailPreview(input: string, maxChars = GATEWAY_TOOL_TEXT_PREVIE
 export function buildGatewayToolCallPreviewArguments(
   toolCall: Pick<ToolCall, "id" | "name" | "arguments">,
 ) {
-  const sourceArgs = toolCall.arguments || {};
+  const sourceArgs = redactDatabaseToolArguments(toolCall.name, toolCall.arguments || {});
   // AskUserQuestion：附带权威应答截止时间，WebUI 卡片倒计时与桌面计时同源
   //（execute 挂起时复用同一预置值；见 askUserQuestionTools）。
   if (toolCall.name === ASK_USER_QUESTION_TOOL_NAME) {

@@ -41,7 +41,6 @@ import type { ScrollFollowHandle } from "../../../lib/chat-scroll/useScrollFollo
 import { createStreamDebugLogger } from "../../../lib/debug/agentDebug";
 import { buildMemoryOverviewSection } from "../../../lib/memory/prompts/injection";
 import { createModelFromConfig } from "../../../lib/providers/llm";
-import { principalCanUseSkill } from "../../../lib/security/wecomAccessPolicy";
 import {
   type AppSettings,
   applyMcpOpsToAppSettings,
@@ -58,7 +57,10 @@ import {
 } from "../../../lib/settings";
 import type { SidebarStore } from "../../../lib/sidebar/store";
 import {
+  buildPreloadedRoutedSkillSystemPrompt,
   buildSkillsSystemPrompt,
+  readCompleteSkillText,
+  resolveAuthorizedSkillRoute,
   resolveExplicitSkillMentions,
   type SkillSummary,
 } from "../../../lib/skills";
@@ -77,6 +79,7 @@ import type { useGatewayRuntimeSnapshots } from "../gateway/useGatewayRuntimeSna
 import type { PersistConversationParams } from "../history/useConversationHistoryActions";
 import type { useChatPageRuntimeStore } from "../hooks/useChatPageRuntimeStore";
 import type { useLiveTranscriptController } from "../hooks/useLiveTranscriptController";
+import { resolveAgentTurnWorkdir } from "./agentWorkdirScope";
 import type { createChatRuntimeHost } from "./ChatRuntimeHost";
 import { buildErrorAssistantMessage, formatHookWarningMessage } from "./chatPageRuntime";
 import {
@@ -162,6 +165,8 @@ type UseSendChatTurnParams = {
   persistConversation: (params: PersistConversationParams) => Promise<boolean>;
   pruneIdleConversationCaches: (extraKeepIds?: Iterable<string>) => void;
   requestQueuedChatTurnProcessing: (conversationId: string) => void;
+  /** The visible Agent scope is the explicit cwd-empty "Recent" scope. */
+  allowEmptyAgentWorkdir: boolean;
 };
 
 /**
@@ -227,6 +232,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     persistConversation,
     pruneIdleConversationCaches,
     requestQueuedChatTurnProcessing,
+    allowEmptyAgentWorkdir,
   } = params;
 
   // The sidebar store keeps workdir activity/summaries fresh from the
@@ -285,11 +291,16 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       gatewayBridgeRequest?.executionModeOverride ??
       settings.system.executionMode;
     const effectiveIsAgentMode = isAgentExecutionMode(effectiveExecutionMode);
-    const effectiveWorkdir = (
-      overrides?.workdirOverride ??
-      gatewayBridgeRequest?.workdirOverride ??
-      (effectiveIsAgentMode ? (runtimeEntry?.workdir ?? settings.system.workdir) : "")
-    ).trim();
+    const workdirResolution = resolveAgentTurnWorkdir({
+      isAgentMode: effectiveIsAgentMode,
+      hasTrustedPrincipal: Boolean(principal),
+      explicitWorkdir: overrides?.workdirOverride,
+      gatewayWorkdir: gatewayBridgeRequest?.workdirOverride,
+      unscopedAgent: !gatewayBridgeRequest && allowEmptyAgentWorkdir,
+      conversationWorkdir: runtimeEntry?.workdir,
+      defaultWorkdir: settings.system.workdir,
+    });
+    const effectiveWorkdir = workdirResolution.workdir;
     const effectiveSelectedSystemToolIds =
       overrides?.selectedSystemToolIdsOverride ??
       gatewayBridgeRequest?.selectedSystemToolIdsOverride ??
@@ -1066,68 +1077,129 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       },
     });
 
-    // Optionally append skills metadata to system prompt (progressive disclosure).
-    if (effectiveSkillsEnabled && selectedSkillNames.length > 0) {
-      // In case the user sends quickly after startup (availableSkills not loaded yet),
-      // do a best-effort refresh before failing.
+    if (effectiveSkillsEnabled && (principal || selectedSkillNames.length > 0)) {
       let skillsList = availableSkills;
       let rootDir = skillsRootDir;
-      let byName = new Map(skillsList.map((s) => [s.name, s]));
-      let missing = selectedSkillNames.filter((n) => !byName.has(n));
-      if (missing.length > 0) {
-        const fresh = await refreshSkills();
-        if (fresh) {
-          skillsList = fresh.skills;
-          rootDir = fresh.rootDir;
-          byName = new Map(skillsList.map((s) => [s.name, s]));
-          missing = selectedSkillNames.filter((n) => !byName.has(n));
+
+      if (principal) {
+        let routedSkill = resolveAuthorizedSkillRoute({
+          text,
+          defaultSkillName: principal.defaultSkillName,
+          installedSkills: skillsList,
+          principal,
+        });
+        if (routedSkill.kind === "missing") {
+          const fresh = await refreshSkills();
+          if (fresh) {
+            skillsList = fresh.skills;
+            rootDir = fresh.rootDir;
+            routedSkill = resolveAuthorizedSkillRoute({
+              text,
+              defaultSkillName: principal.defaultSkillName,
+              installedSkills: skillsList,
+              principal,
+            });
+          }
         }
+
+        if (routedSkill.kind !== "none" && routedSkill.kind !== "matched") {
+          const message = `Skill ${routedSkill.requestedName} is not installed or authorized for this WeCom user.`;
+          setConversationErrorState(message);
+          gatewayBridgeEvents.emitError(message, conversationId);
+          gatewayBridgeEvents.close();
+          markConversationRunStopped("failed");
+          restoreComposerOnStartFailure();
+          return true;
+        }
+
+        if (routedSkill.kind === "matched") {
+          let routedSkillContent = "";
+          try {
+            routedSkillContent = await readCompleteSkillText(routedSkill.skill.skillFile);
+          } catch (error) {
+            console.warn("Failed to preload the routed WeCom Skill", error);
+            const message = `Skill ${routedSkill.skill.name} could not be loaded completely.`;
+            setConversationErrorState(message);
+            gatewayBridgeEvents.emitError(message, conversationId);
+            gatewayBridgeEvents.close();
+            markConversationRunStopped("failed");
+            restoreComposerOnStartFailure();
+            return true;
+          }
+
+          const selectedSkills = [routedSkill.skill];
+          skillsRootDirForTools = rootDir;
+          skillAccessPolicyForTools = {
+            allowedSkillNames: selectedSkills.map((skill) => skill.name),
+            allowedSkillBaseDirs: selectedSkills.map((skill) => skill.baseDir),
+            protectedSkillNames: selectedSkills
+              .filter((skill) => skill.builtIn === true)
+              .map((skill) => skill.name),
+            protectedSkillBaseDirs: selectedSkills
+              .filter((skill) => skill.builtIn === true)
+              .map((skill) => skill.baseDir),
+            allowSkillInventory: false,
+            allowSkillManagement: false,
+            allowSkillMutation: false,
+          };
+          skillsPrompt = buildPreloadedRoutedSkillSystemPrompt({
+            skill: routedSkill.skill,
+            content: routedSkillContent,
+          });
+        }
+      } else {
+        // Desktop chats retain progressive disclosure and the user's current selection.
+        let byName = new Map(skillsList.map((skill) => [skill.name, skill]));
+        let missing = selectedSkillNames.filter((name) => !byName.has(name));
+        if (missing.length > 0) {
+          const fresh = await refreshSkills();
+          if (fresh) {
+            skillsList = fresh.skills;
+            rootDir = fresh.rootDir;
+            byName = new Map(skillsList.map((skill) => [skill.name, skill]));
+            missing = selectedSkillNames.filter((name) => !byName.has(name));
+          }
+        }
+
+        if (missing.length > 0) {
+          const message = `找不到以下 Skills：${missing.join(", ")}（请先重新扫描固定 Skills 目录）`;
+          setConversationErrorState(message);
+          gatewayBridgeEvents.emitError(message, conversationId);
+          gatewayBridgeEvents.close();
+          markConversationRunStopped("failed");
+          restoreComposerOnStartFailure();
+          return true;
+        }
+
+        const selectedSkills = selectedSkillNames.map((name) => byName.get(name)!).filter(Boolean);
+        const allowBuiltinSkillManagement = selectedSkills.some(
+          (skill) => skill.name === "skills-creator" || skill.name === "skills-installer",
+        );
+        skillsRootDirForTools = rootDir;
+        skillAccessPolicyForTools = {
+          allowedSkillNames: selectedSkills.map((skill) => skill.name),
+          allowedSkillBaseDirs: selectedSkills.map((skill) => skill.baseDir),
+          protectedSkillNames: selectedSkills
+            .filter((skill) => skill.builtIn === true)
+            .map((skill) => skill.name),
+          protectedSkillBaseDirs: selectedSkills
+            .filter((skill) => skill.builtIn === true)
+            .map((skill) => skill.baseDir),
+          allowSkillInventory: true,
+          allowSkillManagement: allowBuiltinSkillManagement,
+          allowSkillMutation: true,
+        };
+        const explicitSkills = resolveExplicitSkillMentions({
+          text,
+          structured: composerDraft?.skillMentions ?? [],
+          enabledSkills: selectedSkills,
+        });
+        skillsPrompt = buildSkillsSystemPrompt({
+          rootDir,
+          selected: selectedSkills,
+          explicit: explicitSkills,
+        });
       }
-
-      if (missing.length > 0) {
-        const message = `找不到以下 Skills：${missing.join(", ")}（请先重新扫描固定 Skills 目录）`;
-        setConversationErrorState(message);
-        gatewayBridgeEvents.emitError(message, conversationId);
-        gatewayBridgeEvents.close();
-        markConversationRunStopped("failed");
-        restoreComposerOnStartFailure();
-        return true;
-      }
-
-      const selectedSkills = selectedSkillNames
-        .map((n) => byName.get(n)!)
-        .filter(Boolean)
-        .filter((skill) => !principal || principalCanUseSkill(principal, skill));
-      const allowBuiltinSkillManagement = selectedSkills.some(
-        (skill) => skill.name === "skills-creator" || skill.name === "skills-installer",
-      );
-
-      // IMPORTANT: Claude Code-style skills are progressive disclosure.
-      // We only provide metadata in the system prompt. The model decides whether to read the skill file.
-      skillsRootDirForTools = rootDir;
-      skillAccessPolicyForTools = {
-        allowedSkillNames: selectedSkills.map((skill) => skill.name),
-        allowedSkillBaseDirs: selectedSkills.map((skill) => skill.baseDir),
-        protectedSkillNames: selectedSkills
-          .filter((skill) => skill.builtIn === true)
-          .map((skill) => skill.name),
-        protectedSkillBaseDirs: selectedSkills
-          .filter((skill) => skill.builtIn === true)
-          .map((skill) => skill.baseDir),
-        allowSkillInventory: true,
-        allowSkillManagement: allowBuiltinSkillManagement,
-        allowSkillMutation: true,
-      };
-      const explicitSkills = resolveExplicitSkillMentions({
-        text,
-        structured: composerDraft?.skillMentions ?? [],
-        enabledSkills: selectedSkills,
-      });
-      skillsPrompt = buildSkillsSystemPrompt({
-        rootDir,
-        selected: selectedSkills,
-        explicit: explicitSkills,
-      });
     }
 
     if (!principal) {
@@ -1282,6 +1354,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionStatusText,
             memoryEnabled: !principal,
             effectiveWorkdir,
+            allowEmptyWorkdir: workdirResolution.allowEmptyWorkdir,
             effectiveSkillsEnabled,
             showSilentMemoryExtraction: effectiveIsAgentDevExecutionMode,
             skillsRootDir: skillsRootDirForTools,

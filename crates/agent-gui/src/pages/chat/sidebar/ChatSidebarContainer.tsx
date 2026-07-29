@@ -31,6 +31,7 @@ type ChatSidebarContainerProps = {
   // with the store's activity/running inputs.
   projects: WorkspaceProject[];
   activeProjectId?: string;
+  recentScopeActive: boolean;
   missingProjectPathKeys: ReadonlySet<string>;
   projectRenamingId: string | null;
   projectRenameDraft: string;
@@ -39,6 +40,8 @@ type ChatSidebarContainerProps = {
   onProjectsCollapsedChange: (collapsed: boolean) => void;
   onRecentCollapsedChange: (collapsed: boolean) => void;
   onCreateProject: () => void;
+  onSelectRecentScope: () => void;
+  onNewConversationForRecentScope: () => void;
   onSelectProject: (project: WorkspaceProject) => void;
   onNewConversationForProject: (project: WorkspaceProject) => void;
   onBrowseProjectInFileTree: (project: WorkspaceProject) => void;
@@ -194,6 +197,7 @@ export function ChatSidebarContainer(props: ChatSidebarContainerProps) {
       showProjects={props.showProjects}
       projects={sortedProjects}
       activeProjectId={props.activeProjectId}
+      recentScopeActive={props.recentScopeActive}
       missingProjectPathKeys={props.missingProjectPathKeys}
       runningProjectPathKeys={projectActivityInputs.runningWorkdirPathKeys}
       projectRenamingId={props.projectRenamingId}
@@ -203,6 +207,8 @@ export function ChatSidebarContainer(props: ChatSidebarContainerProps) {
       onProjectsCollapsedChange={props.onProjectsCollapsedChange}
       onRecentCollapsedChange={props.onRecentCollapsedChange}
       onCreateProject={props.onCreateProject}
+      onSelectRecentScope={props.onSelectRecentScope}
+      onNewConversationForRecentScope={props.onNewConversationForRecentScope}
       onSelectProject={props.onSelectProject}
       onNewConversationForProject={props.onNewConversationForProject}
       onBrowseProjectInFileTree={props.onBrowseProjectInFileTree}

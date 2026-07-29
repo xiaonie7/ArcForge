@@ -1,6 +1,6 @@
 [package]
 name = "arcforge"
-version = "0.1.0"
+version = "0.1.1"
 description = "ArcForge desktop Work Agent for Windows"
 authors = ["nieli"]
 edition = "2021"
@@ -44,7 +44,11 @@ tauri-plugin-mcp-bridge = "0.12.0"
 dirs = "6.0.0"
 toml = "0.9.11"
 ignore = "0.4.27"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "hooks"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["mysql", "postgres", "runtime-tokio-rustls"] }
+sqlx-mysql = { version = "0.8.6", default-features = false, features = ["chrono", "json", "uuid"] }
+sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chrono", "json", "uuid"] }
+keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 leveldb-core = "0.1.0"
 chrono = "0.4.45"
 tokio-cron-scheduler = "0.15.1"

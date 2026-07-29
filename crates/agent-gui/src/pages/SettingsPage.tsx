@@ -8,6 +8,7 @@ import {
   Cable,
   Cloud,
   Cpu,
+  Database,
   Info,
   Key,
   Keyboard,
@@ -21,6 +22,7 @@ import { isAgentExecutionMode } from "../lib/settings";
 import { McpHubPage } from "./mcp-hub/McpHubPage";
 import { AboutSection } from "./settings/AboutSection";
 import { AgentsSection } from "./settings/AgentsSection";
+import { DatabaseSection } from "./settings/DatabaseSection";
 import { GlobalShortcutsSection } from "./settings/GlobalShortcutsSection";
 import { MemoryPanel } from "./settings/memory/MemoryPanel";
 import { ProvidersSection } from "./settings/ProvidersSection";
@@ -114,6 +116,7 @@ const NAV_GROUPS: NavGroup[] = [
     labelKey: "settings.groupConnectivity",
     items: [
       { id: "ssh", icon: <Key className="h-3.5 w-3.5" /> },
+      { id: "database", icon: <Database className="h-3.5 w-3.5" /> },
       { id: "remote", icon: <Cloud className="h-3.5 w-3.5" /> },
       { id: "wecom", icon: <Bot className="h-3.5 w-3.5" /> },
     ],
@@ -148,6 +151,7 @@ export function SettingsPage(props: SettingsPageProps) {
       agents: t("settings.navAgents"),
       skills: t("settings.navSkills"),
       mcp: "MCP",
+      database: t("settings.navDatabase"),
       ssh: t("settings.navSsh"),
       memory: t("settings.navMemory"),
       remote: t("settings.navRemote"),
@@ -218,6 +222,8 @@ export function SettingsPage(props: SettingsPageProps) {
         return <AgentsSection settings={settings} setSettings={setSettings} />;
       case "ssh":
         return <SshSection settings={settings} setSettings={setSettings} />;
+      case "database":
+        return <DatabaseSection />;
       case "remote":
         return <RemoteSection settings={settings} setSettings={setSettings} />;
       case "wecom":

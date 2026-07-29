@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
 const { createGatewayBridgeEventController } = loader.loadModule(
   "src/lib/chat/conversation/run/gatewayBridgeEvents.ts",
+);
+const textTurnSource = readFileSync(
+  new URL("../../src/pages/chat/turns/runTextConversationTurn.ts", import.meta.url),
+  "utf8",
+);
+const agentTurnSource = readFileSync(
+  new URL("../../src/pages/chat/turns/runAgentConversationTurn.ts", import.meta.url),
+  "utf8",
 );
 
 function createController(options = {}) {
@@ -221,6 +230,12 @@ test("gateway bridge close blocks normal events but allows forced title updates"
       },
     ],
   );
+});
+
+test("conversation turns wait for the terminal bridge event before returning", () => {
+  const awaitedDone = /await gatewayBridgeEvents\.queueEvent\(\{\s*type: "done"/;
+  assert.match(textTurnSource, awaitedDone);
+  assert.match(agentTurnSource, awaitedDone);
 });
 
 test("gateway bridge checkpoint emits compaction summary payload", () => {

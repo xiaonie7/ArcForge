@@ -28,6 +28,17 @@ separately deployed Gateway process. Group messages are disabled unless
 `ARCFORGE_GATEWAY_CHANNEL_ALLOW_GROUP_MESSAGES=true` is set in both the
 connector and Gateway configuration.
 
+## Proactive messages
+
+When the managed Connector is authenticated, the ArcForge WeCom settings page
+can send a Markdown message to an exact WeCom target. Use a user's `userid` for
+a direct message or a group `chatid` for a group message. The target and message
+are passed to the existing authenticated Connector over its local parent-child
+control pipe; they are not persisted as settings or written to runtime logs.
+
+The current control surface intentionally supports Markdown only. It does not
+provide a contact directory, scheduled delivery, or model-initiated sending.
+
 ## Restricted commands
 
 The connector recognizes only these exact commands (leading and trailing

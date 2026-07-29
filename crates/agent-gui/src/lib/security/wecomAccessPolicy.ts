@@ -4,6 +4,7 @@ export const WECOM_ACCESS_SCOPES = [
   "interaction:respond",
   "tool:read",
   "skill:use",
+  "database:read",
   "mcp:invoke",
 ] as const;
 
@@ -18,7 +19,9 @@ export type WeComAccessRule = Readonly<{
   scopes: readonly WeComAccessScope[];
   allowedToolNames: readonly string[];
   allowedSkillNames: readonly string[];
+  defaultSkillName: string;
   allowedSkillBaseDirs: readonly string[];
+  allowedDatabaseProfileIds: readonly string[];
   allowedMcpServerIds: readonly string[];
 }>;
 
@@ -32,7 +35,9 @@ export type ResolvedWeComGrant = Readonly<{
   scopes: readonly WeComAccessScope[];
   allowedToolNames: readonly string[];
   allowedSkillNames: readonly string[];
+  defaultSkillName: string;
   allowedSkillBaseDirs: readonly string[];
+  allowedDatabaseProfileIds: readonly string[];
   allowedMcpServerIds: readonly string[];
 }>;
 
@@ -87,6 +92,14 @@ export function normalizeWeComAccessPolicy(value: unknown): WeComAccessPolicy {
     // exact authenticated tenant, bot, and WeCom user tuple.
     if (!tenantId || !botId || !externalUserId) continue;
 
+    const allowedSkillNames = normalizeStringList(item.allowedSkillNames);
+    const requestedDefaultSkillName = normalizeId(item.defaultSkillName);
+    // A default is executable authority, not a display preference. Retain it
+    // only when the same rule explicitly grants the exact Skill name.
+    const defaultSkillName = allowedSkillNames.includes(requestedDefaultSkillName)
+      ? requestedDefaultSkillName
+      : "";
+
     rules.push(
       Object.freeze({
         tenantId,
@@ -100,8 +113,12 @@ export function normalizeWeComAccessPolicy(value: unknown): WeComAccessPolicy {
           ) as WeComAccessScope[],
         ),
         allowedToolNames: Object.freeze(normalizeStringList(item.allowedToolNames)),
-        allowedSkillNames: Object.freeze(normalizeStringList(item.allowedSkillNames)),
+        allowedSkillNames: Object.freeze(allowedSkillNames),
+        defaultSkillName,
         allowedSkillBaseDirs: Object.freeze(normalizeSkillBaseDirs(item.allowedSkillBaseDirs)),
+        allowedDatabaseProfileIds: Object.freeze(
+          normalizeStringList(item.allowedDatabaseProfileIds),
+        ),
         allowedMcpServerIds: Object.freeze(normalizeStringList(item.allowedMcpServerIds)),
       }),
     );
@@ -134,15 +151,23 @@ export function resolveWeComGrant(
   const allowedToolNames: string[] = [];
   const allowedSkillNames: string[] = [];
   const allowedSkillBaseDirs: string[] = [];
+  const allowedDatabaseProfileIds: string[] = [];
   const allowedMcpServerIds: string[] = [];
+  const defaultSkillNames = new Set<string>();
   for (const rule of matches) {
     appendUnique(roles, rule.roles);
     appendUnique(scopes, rule.scopes);
     appendUnique(allowedToolNames, rule.allowedToolNames);
     appendUnique(allowedSkillNames, rule.allowedSkillNames);
+    if (rule.defaultSkillName) defaultSkillNames.add(rule.defaultSkillName);
     appendUnique(allowedSkillBaseDirs, rule.allowedSkillBaseDirs);
+    appendUnique(allowedDatabaseProfileIds, rule.allowedDatabaseProfileIds);
     appendUnique(allowedMcpServerIds, rule.allowedMcpServerIds);
   }
+
+  // Distinct defaults from overlapping exact-match rules are ambiguous. Do
+  // not choose by rule order; force the caller to route without a default.
+  const defaultSkillName = defaultSkillNames.size === 1 ? [...defaultSkillNames][0] : "";
 
   return Object.freeze({
     matched: matches.length > 0,
@@ -150,7 +175,9 @@ export function resolveWeComGrant(
     scopes: Object.freeze(scopes),
     allowedToolNames: Object.freeze(allowedToolNames),
     allowedSkillNames: Object.freeze(allowedSkillNames),
+    defaultSkillName,
     allowedSkillBaseDirs: Object.freeze(allowedSkillBaseDirs),
+    allowedDatabaseProfileIds: Object.freeze(allowedDatabaseProfileIds),
     allowedMcpServerIds: Object.freeze(allowedMcpServerIds),
   });
 }

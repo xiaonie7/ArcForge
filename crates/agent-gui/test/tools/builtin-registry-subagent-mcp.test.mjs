@@ -101,7 +101,7 @@ function createRegistryHarness() {
   return { loader, runnerCalls, listedServerIds, listedServerCommands };
 }
 
-async function buildRegistry(harness, { withSubagentRuntime, storeIpc } = {}) {
+async function buildRegistry(harness, { withSubagentRuntime, storeIpc, workspaceAccess } = {}) {
   const { loader } = harness;
   const { buildBuiltinToolRegistry } = loader.loadModule("src/lib/tools/builtinRegistry.ts");
   const { createFileToolState } = loader.loadModule("src/lib/tools/fileToolState.ts");
@@ -112,6 +112,7 @@ async function buildRegistry(harness, { withSubagentRuntime, storeIpc } = {}) {
     fileState: createFileToolState(),
     skillsEnabled: true,
     runtimeScope: "chat",
+    workspaceAccess,
     selectedSystemToolIds: [],
     getMcpSettings: () => mcpSettingsHolder.value,
   };
@@ -169,6 +170,40 @@ test("registry with a subagent runtime exposes Agent and the parent SendMessage"
   assert.equal(registry.metadataByName.get("Agent").isReadOnly, false);
   assert.equal(registry.metadataByName.get("SendMessage").isReadOnly, true);
   assert.ok(registry.hasTool("agent"));
+});
+
+test("workspaceAccess none keeps resource tools but excludes every workdir-bound surface", async () => {
+  const harness = createRegistryHarness();
+  const { registry } = await buildRegistry(harness, {
+    withSubagentRuntime: true,
+    workspaceAccess: "none",
+  });
+  const names = registry.tools.map((tool) => tool.name);
+
+  assert.ok(names.includes("SkillsManager"));
+  assert.ok(names.includes("DatabaseQuery"));
+  assert.ok(names.includes("mcp_docs_search"));
+  for (const name of [
+    "Read",
+    "List",
+    "Glob",
+    "Grep",
+    "Bash",
+    "ManagedProcess",
+    "CronManager",
+    "McpManager",
+    "MemoryManager",
+    "TunnelManager",
+    "SSHManager",
+    "Terminal",
+    "ReadTerminal",
+    "DatabaseExecute",
+    "Agent",
+    "AgentBatch",
+    "SendMessage",
+  ]) {
+    assert.ok(!names.includes(name), `${name} must not be registered without a workspace`);
+  }
 });
 
 test("Agent tool description embeds the hydrated roster and enabled templates", async () => {

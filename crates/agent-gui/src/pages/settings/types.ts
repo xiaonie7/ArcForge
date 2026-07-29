@@ -11,6 +11,7 @@ export type SectionId =
   | "agents"
   | "skills"
   | "mcp"
+  | "database"
   | "ssh"
   | "memory"
   | "remote"
