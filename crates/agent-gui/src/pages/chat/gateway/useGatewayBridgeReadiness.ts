@@ -145,18 +145,26 @@ export function useGatewayBridgeReadiness(params: UseGatewayBridgeReadinessParam
 
     if (!knownConversation && createIfMissing) {
       const identity = createConversationIdentity();
+      const stubEntry = createConversationRuntimeEntry({
+        state: createConversationStateFromContext({
+          tools: conversationState.meta.tools,
+          messages: [],
+        }),
+        sessionId: identity.sessionId,
+        createdAt: identity.createdAt,
+      });
       setConversationRuntimeCacheEntry(
         conversationRuntimeCacheRef.current,
         requestedConversationId,
-        createConversationRuntimeEntry({
-          state: createConversationStateFromContext({
-            tools: conversationState.meta.tools,
-            messages: [],
-          }),
-          sessionId: identity.sessionId,
-          createdAt: identity.createdAt,
-        }),
+        stubEntry,
       );
+      // A freshly stubbed conversation has no sqlite row yet. Mark it as
+      // "persisted" locally so a later ensureGatewayBridgeConversationReady
+      // call doesn't try to hydrate it from history and fail with
+      // "not found" (e.g. the /new fast path never runs the real send
+      // pipeline that would create the row). The real persistence, once it
+      // happens, overwrites this entry with the actual saved state.
+      persistedConversationStateRef.current.set(requestedConversationId, stubEntry.state);
       return requestedConversationId;
     }
 

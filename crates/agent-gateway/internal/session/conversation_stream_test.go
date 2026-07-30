@@ -25,6 +25,15 @@ func doneEvent(conversationID string) *gatewayv1.ChatEvent {
 	}
 }
 
+func doneEventWithFinalText(conversationID string, finalText string) *gatewayv1.ChatEvent {
+	data, _ := json.Marshal(map[string]any{"final_text": finalText})
+	return &gatewayv1.ChatEvent{
+		Type:           gatewayv1.ChatEvent_DONE,
+		ConversationId: conversationID,
+		Data:           string(data),
+	}
+}
+
 func startedControl(runID string, conversationID string) *gatewayv1.ChatControlEvent {
 	return &gatewayv1.ChatControlEvent{
 		RequestId:      runID,
@@ -99,6 +108,52 @@ func TestConversationStreamSeqMonotonicAcrossRuns(t *testing.T) {
 	}
 	if sub.Activity == nil || sub.Activity.RunID != "run-2" || sub.Activity.State != RunActivityRunning {
 		t.Fatalf("activity = %#v, want running run-2", sub.Activity)
+	}
+}
+
+func TestConversationDonePreservesCanonicalFinalText(t *testing.T) {
+	m := NewManager()
+	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
+	m.ingestChatEvent("run-1", tokenEvent("conv-1", "中间过程"))
+	m.ingestChatEvent("run-1", doneEventWithFinalText("conv-1", "最终答案"))
+
+	sub := m.SubscribeConversationStream("conv-1", 0, "")
+	defer sub.Cleanup()
+	last := sub.Events[len(sub.Events)-1]
+	if last.Type != StreamEventRunFinished || last.Payload["final_text"] != "最终答案" {
+		t.Fatalf("run_finished did not preserve final_text: %#v", last)
+	}
+}
+
+func TestConversationRunWorkdirUsesActiveRuntimeSnapshot(t *testing.T) {
+	m := NewManager()
+	m.StartChatCommand("old-run", "conv-1", "/stale/workspace", "old-client", []map[string]any{
+		{"type": "user_message", "message": "old"},
+	})
+	m.ingestChatEvent("old-run", doneEvent("conv-1"))
+	m.StartChatCommand("run-1", "conv-1", "", "client-1", []map[string]any{
+		{"type": "user_message", "message": "hello"},
+	})
+	m.ingestRuntimeSnapshot(&gatewayv1.ChatRuntimeSnapshot{
+		RunId:          "run-1",
+		ConversationId: "conv-1",
+		State:          "running",
+		Cwd:            "/desktop/workspace",
+		Revision:       1,
+	})
+
+	if got, ok := m.ConversationRunWorkdir("conv-1", "run-1"); !ok || got != "/desktop/workspace" {
+		t.Fatalf("active run workdir = %q, %v", got, ok)
+	}
+	for _, input := range [][2]string{{"conv-1", "other-run"}, {"other-conversation", "run-1"}, {"", "run-1"}} {
+		if got, ok := m.ConversationRunWorkdir(input[0], input[1]); ok || got != "" {
+			t.Fatalf("unrelated run workdir = %q, %v for %#v", got, ok, input)
+		}
+	}
+
+	m.ingestChatEvent("run-1", doneEvent("conv-1"))
+	if got, ok := m.ConversationRunWorkdir("conv-1", "run-1"); ok || got != "" {
+		t.Fatalf("finished run exposed workdir = %q, %v", got, ok)
 	}
 }
 

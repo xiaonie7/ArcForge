@@ -645,6 +645,34 @@ fn build_readable_file_entry(
     })
 }
 
+fn build_staged_readable_file_entry(
+    destination: &Path,
+    kind: &str,
+    size_bytes: u64,
+) -> Result<SystemReadableFileEntry, String> {
+    let base = upload_staging_base()?;
+    let staged = destination.strip_prefix(&base).map_err(|_| {
+        format!(
+            "gateway upload path is outside the upload staging area: {}",
+            destination.display()
+        )
+    })?;
+    let relative_path = format!("uploads/{}", staged.to_string_lossy().replace('\\', "/"));
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(&relative_path)
+        .to_string();
+
+    Ok(SystemReadableFileEntry {
+        relative_path,
+        absolute_path: destination.to_string_lossy().into_owned(),
+        file_name,
+        kind: kind.to_string(),
+        size_bytes,
+    })
+}
+
 fn canonicalize_uploaded_file_path(absolute_path: &str) -> Result<PathBuf, String> {
     let raw = absolute_path.trim();
     if raw.is_empty() {
@@ -894,6 +922,32 @@ pub(crate) fn system_import_uploaded_readable_files_sync(
 ) -> Result<SystemPickReadableFilesResponse, String> {
     let workdir = canonicalize_upload_workdir(&workdir)?;
 
+    system_import_uploaded_readable_files_impl(Some(&workdir), uploads)
+}
+
+/// Imports raw bytes received from an authenticated gateway channel. Channel
+/// messages are allowed to arrive before a desktop workspace has been chosen,
+/// so an empty workdir intentionally means "stage only". All interactive
+/// desktop upload entry points continue to use
+/// `system_import_uploaded_readable_files_sync` and therefore still require an
+/// existing absolute workdir.
+pub(crate) fn system_import_gateway_readable_files_sync(
+    workdir: String,
+    uploads: Vec<SystemReadableFileUploadInput>,
+) -> Result<SystemPickReadableFilesResponse, String> {
+    let workdir = if workdir.trim().is_empty() {
+        None
+    } else {
+        Some(canonicalize_upload_workdir(&workdir)?)
+    };
+
+    system_import_uploaded_readable_files_impl(workdir.as_deref(), uploads)
+}
+
+fn system_import_uploaded_readable_files_impl(
+    workdir: Option<&Path>,
+    uploads: Vec<SystemReadableFileUploadInput>,
+) -> Result<SystemPickReadableFilesResponse, String> {
     if uploads.is_empty() {
         return Ok(SystemPickReadableFilesResponse {
             files: Vec::new(),
@@ -938,12 +992,13 @@ pub(crate) fn system_import_uploaded_readable_files_sync(
         fs::write(&target, &upload.content)
             .map_err(|e| format!("写入上传文件失败 {}: {e}", target.display()))?;
 
-        files.push(build_readable_file_entry(
-            &workdir,
-            &target,
-            kind,
-            upload.content.len() as u64,
-        )?);
+        let entry = match workdir {
+            Some(workdir) => {
+                build_readable_file_entry(workdir, &target, kind, upload.content.len() as u64)?
+            }
+            None => build_staged_readable_file_entry(&target, kind, upload.content.len() as u64)?,
+        };
+        files.push(entry);
     }
 
     Ok(SystemPickReadableFilesResponse { files, skipped })
@@ -1668,6 +1723,30 @@ mod tests {
 
         let _ = fs::remove_dir_all(&first_parent);
         let _ = fs::remove_dir_all(&workdir);
+    }
+
+    #[test]
+    fn gateway_import_stages_files_without_a_selected_workdir() {
+        let response = system_import_gateway_readable_files_sync(
+            String::new(),
+            vec![SystemReadableFileUploadInput {
+                file_name: "企微附件.txt".to_string(),
+                mime_type: Some("text/plain".to_string()),
+                content: "来自企业微信".as_bytes().to_vec(),
+            }],
+        )
+        .expect("stage gateway upload without workdir");
+
+        assert!(response.skipped.is_empty());
+        assert_eq!(response.files.len(), 1);
+        let file = &response.files[0];
+        assert_eq!(file.file_name, "企微附件.txt");
+        assert!(file.relative_path.starts_with("uploads/"));
+        assert_eq!(file.size_bytes, "来自企业微信".len() as u64);
+        let staged = PathBuf::from(&file.absolute_path);
+        assert!(staged.is_file());
+        let batch = staged.parent().expect("staging batch").to_path_buf();
+        let _ = fs::remove_dir_all(batch);
     }
 
     #[test]

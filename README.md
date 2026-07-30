@@ -76,6 +76,24 @@ ArcForge 不只是一个聊天窗口。它让 Agent 在你可见、可控的边�
 - 支持 Skills 的安装、创建、管理和按需加载。
 - 内置可扩展工具注册机制，让 Agent 能力保持可组合。
 
+### 数据库工具
+
+- 在设置中管理 SQLite、PostgreSQL 和 MySQL 连接配置，密码存入系统密钥链（Windows Credential Manager），不落盘、不进入聊天记录。
+- `DatabaseQuery` 只读查询：列连接、列表、查看表结构与参数化查询，后端强制只读事务、绑定参数、超时与行数/单元格/结果大小上限。
+- `DatabaseExecute` 受控写入：聊天会话中连接开启"允许写入"时可用，仅允许单条参数化 INSERT/UPDATE/DELETE，UPDATE/DELETE 必须带 WHERE，超出影响行数上限自动回滚。
+- 临时连接（由用户或 Skill 当次提供）只读且不落库；工具调用中的密码在写入会话历史前会被擦除。
+
+### 企业微信接入（WeCom）
+
+- 通过独立 Connector 进程接收企业微信智能机器人文本、文件和图片回调，经 Gateway 专用通道 `/ws/v2/channel` 转为普通对话与附件；Connector 不接触工具调用、工作目录与会话历史。
+- Agent 仅在显式调用 `PresentFile` 展示结果文件时将其安全回传到当前企业微信单聊或群聊，普通文件读取不会自动外发。
+- 桌面托管模式下一键启动内置 Gateway 与 Connector，Token 在 Rust 内存中生成并直接传给子进程，不暴露给 WebView；也支持连接外部部署的 Gateway。
+- 企业微信消息直接复用桌面端当前的模型、执行模式、工作目录、Skills、系统工具、MCP、Memory、SSH 与隧道配置，不再维护独立的用户能力白名单。
+- 支持受限斜杠命令（`/new`、`/compact`、`/help`）、按用户/群隔离的会话，以及从设置页向指定用户或群发送 Markdown 主动消息。
+- Shell、文件读写、数据库读写、Skill/MCP 管理、Memory 和子代理等能力与桌面端一致，并继续遵守各工具自身的开关、确认流程和安全边界。
+
+部署与环境变量细节见 [`connectors/wecom_aibot/README.md`](connectors/wecom_aibot/README.md)。
+
 ### 记忆与自动化
 
 - 使用本地 Markdown 与 SQLite 全文检索维护跨会话记忆。
@@ -170,12 +188,12 @@ docker run -d \
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                    Browser WebUI（可选）                     │
+│              Browser WebUI（可选）  ·  企业微信用户           │
 └───────────────────────────┬─────────────────────────────────┘
-                            │ HTTP / WebSocket
-┌───────────────────────────▼─────────────────────────────────┐
-│                       Agent Gateway                         │
-│             Go · WebSocket v2 · Protobuf · WebUI            │
+                            │ HTTP / WebSocket      ▲ 消息回调
+┌───────────────────────────▼───────────────────────┴─────────┐
+│          Agent Gateway          │    WeCom Connector        │
+│    Go · WebSocket v2 · Protobuf │  Python · 受限通道转发     │
 └───────────────────────────┬─────────────────────────────────┘
                             │ Remote bridge
 ┌───────────────────────────▼─────────────────────────────────┐
@@ -183,7 +201,7 @@ docker run -d \
 │                    Tauri 2 · React · Rust                    │
 ├────────────┬────────────┬────────────┬────────────┬─────────┤
 │ LLM 路由   │ Agent 循环 │ 本地工具   │ Skills/MCP │ 记忆    │
-│ 多种协议   │ Sub-Agent  │ FS/Shell   │ 扩展生态   │ 自动化  │
+│ 多种协议   │ Sub-Agent  │ FS/Shell/DB│ 扩展生态   │ 自动化  │
 └────────────┴────────────┴────────────┴────────────┴─────────┘
 ```
 
@@ -197,6 +215,7 @@ docker run -d \
 | Agent 与模型     | `pi-agent-core`、`pi-ai`、多协议 Provider Adapter |
 | Gateway       | Go、HTTP、WebSocket、Protobuf               |
 | Gateway WebUI | React、TypeScript、Vite                    |
+| 渠道 Connector | Python（企业微信 AiBot 回调转发）            |
 
 ### 仓库结构
 
@@ -207,6 +226,7 @@ ArcForge/
 │   │   ├── src/            # React 前端与 Agent 运行时
 │   │   └── src-tauri/      # Rust 后端、系统能力与内置 Skills
 │   └── agent-gateway/      # Go Gateway 与嵌入式 WebUI
+├── connectors/             # 渠道 Connector（企业微信 AiBot 等）
 ├── contracts/              # 机器可读合同与 Schema
 ├── fixtures/               # 测试与验收夹具
 ├── scripts/                # 发布和维护脚本

@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import io
 import json
 import os
@@ -10,13 +12,21 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from connectors.wecom_aibot.channel_client import ChannelClient, make_inbound
+from connectors.wecom_aibot.channel_client import (
+    ChannelClient,
+    ChannelResponse,
+    ChannelResponseFile,
+    make_inbound,
+)
 from connectors.wecom_aibot.commands import SessionSequencer, SessionStore, parse_command
 from connectors.wecom_aibot.config import ConnectorConfig, _channel_url, load_config
 from connectors.wecom_aibot.dedupe import DedupeKey, DedupeStore
+from connectors.wecom_aibot.interactions import InteractionCoordinator
 from connectors.wecom_aibot.protocol import (
     CHANNEL_ROLE,
     ChannelClientFrame,
+    ChannelFile,
+    ChannelInboundFile,
     ChannelInboundMessage,
     ChannelServerFrame,
     ClientHello,
@@ -28,14 +38,20 @@ from connectors.wecom_aibot.worker import (
     CONTROL_RESULT_MARKER,
     _RedactingSdkLogger,
     _WecomConnectionState,
+    _download_inbound_media,
+    _deliver_wecom_file,
     _external_message_id,
+    _handle_media,
     _handle_text,
     _handle_control_line,
     _register_connection_handlers,
     _routing,
+    _send_response_files,
     _serve_control_requests,
     _text,
+    _upload_wecom_file,
     _wait_for_initial_authentication,
+    register_handlers,
     run,
 )
 
@@ -327,6 +343,43 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(decoded.DESCRIPTOR.fields_by_name["command"].number, 7)
         self.assertEqual(decoded.DESCRIPTOR.fields_by_name["channel_session_id"].number, 8)
 
+    def test_file_frames_round_trip_with_canonical_field_numbers(self):
+        inbound = make_inbound(
+            external_message_id="message-1",
+            external_user_id="alice",
+            chat_id="",
+            chat_type="single",
+            text="",
+            files=[
+                ChannelInboundFile(
+                    file_name="report.csv",
+                    mime_type="text/csv",
+                    content=b"a,b\n1,2\n",
+                )
+            ],
+        )
+        decoded = ChannelInboundMessage.FromString(inbound.SerializeToString())
+        self.assertEqual(decoded.DESCRIPTOR.fields_by_name["files"].number, 9)
+        self.assertEqual(decoded.files[0].file_name, "report.csv")
+        self.assertEqual(decoded.files[0].content, b"a,b\n1,2\n")
+
+        server = ChannelServerFrame(
+            request_id="request-1",
+            file=ChannelFile(
+                run_id="run-1",
+                conversation_id="conversation-1",
+                seq=3,
+                file_name="answer.csv",
+                mime_type="text/csv",
+                size_bytes=3,
+                content=b"abc",
+            ),
+        )
+        decoded_server = ChannelServerFrame.FromString(server.SerializeToString())
+        self.assertEqual(decoded_server.DESCRIPTOR.fields_by_name["file"].number, 8)
+        self.assertEqual(decoded_server.file.size_bytes, 3)
+        self.assertEqual(decoded_server.file.content, b"abc")
+
 
 class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -524,7 +577,820 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submitted[1].channel_session_id, "session-2")
 
 
+class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _frame(message_id, text, *, user_id="alice"):
+        return {
+            "headers": {"req_id": f"callback-{message_id}"},
+            "body": {
+                "msgid": message_id,
+                "from": {"userid": user_id},
+                "chattype": "single",
+                "chatid": "",
+                "text": {"content": text},
+            },
+        }
+
+    @staticmethod
+    def _request(*, interaction_id="input-1", deadline_at_ms=None):
+        return {
+            "interaction_id": interaction_id,
+            "deadline_at_ms": deadline_at_ms or int(time.time() * 1000) + 60_000,
+            "questions": [
+                {
+                    "id": "dimension",
+                    "header": "口径",
+                    "prompt": "您要分析哪种事业群口径？",
+                    "options": [
+                        {
+                            "id": "business",
+                            "label": "业务板块事业群",
+                            "description": "按业务板块统计",
+                            "recommended": True,
+                        },
+                        {
+                            "id": "organization",
+                            "label": "组织事业群",
+                            "description": "按组织架构统计",
+                        },
+                    ],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _wecom(**overrides):
+        values = {
+            "reply_stream": AsyncMock(return_value={"errcode": 0}),
+            "reply_stream_with_card": AsyncMock(return_value={"errcode": 0}),
+            "update_template_card": AsyncMock(return_value={"errcode": 0}),
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    async def test_text_answer_bypasses_active_session_lock_and_resumes_same_turn(self):
+        interactions = InteractionCoordinator()
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        sequencer = SessionSequencer()
+        dedupe = DedupeStore()
+        wecom = self._wecom()
+        request_presented = asyncio.Event()
+        answer_received = asyncio.Event()
+
+        async def submit(
+            _inbound,
+            *,
+            input_request_handler=None,
+            input_resolved_handler=None,
+        ):
+            self.assertIsNotNone(input_request_handler)
+            self.assertIsNotNone(input_resolved_handler)
+            await input_request_handler(self._request())
+            request_presented.set()
+            await answer_received.wait()
+            await input_resolved_handler(
+                {"interaction_id": "input-1", "status": "answered"}
+            )
+            return SimpleNamespace(status="completed", text="done", message="")
+
+        async def answer_input(interaction_id, selections):
+            self.assertEqual(interaction_id, "input-1")
+            self.assertEqual(
+                selections,
+                [{"question_id": "dimension", "option_id": "business"}],
+            )
+            answer_received.set()
+            return {"interaction_id": interaction_id, "accepted": True, "status": "accepted"}
+
+        channel = SimpleNamespace(
+            submit=AsyncMock(side_effect=submit),
+            answer_input=AsyncMock(side_effect=answer_input),
+        )
+        turn = asyncio.create_task(
+            _handle_text(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                self._frame("message-1", "开始分析"),
+                sequencer,
+                interactions,
+            )
+        )
+        await asyncio.wait_for(request_presented.wait(), timeout=1)
+
+        # The original turn still owns the SessionSequencer lock. A reply that
+        # goes through the normal turn path would deadlock here.
+        await asyncio.wait_for(
+            _handle_text(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                self._frame("message-2", "1"),
+                sequencer,
+                interactions,
+            ),
+            timeout=1,
+        )
+        await asyncio.wait_for(turn, timeout=1)
+
+        self.assertEqual(channel.submit.await_count, 1)
+        channel.answer_input.assert_awaited_once()
+        wecom.reply_stream_with_card.assert_awaited_once()
+        answer_replies = [call.args[2] for call in wecom.reply_stream.await_args_list]
+        self.assertTrue(any("选择已提交" in text for text in answer_replies))
+
+    async def test_card_failure_falls_back_to_numbered_markdown_without_remote_error(self):
+        interactions = InteractionCoordinator()
+        wecom = self._wecom(
+            reply_stream_with_card=AsyncMock(
+                side_effect=RuntimeError("remote response containing sensitive text")
+            )
+        )
+        session_key = SessionStore.key(
+            chat_type="single", chat_id="", external_user_id="alice"
+        )
+
+        with patch("connectors.wecom_aibot.interactions.logger.warning"):
+            presented = await interactions.present(
+                self._request(),
+                session_key=session_key,
+                wecom=wecom,
+                frame=self._frame("message-1", "start"),
+                stream_id="stream-1",
+            )
+
+        self.assertTrue(presented)
+        wecom.reply_stream_with_card.assert_awaited_once()
+        markdown = wecom.reply_stream.await_args.args[2]
+        self.assertIn("您要分析哪种事业群口径", markdown)
+        self.assertIn("1. 业务板块事业群", markdown)
+        self.assertIn("回复选项序号", markdown)
+        self.assertNotIn("sensitive", markdown)
+
+    async def test_card_click_is_mapped_updated_and_duplicate_click_is_idempotent(self):
+        interactions = InteractionCoordinator()
+        wecom = self._wecom()
+        session_key = SessionStore.key(
+            chat_type="single", chat_id="", external_user_id="alice"
+        )
+        await interactions.present(
+            self._request(),
+            session_key=session_key,
+            wecom=wecom,
+            frame=self._frame("message-1", "start"),
+            stream_id="stream-1",
+        )
+        card = wecom.reply_stream_with_card.await_args.kwargs["template_card"]
+        event_frame = {
+            "headers": {"req_id": "card-event-1"},
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "event": {
+                    "eventtype": "template_card_event",
+                    "task_id": card["task_id"],
+                    "event_key": "o2",
+                },
+            },
+        }
+        channel = SimpleNamespace(
+            answer_input=AsyncMock(
+                return_value={"interaction_id": "input-1", "accepted": True, "status": "accepted"}
+            )
+        )
+
+        self.assertTrue(
+            await interactions.handle_card_event(
+                frame=event_frame,
+                session_key=session_key,
+                wecom=wecom,
+                channel=channel,
+            )
+        )
+        self.assertTrue(
+            await interactions.handle_card_event(
+                frame=event_frame,
+                session_key=session_key,
+                wecom=wecom,
+                channel=channel,
+            )
+        )
+
+        channel.answer_input.assert_awaited_once_with(
+            "input-1",
+            [{"question_id": "dimension", "option_id": "organization"}],
+        )
+        self.assertEqual(wecom.update_template_card.await_count, 1)
+        updated_card = wecom.update_template_card.await_args_list[0].args[1]
+        self.assertEqual(updated_card["card_type"], "text_notice")
+        self.assertEqual(updated_card["main_title"]["title"], "选择已收到")
+
+    async def test_multi_question_card_advances_one_button_question_at_a_time(self):
+        interactions = InteractionCoordinator()
+        wecom = self._wecom()
+        session_key = SessionStore.key(
+            chat_type="single", chat_id="", external_user_id="alice"
+        )
+        request = self._request()
+        request["questions"].append(
+            {
+                "id": "period",
+                "header": "周期",
+                "prompt": "选择统计周期？",
+                "options": [
+                    {"id": "month", "label": "月度"},
+                    {"id": "quarter", "label": "季度"},
+                ],
+            }
+        )
+        await interactions.present(
+            request,
+            session_key=session_key,
+            wecom=wecom,
+            frame=self._frame("message-1", "start"),
+            stream_id="stream-1",
+        )
+        first_card = wecom.reply_stream_with_card.await_args.kwargs["template_card"]
+        self.assertEqual(first_card["card_type"], "button_interaction")
+        self.assertEqual([button["key"] for button in first_card["button_list"]], ["o1", "o2"])
+
+        channel = SimpleNamespace(
+            answer_input=AsyncMock(
+                return_value={"interaction_id": "input-1", "accepted": True, "status": "accepted"}
+            )
+        )
+        first_event = {
+            "headers": {"req_id": "card-event-1"},
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "event": {"task_id": first_card["task_id"], "event_key": "o2"},
+            },
+        }
+        self.assertTrue(
+            await interactions.handle_card_event(
+                frame=first_event,
+                session_key=session_key,
+                wecom=wecom,
+                channel=channel,
+            )
+        )
+        second_card = wecom.update_template_card.await_args_list[0].args[1]
+        self.assertEqual(second_card["card_type"], "button_interaction")
+        self.assertEqual([button["key"] for button in second_card["button_list"]], ["o1", "o2"])
+
+        second_event = {
+            "headers": {"req_id": "card-event-2"},
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "event": {"task_id": first_card["task_id"], "event_key": "o1"},
+            },
+        }
+        await interactions.handle_card_event(
+            frame=second_event,
+            session_key=session_key,
+            wecom=wecom,
+            channel=channel,
+        )
+        channel.answer_input.assert_awaited_once_with(
+            "input-1",
+            [
+                {"question_id": "dimension", "option_id": "organization"},
+                {"question_id": "period", "option_id": "month"},
+            ],
+        )
+
+    async def test_expired_and_desktop_resolved_inputs_stop_intercepting_text(self):
+        interactions = InteractionCoordinator()
+        wecom = self._wecom()
+        session_key = SessionStore.key(
+            chat_type="single", chat_id="", external_user_id="alice"
+        )
+        channel = SimpleNamespace(answer_input=AsyncMock())
+        await interactions.present(
+            self._request(interaction_id="expired", deadline_at_ms=1),
+            session_key=session_key,
+            wecom=wecom,
+            frame=self._frame("message-1", "start"),
+            stream_id="stream-1",
+        )
+        reply = await interactions.handle_text(
+            session_key=session_key,
+            text="1",
+            channel=channel,
+        )
+        self.assertIn("过期", reply)
+        channel.answer_input.assert_not_awaited()
+        self.assertEqual(await interactions.pending_count(), 0)
+
+        await interactions.present(
+            self._request(interaction_id="desktop-answered"),
+            session_key=session_key,
+            wecom=wecom,
+            frame=self._frame("message-2", "start"),
+            stream_id="stream-2",
+        )
+        self.assertTrue(
+            await interactions.handle_resolved(
+                {"interaction_id": "desktop-answered", "status": "answered"},
+                wecom=wecom,
+            )
+        )
+        self.assertEqual(await interactions.pending_count(), 0)
+        self.assertIsNone(
+            await interactions.handle_text(
+                session_key=session_key,
+                text="1",
+                channel=channel,
+            )
+        )
+
+
+class WorkerFileTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _media_frame(
+        message_id="message-1",
+        *,
+        media_kind="file",
+        chat_id="",
+        chat_type="single",
+    ):
+        return {
+            "headers": {"req_id": f"callback-{message_id}"},
+            "body": {
+                "msgid": message_id,
+                "from": {"userid": "alice"},
+                "chattype": chat_type,
+                "chatid": chat_id,
+                media_kind: {
+                    "url": "https://files.example/download",
+                    "aeskey": "aes-secret",
+                },
+            },
+        }
+
+    async def test_registers_text_file_and_image_callbacks(self):
+        handlers = {}
+
+        class FakeClient:
+            def on(self, event_name):
+                def register(handler):
+                    handlers[event_name] = handler
+                    return handler
+
+                return register
+
+        register_handlers(
+            FakeClient(),
+            SimpleNamespace(),
+            _config(),
+            DedupeStore(),
+            SessionStore(),
+            SessionSequencer(),
+        )
+        self.assertEqual(
+            set(handlers),
+            {
+                "message.text",
+                "message.file",
+                "message.image",
+                "event.template_card_event",
+            },
+        )
+        self.assertFalse(
+            asyncio.iscoroutinefunction(handlers["event.template_card_event"]),
+            "card callbacks must return immediately and schedule their work",
+        )
+
+    async def test_inbound_file_is_downloaded_safely_and_forwarded(self):
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(),
+            download_file=AsyncMock(
+                return_value=(b"a,b\n1,2\n", "..\\private\\report.csv")
+            ),
+        )
+        channel = SimpleNamespace(
+            submit=AsyncMock(
+                return_value=SimpleNamespace(
+                    status="completed",
+                    text="已收到",
+                    message="",
+                    files=[],
+                )
+            )
+        )
+
+        await _handle_media(
+            wecom,
+            channel,
+            DedupeStore(),
+            SessionStore(id_factory=lambda: "session-1"),
+            _config(),
+            self._media_frame(),
+            "file",
+        )
+
+        wecom.download_file.assert_awaited_once_with(
+            "https://files.example/download", "aes-secret"
+        )
+        inbound = channel.submit.await_args.args[0]
+        self.assertEqual(inbound.text, "")
+        self.assertEqual(len(inbound.files), 1)
+        self.assertEqual(inbound.files[0].file_name, "report.csv")
+        self.assertEqual(inbound.files[0].mime_type, "text/csv")
+        self.assertEqual(inbound.files[0].content, b"a,b\n1,2\n")
+
+    async def test_oversized_inbound_file_is_rejected_before_gateway(self):
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(),
+            download_file=AsyncMock(return_value=(b"1234", "large.bin")),
+        )
+        channel = SimpleNamespace(submit=AsyncMock())
+        with patch("connectors.wecom_aibot.worker.logger.warning"):
+            await _handle_media(
+                wecom,
+                channel,
+                DedupeStore(),
+                SessionStore(),
+                _config(max_file_bytes=3),
+                self._media_frame(),
+                "file",
+            )
+
+        channel.submit.assert_not_awaited()
+        final_text = [
+            call.args[2]
+            for call in wecom.reply_stream.await_args_list
+            if call.args[3]
+        ][-1]
+        self.assertIn("文件过大", final_text)
+
+    async def test_transient_download_failure_can_retry_same_callback(self):
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(),
+            download_file=AsyncMock(
+                side_effect=[
+                    RuntimeError("temporary download failure"),
+                    (b"retry succeeded", "answer.txt"),
+                ]
+            ),
+        )
+        channel = SimpleNamespace(
+            submit=AsyncMock(
+                return_value=SimpleNamespace(
+                    status="completed",
+                    text="已收到",
+                    message="",
+                    files=[],
+                )
+            )
+        )
+        dedupe = DedupeStore()
+        frame = self._media_frame()
+
+        with patch("connectors.wecom_aibot.worker.logger.warning"):
+            await _handle_media(
+                wecom,
+                channel,
+                dedupe,
+                SessionStore(id_factory=lambda: "session-1"),
+                _config(),
+                frame,
+                "file",
+            )
+            await _handle_media(
+                wecom,
+                channel,
+                dedupe,
+                SessionStore(id_factory=lambda: "session-1"),
+                _config(),
+                frame,
+                "file",
+            )
+
+        self.assertEqual(wecom.download_file.await_count, 2)
+        self.assertEqual(channel.submit.await_count, 1)
+
+    async def test_inbound_image_without_filename_is_sniffed(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"payload"
+        wecom = SimpleNamespace(download_file=AsyncMock(return_value=(png, None)))
+        inbound = await _download_inbound_media(
+            wecom,
+            self._media_frame(media_kind="image"),
+            "image",
+            _config(),
+        )
+        self.assertEqual(inbound.file_name, "image.png")
+        self.assertEqual(inbound.mime_type, "image/png")
+        self.assertEqual(inbound.content, png)
+
+    async def test_inbound_image_uses_content_mime_over_filename(self):
+        png = b"\x89PNG\r\n\x1a\n" + b"payload"
+        wecom = SimpleNamespace(
+            download_file=AsyncMock(return_value=(png, "misleading.txt"))
+        )
+        inbound = await _download_inbound_media(
+            wecom,
+            self._media_frame(media_kind="image"),
+            "image",
+            _config(),
+        )
+        self.assertEqual(inbound.file_name, "misleading.txt")
+        self.assertEqual(inbound.mime_type, "image/png")
+
+    async def test_outbound_upload_uses_512k_chunks_and_protocol_checksum(self):
+        calls = []
+
+        async def reply(frame, body, command=None):
+            calls.append((frame, body, command))
+            if command == "aibot_upload_media_init":
+                return {"body": {"errcode": 0, "upload_id": "upload-1"}}
+            if command == "aibot_upload_media_finish":
+                return {"body": {"errcode": 0, "media_id": "media-1"}}
+            return {"body": {"errcode": 0}}
+
+        client = SimpleNamespace(reply=AsyncMock(side_effect=reply))
+        content = b"a" * (512 * 1024) + b"xyz"
+        media_id = await _upload_wecom_file(
+            client,
+            ChannelResponseFile(
+                file_name="report.bin",
+                mime_type="application/octet-stream",
+                content=content,
+                size_bytes=len(content),
+            ),
+        )
+
+        self.assertEqual(media_id, "media-1")
+        init_body = calls[0][1]
+        self.assertEqual(init_body["total_chunks"], 2)
+        self.assertEqual(init_body["total_size"], len(content))
+        self.assertEqual(init_body["md5"], hashlib.md5(content).hexdigest())
+        chunks = [body for _frame, body, cmd in calls if cmd == "aibot_upload_media_chunk"]
+        self.assertEqual([chunk["chunk_index"] for chunk in chunks], [0, 1])
+        self.assertEqual(
+            b"".join(base64.b64decode(chunk["base64_data"]) for chunk in chunks),
+            content,
+        )
+        self.assertTrue(
+            all(call[0]["headers"]["req_id"] for call in calls),
+            "upload stages must use synthetic request IDs",
+        )
+
+    async def test_upload_stage_retries_without_exposing_remote_error(self):
+        attempts = 0
+
+        async def reply(_frame, _body, command=None):
+            nonlocal attempts
+            if command == "aibot_upload_media_init":
+                return {"body": {"errcode": 0, "upload_id": "upload-1"}}
+            if command == "aibot_upload_media_chunk":
+                attempts += 1
+                if attempts < 3:
+                    raise RuntimeError("private remote response")
+                return {"body": {"errcode": 0}}
+            if command == "aibot_upload_media_finish":
+                return {"body": {"errcode": 0, "media_id": "media-1"}}
+            return {"body": {"errcode": 0}}
+
+        client = SimpleNamespace(reply=AsyncMock(side_effect=reply))
+        with patch(
+            "connectors.wecom_aibot.worker.asyncio.sleep", new=AsyncMock()
+        ) as sleep_mock:
+            result = await _upload_wecom_file(
+                client,
+                ChannelResponseFile(
+                    file_name="answer.txt",
+                    content=b"answer",
+                    size_bytes=6,
+                ),
+            )
+        self.assertEqual(result, "media-1")
+        self.assertEqual(attempts, 3)
+        self.assertEqual([call.args[0] for call in sleep_mock.await_args_list], [0.5, 1.0])
+
+    async def test_upload_init_is_not_retried(self):
+        client = SimpleNamespace(
+            reply=AsyncMock(side_effect=RuntimeError("private remote response"))
+        )
+        with patch(
+            "connectors.wecom_aibot.worker.asyncio.sleep", new=AsyncMock()
+        ) as sleep_mock:
+            with self.assertRaises(RuntimeError):
+                await _upload_wecom_file(
+                    client,
+                    ChannelResponseFile(
+                        file_name="answer.txt",
+                        content=b"answer",
+                        size_bytes=6,
+                    ),
+                )
+        self.assertEqual(client.reply.await_count, 1)
+        sleep_mock.assert_not_awaited()
+
+    async def test_empty_file_declares_zero_chunks_but_sends_one_empty_chunk(self):
+        calls = []
+
+        async def reply(_frame, body, command=None):
+            calls.append((body, command))
+            if command == "aibot_upload_media_init":
+                return {"body": {"errcode": 0, "upload_id": "upload-1"}}
+            if command == "aibot_upload_media_finish":
+                return {"body": {"errcode": 0, "media_id": "media-1"}}
+            return {"body": {"errcode": 0}}
+
+        await _upload_wecom_file(
+            SimpleNamespace(reply=AsyncMock(side_effect=reply)),
+            ChannelResponseFile(file_name="empty.txt", content=b"", size_bytes=0),
+        )
+        init = next(body for body, cmd in calls if cmd == "aibot_upload_media_init")
+        chunks = [body for body, cmd in calls if cmd == "aibot_upload_media_chunk"]
+        self.assertEqual(init["total_chunks"], 0)
+        self.assertEqual(
+            chunks,
+            [{"upload_id": "upload-1", "chunk_index": 0, "base64_data": ""}],
+        )
+
+    async def test_outbound_file_uses_send_message_for_chat_id(self):
+        async def reply(_frame, _body, command=None):
+            if command == "aibot_upload_media_init":
+                return {"body": {"errcode": 0, "upload_id": "upload-1"}}
+            if command == "aibot_upload_media_finish":
+                return {"body": {"errcode": 0, "media_id": "media-1"}}
+            return {"body": {"errcode": 0}}
+
+        client = SimpleNamespace(
+            reply=AsyncMock(side_effect=reply),
+            send_message=AsyncMock(return_value={"body": {"errcode": 0}}),
+        )
+        delivered, failed = await _send_response_files(
+            client,
+            self._media_frame(chat_id="room-1", chat_type="group"),
+            "room-1",
+            [
+                ChannelResponseFile(
+                    file_name="answer.txt",
+                    mime_type="text/plain",
+                    content=b"answer",
+                    size_bytes=6,
+                )
+            ],
+        )
+        self.assertEqual((delivered, failed), (1, 0))
+        client.send_message.assert_awaited_once_with(
+            "room-1",
+            {"msgtype": "file", "file": {"media_id": "media-1"}},
+        )
+
+    async def test_final_reply_failure_does_not_resend_completed_files(self):
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(
+                side_effect=[None, RuntimeError("reply expired"), None]
+            ),
+            download_file=AsyncMock(return_value=(b"question", "question.txt")),
+        )
+        response_file = ChannelResponseFile(
+            file_name="answer.txt",
+            content=b"answer",
+            size_bytes=6,
+        )
+        channel = SimpleNamespace(
+            submit=AsyncMock(
+                return_value=SimpleNamespace(
+                    status="completed",
+                    text="请查收文件。",
+                    message="",
+                    files=[response_file],
+                )
+            )
+        )
+        dedupe = DedupeStore()
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        frame = self._media_frame()
+
+        with (
+            patch(
+                "connectors.wecom_aibot.worker._send_response_files",
+                new=AsyncMock(return_value=(1, 0)),
+            ) as send_files,
+            patch("connectors.wecom_aibot.worker.logger.warning"),
+        ):
+            await _handle_media(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                frame,
+                "file",
+            )
+            await _handle_media(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                frame,
+                "file",
+            )
+
+        self.assertEqual(channel.submit.await_count, 1)
+        self.assertEqual(send_files.await_count, 1)
+        self.assertEqual(wecom.download_file.await_count, 1)
+        self.assertEqual(wecom.reply_stream.await_count, 3)
+
+    async def test_outbound_file_uses_user_id_for_direct_chat(self):
+        media_replies = []
+
+        async def reply(_frame, body, command=None):
+            if command == "aibot_upload_media_init":
+                return {"body": {"errcode": 0, "upload_id": "upload-1"}}
+            if command == "aibot_upload_media_finish":
+                return {"body": {"errcode": 0, "media_id": "media-1"}}
+            if command == "aibot_upload_media_chunk":
+                return {"body": {"errcode": 0}}
+            media_replies.append(body)
+            return {"body": {"errcode": 0}}
+
+        client = SimpleNamespace(
+            reply=AsyncMock(side_effect=reply),
+            send_message=AsyncMock(return_value={"body": {"errcode": 0}}),
+        )
+        delivered, failed = await _send_response_files(
+            client,
+            self._media_frame(),
+            "alice",
+            [
+                ChannelResponseFile(
+                    file_name="answer.txt",
+                    content=b"answer",
+                    size_bytes=6,
+                )
+            ],
+        )
+        self.assertEqual((delivered, failed), (1, 0))
+        client.send_message.assert_awaited_once_with(
+            "alice",
+            {"msgtype": "file", "file": {"media_id": "media-1"}},
+        )
+        self.assertEqual(media_replies, [])
+
+    async def test_file_reply_fallback_requires_a_safe_callback_request_id(self):
+        client = SimpleNamespace(
+            reply=AsyncMock(return_value={"body": {"errcode": 0}}),
+            send_message=AsyncMock(),
+        )
+        frame = self._media_frame()
+        await _deliver_wecom_file(client, frame, "", "media-1")
+        client.reply.assert_awaited_once_with(
+            frame,
+            {"msgtype": "file", "file": {"media_id": "media-1"}},
+        )
+        with self.assertRaises(RuntimeError):
+            await _deliver_wecom_file(
+                client,
+                {"headers": {"req_id": "unsafe request id"}},
+                "",
+                "media-2",
+            )
+
+
 class ChannelClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_file_frame_is_accumulated_and_size_checked(self):
+        client = ChannelClient(_config(max_file_bytes=8))
+        response = ChannelResponse(request_id="request-1")
+        client._responses["request-1"] = response
+        await client._handle_frame(
+            ChannelServerFrame(
+                request_id="request-1",
+                file=ChannelFile(
+                    file_name="answer.txt",
+                    mime_type="text/plain",
+                    size_bytes=6,
+                    content=b"answer",
+                ),
+            )
+        )
+        await client._handle_frame(
+            ChannelServerFrame(
+                request_id="request-1",
+                file=ChannelFile(
+                    file_name="bad.txt",
+                    size_bytes=5,
+                    content=b"bad",
+                ),
+            )
+        )
+        self.assertEqual(response.files[0].content, b"answer")
+        self.assertEqual(response.files[0].error_code, "")
+        self.assertEqual(response.files[1].content, b"")
+        self.assertEqual(response.files[1].error_code, "invalid_file_size")
+
     async def test_pending_submit_fails_when_reader_disconnects(self):
         client = ChannelClient(_config())
         client._ws = _FrameSocket()

@@ -427,9 +427,8 @@ pub(crate) fn build_chat_event_envelope(
         .unwrap_or_default();
 
     let (event_kind, data) = match event_type.as_str() {
-        "token" => (
-            proto::chat_event::ChatEventType::Token as i32,
-            json!({
+        "token" => {
+            let mut data = json!({
                 "text": required_raw_string_field(object, "text")?,
                 "title": optional_string_field(object, "title"),
                 "titleFinal": object.get("titleFinal").and_then(Value::as_bool).unwrap_or(false),
@@ -440,9 +439,14 @@ pub(crate) fn build_chat_event_envelope(
                 "stopReason": optional_string_field(object, "stopReason")
                     .or_else(|| optional_string_field(object, "stop_reason")),
                 "usage": object.get("usage").cloned().unwrap_or(Value::Null),
-                "checkpoint": object.get("checkpoint").cloned().unwrap_or(Value::Null),
-            }),
-        ),
+            });
+            if let Some(checkpoint) = object.get("checkpoint").filter(|value| value.is_object()) {
+                if let Some(data_object) = data.as_object_mut() {
+                    data_object.insert("checkpoint".to_string(), checkpoint.clone());
+                }
+            }
+            (proto::chat_event::ChatEventType::Token as i32, data)
+        }
         "thinking" => (
             proto::chat_event::ChatEventType::Thinking as i32,
             json!({
@@ -517,6 +521,8 @@ pub(crate) fn build_chat_event_envelope(
         "done" => (
             proto::chat_event::ChatEventType::Done as i32,
             json!({
+                "final_text": optional_string_field(object, "final_text")
+                    .or_else(|| optional_string_field(object, "finalText")),
                 "round": optional_number_field(object, "round"),
             }),
         ),

@@ -358,17 +358,6 @@ test("trusted /new completes without invoking the chat send pipeline", async () 
     hookHarness.render(() =>
       useGatewayBridgeListeners({
         allowWecomGroupMessages: true,
-        wecomAccessPolicy: {
-          rules: [
-            {
-              tenantId: "tenant-1",
-              botId: "bot-1",
-              externalUserId: "user-1",
-              scopes: ["tool:read"],
-              allowedToolNames: ["Read"],
-            },
-          ],
-        },
         currentConversationIdRef: { current: "local-conversation" },
         conversationRuntimeCacheRef: { current: new Map() },
         ensureGatewayBridgeConversationReadyRef: {
@@ -418,9 +407,9 @@ test("trusted /new completes without invoking the chat send pipeline", async () 
     assert.ok(invokeCalls.some((call) => call.command === "gateway_chat_complete"));
     assert.deepEqual(
       bridgeEvents.map(({ event }) => event.type),
-      ["token", "tool_status"],
+      ["done"],
     );
-    assert.equal(bridgeEvents[0].event.text, "已开启新会话。");
+    assert.equal(bridgeEvents[0].event.final_text, "已开启新会话。");
     assert.ok(bridgeEvents.every(({ event }) => event.type !== "user_message"));
   } finally {
     hookHarness.cleanup();
@@ -453,17 +442,6 @@ test("trusted /compact reaches send with empty text and authenticated principal"
     hookHarness.render(() =>
       useGatewayBridgeListeners({
         allowWecomGroupMessages: true,
-        wecomAccessPolicy: {
-          rules: [
-            {
-              tenantId: "tenant-1",
-              botId: "bot-1",
-              externalUserId: "user-1",
-              scopes: ["tool:read"],
-              allowedToolNames: ["Read"],
-            },
-          ],
-        },
         currentConversationIdRef: { current: "local-conversation" },
         conversationRuntimeCacheRef: { current: new Map() },
         ensureGatewayBridgeConversationReadyRef: {
@@ -510,7 +488,10 @@ test("trusted /compact reaches send with empty text and authenticated principal"
       sent[0].gatewayBridgeRequestOverride.principal.externalUserId,
       "user-1",
     );
-    assert.deepEqual(sent[0].gatewayBridgeRequestOverride.principal.allowedToolNames, ["Read"]);
+    assert.equal(
+      Object.hasOwn(sent[0].gatewayBridgeRequestOverride.principal, "allowedToolNames"),
+      false,
+    );
     assert.ok(invokeCalls.some((call) => call.command === "gateway_chat_mark_started"));
     assert.ok(invokeCalls.some((call) => call.command === "gateway_chat_complete"));
   } finally {

@@ -782,6 +782,72 @@ fn build_chat_event_envelope_preserves_title_final_flag() {
     let data: Value = serde_json::from_str(&chat_event.data).expect("chat event data");
     assert_eq!(data["title"], "Final title");
     assert_eq!(data["titleFinal"], true);
+    assert!(
+        data.get("checkpoint").is_none(),
+        "ordinary token events must not serialize checkpoint:null"
+    );
+}
+
+#[test]
+fn build_chat_event_envelope_preserves_done_final_text() {
+    let envelope = build_chat_event_envelope(
+        "request-1".to_string(),
+        json!({
+            "type": "done",
+            "conversation_id": "conversation-1",
+            "final_text": "最终答案"
+        }),
+    )
+    .expect("build done event envelope");
+
+    let chat_event = match envelope.payload.expect("payload") {
+        super::proto::agent_envelope::Payload::ChatEvent(event) => event,
+        _ => panic!("expected chat event payload"),
+    };
+    assert_eq!(
+        chat_event.r#type,
+        super::proto::chat_event::ChatEventType::Done as i32
+    );
+    let data: Value = serde_json::from_str(&chat_event.data).expect("chat event data");
+    assert_eq!(data["final_text"], "最终答案");
+}
+
+#[test]
+fn build_chat_event_envelope_preserves_checkpoint_objects_only() {
+    let envelope = build_chat_event_envelope(
+        "request-1".to_string(),
+        json!({
+            "type": "token",
+            "conversation_id": "conversation-1",
+            "text": "internal summary",
+            "checkpoint": { "summaryId": "summary-1" }
+        }),
+    )
+    .expect("build checkpoint token event envelope");
+
+    let chat_event = match envelope.payload.expect("payload") {
+        super::proto::agent_envelope::Payload::ChatEvent(event) => event,
+        _ => panic!("expected chat event payload"),
+    };
+    let data: Value = serde_json::from_str(&chat_event.data).expect("chat event data");
+    assert_eq!(data["checkpoint"]["summaryId"], "summary-1");
+
+    let null_envelope = build_chat_event_envelope(
+        "request-2".to_string(),
+        json!({
+            "type": "token",
+            "conversation_id": "conversation-1",
+            "text": "visible answer",
+            "checkpoint": null
+        }),
+    )
+    .expect("build ordinary token event envelope");
+    let null_event = match null_envelope.payload.expect("payload") {
+        super::proto::agent_envelope::Payload::ChatEvent(event) => event,
+        _ => panic!("expected chat event payload"),
+    };
+    let null_data: Value = serde_json::from_str(&null_event.data).expect("chat event data");
+    assert!(null_data.get("checkpoint").is_none());
 }
 
 #[test]

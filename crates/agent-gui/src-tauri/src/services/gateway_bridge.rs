@@ -8,13 +8,13 @@ use crate::commands::{
     chat_history::{history_message_content_hash, history_message_id_for_ref, message_matches_ref},
     fs::{
         fs_create_dir_sync, fs_delete_sync, fs_list_dirs_sync, fs_list_sync, fs_mention_list_sync,
-        fs_read_editable_text_sync, fs_read_workspace_image_sync, fs_rename_sync, fs_roots_sync,
-        fs_write_text_sync,
+        fs_read_editable_text_sync, fs_read_workspace_artifact_sync, fs_read_workspace_image_sync,
+        fs_rename_sync, fs_roots_sync, fs_write_text_sync,
     },
     git::git_gateway_action_sync,
     settings::{load_providers, open_db},
     system::{
-        system_create_project_folder_sync, system_import_uploaded_readable_files_sync,
+        system_create_project_folder_sync, system_import_gateway_readable_files_sync,
         system_list_skill_files_sync, system_read_skill_metadata_sync, system_read_skill_text_sync,
         system_read_uploaded_image_preview_sync, SystemReadableFileUploadInput,
     },
@@ -559,6 +559,30 @@ pub async fn handle_fs_read_workspace_image(
     })
 }
 
+pub async fn handle_fs_read_workspace_artifact(
+    request: proto::FsReadWorkspaceArtifactRequest,
+) -> Result<proto::FsReadWorkspaceArtifactResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        fs_read_workspace_artifact_sync(
+            request.workdir,
+            request.path,
+            request.expected_file_id,
+            request.expected_size_bytes,
+            request.expected_mtime_ms,
+        )
+    })
+    .await
+    .map_err(|e| format!("gateway workspace artifact read join failed: {e}"))?
+    .map_err(|e| e.message)
+    .map(|response| proto::FsReadWorkspaceArtifactResponse {
+        path: response.path,
+        file_name: response.file_name,
+        mime_type: response.mime_type,
+        size_bytes: response.size_bytes,
+        content: response.content,
+    })
+}
+
 pub async fn handle_fs_write_text(
     request: proto::FsWriteTextRequest,
 ) -> Result<proto::FsWriteTextResponse, String> {
@@ -671,7 +695,7 @@ pub async fn handle_upload_readable_files(
         .collect();
 
     tauri::async_runtime::spawn_blocking(move || {
-        system_import_uploaded_readable_files_sync(workdir, uploads)
+        system_import_gateway_readable_files_sync(workdir, uploads)
     })
     .await
     .map_err(|e| format!("gateway upload readable files join failed: {e}"))?

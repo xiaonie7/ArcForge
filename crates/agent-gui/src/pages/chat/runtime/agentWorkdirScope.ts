@@ -5,8 +5,8 @@ export type AgentTurnWorkdirResolution = {
 
 export function resolveAgentTurnWorkdir(params: {
   isAgentMode: boolean;
-  hasTrustedPrincipal: boolean;
   explicitWorkdir?: string;
+  allowEmptyWorkdirOverride?: boolean;
   gatewayWorkdir?: string;
   unscopedAgent: boolean;
   conversationWorkdir?: string;
@@ -15,16 +15,17 @@ export function resolveAgentTurnWorkdir(params: {
   if (!params.isAgentMode) {
     return { workdir: "", allowEmptyWorkdir: false };
   }
-  if (params.hasTrustedPrincipal) {
-    return { workdir: "", allowEmptyWorkdir: true };
-  }
   if (typeof params.explicitWorkdir === "string") {
     const workdir = params.explicitWorkdir.trim();
-    return { workdir, allowEmptyWorkdir: workdir.length === 0 };
+    return {
+      workdir,
+      allowEmptyWorkdir:
+        workdir.length === 0 && (params.allowEmptyWorkdirOverride === true || params.unscopedAgent),
+    };
   }
   if (typeof params.gatewayWorkdir === "string") {
     const workdir = params.gatewayWorkdir.trim();
-    return { workdir, allowEmptyWorkdir: workdir.length === 0 };
+    return { workdir, allowEmptyWorkdir: false };
   }
   if (params.unscopedAgent) {
     return { workdir: "", allowEmptyWorkdir: true };
@@ -50,13 +51,11 @@ export function resolveLocalQueuedTurnWorkdir(params: {
 }
 
 export function resolveGatewayQueuedTurnWorkdir(params: {
-  hasTrustedPrincipal: boolean;
   requestedWorkdir?: string;
   conversationWorkdir?: string;
   displayedWorkdir: string;
   defaultWorkdir: string;
 }) {
-  if (params.hasTrustedPrincipal) return "";
   return (
     params.requestedWorkdir ??
     params.conversationWorkdir ??

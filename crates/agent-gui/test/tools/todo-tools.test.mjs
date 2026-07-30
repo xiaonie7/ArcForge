@@ -260,6 +260,7 @@ function createRegistryHarness() {
               worktreeRoot: "/tmp/arcforge-subagents/agent-a",
               workdir: "/tmp/arcforge-subagents/agent-a",
               branchName: "arcforge/subagent/agent-a",
+              baseRevision: "a".repeat(40),
             };
           }
           if (command === "subagent_worktree_status") {
@@ -278,6 +279,47 @@ function createRegistryHarness() {
               branchName: args.input.branchName,
               removed: true,
               branchDeleted: true,
+            };
+          }
+          if (command === "execution_broker_register_run") {
+            return { bindingId: "binding-1", isolationLevel: "workspace_only" };
+          }
+          if (command === "execution_broker_close_run") return undefined;
+          if (command === "subagent_worktree_validate") {
+            const runId = args.input.runId;
+            const runSpecHash = args.input.runSpecHash;
+            return {
+              candidate: {
+                kind: "candidate_bundle",
+                candidateId: `candidate-${runId}`,
+                taskId: runId,
+                runId,
+                runSpecHash,
+                candidateHash: "b".repeat(64),
+                baseRevision: "a".repeat(40),
+                changedPaths: [],
+                status: "",
+                diffStat: "",
+                diff: "",
+                diffTruncated: false,
+                untrackedFiles: [],
+                createdAt: Date.now(),
+              },
+              validation: {
+                kind: "validation_report",
+                reportId: `report-${runId}`,
+                reportHash: "c".repeat(64),
+                taskId: runId,
+                runId,
+                runSpecHash,
+                candidateHash: "b".repeat(64),
+                baseRevision: "a".repeat(40),
+                status: "passed",
+                scope: "structural",
+                checks: [],
+                testStatus: "not_run",
+                createdAt: Date.now(),
+              },
             };
           }
           throw new Error(`Unexpected invoke: ${command}`);

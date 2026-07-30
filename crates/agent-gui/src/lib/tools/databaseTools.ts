@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { Type } from "typebox";
 
 import { redactDatabaseToolArgumentsInPlace } from "../security/databaseToolSecrets";
-import type { PrincipalContext } from "../security/principalContext";
 import { type BuiltinToolBundle, createBuiltinMetadataMap } from "./builtinTypes";
 import type { SystemToolRuntimeScope } from "./systemToolOptions";
 
@@ -101,20 +100,16 @@ const DATABASE_CONNECTION = Type.Object(
   { additionalProperties: false },
 );
 
-function createDatabaseQueryTool(allowTransientConnection: boolean): Tool {
+function createDatabaseQueryTool(): Tool {
   return {
     name: DATABASE_QUERY_TOOL_NAME,
-    description: allowTransientConnection
-      ? "Read from a database connection configured by the user in ArcForge. Use action=list_connections " +
-        "first when the profile id is unknown. The backend enforces one read-only statement, a read-only " +
-        "database transaction, bound parameters, timeout, row, cell, and payload limits. A connection " +
-        "explicitly provided by the user or an enabled Skill may be passed with connection and is used " +
-        "only for this call; never repeat its password in output. PostgreSQL uses " +
-        "$1, $2 placeholders; MySQL and SQLite use ? placeholders. Never place values directly into SQL."
-      : "Read from a saved database profile explicitly granted to this authenticated channel user. " +
-        "Use action=list_connections to see only the enabled profiles authorized for this request. " +
-        "A profile_id is required for every other action. Ad-hoc connection details are not accepted. " +
-        "The backend enforces a read-only transaction and query safety limits.",
+    description:
+      "Read from a database connection configured by the user in ArcForge. Use action=list_connections " +
+      "first when the profile id is unknown. The backend enforces one read-only statement, a read-only " +
+      "database transaction, bound parameters, timeout, row, cell, and payload limits. A connection " +
+      "explicitly provided by the user or an enabled Skill may be passed with connection and is used " +
+      "only for this call; never repeat its password in output. PostgreSQL uses " +
+      "$1, $2 placeholders; MySQL and SQLite use ? placeholders. Never place values directly into SQL.",
     parameters: Type.Object(
       {
         action: Type.Union([
@@ -125,12 +120,11 @@ function createDatabaseQueryTool(allowTransientConnection: boolean): Tool {
         ]),
         profile_id: Type.Optional(
           Type.String({
-            description: allowTransientConnection
-              ? "Configured connection id. Use either profile_id or connection; omit both only for list_connections."
-              : "Authorized saved connection id. Omit only for list_connections.",
+            description:
+              "Configured connection id. Use either profile_id or connection; omit both only for list_connections.",
           }),
         ),
-        ...(allowTransientConnection ? { connection: Type.Optional(DATABASE_CONNECTION) } : {}),
+        connection: Type.Optional(DATABASE_CONNECTION),
         sql: Type.Optional(
           Type.String({ description: "One read-only SQL statement for action=query." }),
         ),
@@ -156,7 +150,7 @@ const databaseExecuteTool: Tool = {
   name: DATABASE_EXECUTE_TOOL_NAME,
   description:
     "Execute one parameterized INSERT, UPDATE, or DELETE against a user-configured database. This tool " +
-    "works only in a local desktop chat and only with a saved profile whose Allow writes switch is on. " +
+    "works only in a workspace-scoped chat and only with a saved profile whose Allow writes switch is on. " +
     "Temporary user or Skill connections are read-only and cannot be used by this tool. " +
     "UPDATE and DELETE require a WHERE clause. DDL, stored procedures, grants, and multiple statements " +
     "are rejected. The transaction is rolled back if the affected-row safety limit is exceeded. " +
@@ -248,70 +242,16 @@ function mapConnection(value: unknown) {
   };
 }
 
-function remoteDatabaseAccessError(
-  toolCall: ToolCall,
-  principal: PrincipalContext,
-  args: Record<string, unknown>,
-) {
-  if (principal.chatType !== "direct" || !principal.scopes.includes("database:read")) {
-    return resultMessage(
-      toolCall,
-      "DatabaseQuery blocked: read-only database access requires a direct WeCom chat and an explicit database:read grant.",
-      {},
-      true,
-    );
-  }
-  if (principal.allowedDatabaseProfileIds.length === 0) {
-    return resultMessage(
-      toolCall,
-      "DatabaseQuery blocked: no database profiles are granted to this principal.",
-      {},
-      true,
-    );
-  }
-  if (args.connection !== undefined) {
-    return resultMessage(
-      toolCall,
-      "DatabaseQuery blocked: ad-hoc connection details are disabled for WeCom requests.",
-      {},
-      true,
-    );
-  }
-  if (args.action === "list_connections") return null;
-
-  const profileId = typeof args.profile_id === "string" ? args.profile_id.trim() : "";
-  if (!profileId || !principal.allowedDatabaseProfileIds.includes(profileId)) {
-    return resultMessage(
-      toolCall,
-      "DatabaseQuery blocked: profile_id is missing or is not granted to this principal.",
-      {},
-      true,
-    );
-  }
-  return null;
-}
-
-async function executeDatabaseQuery(
-  toolCall: ToolCall,
-  principal?: PrincipalContext,
-): Promise<ToolResultMessage> {
+async function executeDatabaseQuery(toolCall: ToolCall): Promise<ToolResultMessage> {
   const args = asArguments(toolCall);
-  const remotePrincipal = principal?.channel === "wecom" ? principal : undefined;
   // Keep an execution-only copy, then scrub the ToolCall object that is
   // retained by the runner and eventually written to chat history.
-  const transientConnection = remotePrincipal ? undefined : mapConnection(args.connection);
+  const transientConnection = mapConnection(args.connection);
   redactDatabaseToolArgumentsInPlace(toolCall.name, args);
-  if (remotePrincipal) {
-    const accessError = remoteDatabaseAccessError(toolCall, remotePrincipal, args);
-    if (accessError) return accessError;
-  }
   if (args.action === "list_connections") {
     const profiles = await invoke<DatabaseProfileSummary[]>("database_profiles_list");
-    const allowedProfileIds = remotePrincipal
-      ? new Set(remotePrincipal.allowedDatabaseProfileIds)
-      : null;
     const summaries = profiles
-      .filter((profile) => profile.enabled && (!allowedProfileIds || allowedProfileIds.has(profile.id)))
+      .filter((profile) => profile.enabled)
       .map(({ id, name, driver, databaseName, allowWrites }) => ({
         id,
         name,
@@ -326,11 +266,7 @@ async function executeDatabaseQuery(
 
   const result = await invoke<DatabaseQueryResponse>("database_query", {
     input: {
-      profileId: remotePrincipal
-        ? typeof args.profile_id === "string"
-          ? args.profile_id.trim()
-          : undefined
-        : args.profile_id,
+      profileId: args.profile_id,
       connection: transientConnection,
       action: args.action,
       sql: args.sql,
@@ -347,18 +283,7 @@ async function executeDatabaseQuery(
   });
 }
 
-async function executeDatabaseWrite(
-  toolCall: ToolCall,
-  principal?: PrincipalContext,
-): Promise<ToolResultMessage> {
-  if (principal?.channel === "wecom") {
-    return resultMessage(
-      toolCall,
-      "DatabaseExecute blocked: database writes are disabled for WeCom requests.",
-      {},
-      true,
-    );
-  }
+async function executeDatabaseWrite(toolCall: ToolCall): Promise<ToolResultMessage> {
   const args = asArguments(toolCall);
   const result = await invoke<DatabaseExecuteResponse>("database_execute", {
     input: {
@@ -377,13 +302,10 @@ async function executeDatabaseWrite(
 
 export function createDatabaseTools(params: {
   runtimeScope: SystemToolRuntimeScope;
-  principal?: PrincipalContext;
   workspaceAccess?: "full" | "none";
 }): BuiltinToolBundle {
-  const remote = params.principal?.channel === "wecom";
-  const databaseQueryTool = createDatabaseQueryTool(!remote);
-  const allowWrites =
-    params.runtimeScope === "chat" && params.workspaceAccess !== "none" && !remote;
+  const databaseQueryTool = createDatabaseQueryTool();
+  const allowWrites = params.runtimeScope === "chat" && params.workspaceAccess !== "none";
   const tools = allowWrites ? [databaseQueryTool, databaseExecuteTool] : [databaseQueryTool];
 
   return {
@@ -392,10 +314,9 @@ export function createDatabaseTools(params: {
     async executeToolCall(toolCall, signal) {
       if (signal?.aborted) return resultMessage(toolCall, "Cancelled", {}, true);
       try {
-        if (toolCall.name === DATABASE_QUERY_TOOL_NAME)
-          return await executeDatabaseQuery(toolCall, params.principal);
+        if (toolCall.name === DATABASE_QUERY_TOOL_NAME) return await executeDatabaseQuery(toolCall);
         if (toolCall.name === DATABASE_EXECUTE_TOOL_NAME)
-          return await executeDatabaseWrite(toolCall, params.principal);
+          return await executeDatabaseWrite(toolCall);
         return resultMessage(toolCall, `Unknown tool: ${toolCall.name}`, {}, true);
       } catch (error) {
         return resultMessage(toolCall, databaseErrorMessage(error), {}, true);

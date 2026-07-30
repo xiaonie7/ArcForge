@@ -1,9 +1,10 @@
 # ArcForge WeCom AiBot Connector
 
-This process receives WeCom AiBot callbacks and forwards text messages over
-the restricted protobuf WebSocket endpoint `/ws/v2/channel`. The desktop app
-remains the execution owner; the connector never receives tool calls, files,
-workdirs, model selections, or conversation history.
+This process receives WeCom AiBot callbacks and forwards text, file, and image
+messages over the protobuf WebSocket endpoint `/ws/v2/channel`. The desktop app
+remains the execution owner. The connector never receives tool calls, workdirs,
+model selections, or conversation history; it receives an output file only
+when the desktop runtime explicitly presents that file to the user.
 
 In desktop-managed local mode, ArcForge starts the bundled Gateway first,
 waits for its loopback health check, and then starts this Connector. The
@@ -27,6 +28,23 @@ enable switch. The externally deployed Gateway must be started with the same
 separately deployed Gateway process. Group messages are disabled unless
 `ARCFORGE_GATEWAY_CHANNEL_ALLOW_GROUP_MESSAGES=true` is set in both the
 connector and Gateway configuration.
+
+## Files and images
+
+Incoming `message.file` and `message.image` callbacks are downloaded and
+decrypted immediately because WeCom download URLs expire quickly. The
+Connector strips directory components from received filenames, applies the
+configured byte limit, and forwards the content as a normal ArcForge chat
+attachment. Files default to a 20 MB maximum; lower it with
+`ARCFORGE_GATEWAY_CHANNEL_MAX_FILE_BYTES`. WeCom images are additionally capped
+at 10 MB.
+
+For outgoing files, ArcForge forwards only files selected by the explicit
+`PresentFile` tool. The Connector uploads each result through WeCom's chunked
+media protocol and then sends the returned media ID to the originating chat.
+Files merely read by a tool or present elsewhere in the workspace are never
+sent automatically. Upload, download, and delivery errors are logged without
+URLs, media IDs, filenames, response bodies, or message content.
 
 ## Proactive messages
 
@@ -59,7 +77,29 @@ IDs remain stable for the lifetime of the connector process; restarting the
 connector starts fresh sessions.
 
 The desktop receives the authenticated `external_user_id` in the trusted
-principal context for each turn. Skills and built-in executors should use that
-value for explicit local authorization lookups; they must not infer identity
-from message text. WeCom principals do not receive MCP invocation scope by
-default.
+principal context for each turn. The identity is used to isolate conversations
+and provide trusted audit metadata; it does not define a separate capability
+policy. WeCom turns use the desktop's current workdir, Skills, system tools,
+MCP, Memory, SSH, tunnel, and database settings, including the same tool-level
+safety checks.
+
+## Interactive questions
+
+The desktop `AskUserQuestion` tool is synchronized to WeCom through a restricted
+input protocol. The connector exposes only the question text and bounded,
+gateway-generated aliases; it never exposes arbitrary desktop tool calls or
+workspace details.
+
+When card delivery is available, WeCom receives an official
+`button_interaction` card with one question at a time. A click is identified by
+the opaque `task_id` and `event_key`; the connector updates the card immediately
+and advances to the next question. After the final click, the connector sends
+the selections back to the same desktop run. If the card callback is unavailable
+or rejected, users can reply with option numbers (`1` for one question or
+`1,2` in question order for two questions). Invalid, duplicate, expired, and
+already-resolved replies are handled without starting a second desktop turn.
+
+The desktop may also answer the same question from its local card. In that case
+the connector receives a resolved notification, marks the WeCom card complete,
+and stops intercepting subsequent text. The default response window is three
+minutes, matching the desktop tool's timeout behavior.

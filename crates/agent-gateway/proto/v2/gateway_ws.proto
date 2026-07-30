@@ -157,6 +157,12 @@ message AgentServerFrame {
 // ChannelInboundMessage contains only channel-authenticated message metadata.
 // Conversation ids, workdirs, roles, scopes, models and tools are intentionally
 // absent: the gateway and desktop policy layer resolve them from this identity.
+message ChannelInboundFile {
+  string file_name = 1;
+  string mime_type = 2;
+  bytes content = 3;
+}
+
 message ChannelInboundMessage {
   string external_message_id = 1;
   string external_user_id = 2;
@@ -172,6 +178,10 @@ message ChannelInboundMessage {
   // Connector-owned opaque session id, isolated by channel user/chat. It
   // changes on /new while the authenticated principal remains unchanged.
   string channel_session_id = 8;
+  // Connector-downloaded WeCom attachments. The gateway validates bounded
+  // inline bytes, then stages them through UploadReadableFiles before the chat
+  // command is accepted by the desktop runtime.
+  repeated ChannelInboundFile files = 9;
 }
 
 message ChannelAccepted {
@@ -181,14 +191,29 @@ message ChannelAccepted {
   bool deduped = 4;
 }
 
-// ChannelDelta is the only streaming content exposed to a channel connector.
-// Tool calls, tool results, thinking and internal transcript events are never
-// forwarded on this link.
+// ChannelDelta exposes visible assistant text. Tool calls, thinking and
+// arbitrary tool results are never forwarded; only the separately validated
+// PresentFile artifact path below can produce ChannelFile frames.
 message ChannelDelta {
   string run_id = 1;
   string conversation_id = 2;
   int64 seq = 3;
   string text = 4;
+}
+
+// ChannelFile carries one completed PresentFile artifact. File contents are
+// read by the desktop only after its workspace-relative path and all expected
+// metadata have been revalidated.
+message ChannelFile {
+  string run_id = 1;
+  string conversation_id = 2;
+  int64 seq = 3;
+  string file_name = 4;
+  string mime_type = 5;
+  uint64 size_bytes = 6;
+  bytes content = 7;
+  string error_code = 8;
+  string message = 9;
 }
 
 message ChannelFinal {
@@ -199,6 +224,56 @@ message ChannelFinal {
   string message = 5;
 }
 
+// The restricted channel exposes only AskUserQuestion's user-facing fields.
+// IDs are gateway-generated opaque aliases; desktop tool/question/option IDs
+// and labels never cross back from an untrusted channel answer.
+message ChannelInputOption {
+  string id = 1;
+  string label = 2;
+  string description = 3;
+  bool recommended = 4;
+}
+
+message ChannelInputQuestion {
+  string id = 1;
+  string header = 2;
+  string prompt = 3;
+  repeated ChannelInputOption options = 4;
+}
+
+message ChannelInputRequest {
+  string interaction_id = 1;
+  string run_id = 2;
+  string conversation_id = 3;
+  int64 seq = 4;
+  int64 deadline_at_ms = 5;
+  repeated ChannelInputQuestion questions = 6;
+}
+
+message ChannelInputAnswerSelection {
+  string question_id = 1;
+  string option_id = 2;
+}
+
+message ChannelInputAnswer {
+  string interaction_id = 1;
+  repeated ChannelInputAnswerSelection selections = 2;
+}
+
+message ChannelInputAnswerResult {
+  string interaction_id = 1;
+  bool accepted = 2;
+  string status = 3;
+  string message = 4;
+}
+
+message ChannelInputResolved {
+  string interaction_id = 1;
+  string status = 2;
+  repeated ChannelInputAnswerSelection selections = 3;
+  string message = 4;
+}
+
 message ChannelClientFrame {
   string request_id = 1;
 
@@ -206,6 +281,7 @@ message ChannelClientFrame {
     ClientHello hello = 2;
     ChannelInboundMessage inbound = 3;
     PongFrame pong = 4;
+    ChannelInputAnswer input_answer = 5;
   }
 }
 
@@ -219,6 +295,10 @@ message ChannelServerFrame {
     ChannelFinal final = 5;
     liveagent.gateway.v1.ErrorResponse local_error = 6;
     PingFrame ping = 7;
+    ChannelFile file = 8;
+    ChannelInputRequest input_request = 9;
+    ChannelInputAnswerResult input_answer_result = 10;
+    ChannelInputResolved input_resolved = 11;
   }
 }
 

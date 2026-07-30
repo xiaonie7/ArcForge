@@ -12,7 +12,6 @@ const {
 
 const projectDefaults = {
   isAgentMode: true,
-  hasTrustedPrincipal: false,
   unscopedAgent: false,
   conversationWorkdir: "C:/projects/current",
   defaultWorkdir: "C:/projects/default",
@@ -37,7 +36,33 @@ test("Agent workdir resolution only allows empty cwd for an explicit unscoped so
       ...projectDefaults,
       explicitWorkdir: "",
     }),
+    { workdir: "", allowEmptyWorkdir: false },
+  );
+
+  assert.deepEqual(
+    resolveAgentTurnWorkdir({
+      ...projectDefaults,
+      explicitWorkdir: "",
+      allowEmptyWorkdirOverride: true,
+    }),
     { workdir: "", allowEmptyWorkdir: true },
+  );
+
+  assert.deepEqual(
+    resolveAgentTurnWorkdir({
+      ...projectDefaults,
+      unscopedAgent: true,
+      explicitWorkdir: "",
+    }),
+    { workdir: "", allowEmptyWorkdir: true },
+  );
+
+  assert.deepEqual(
+    resolveAgentTurnWorkdir({
+      ...projectDefaults,
+      gatewayWorkdir: "",
+    }),
+    { workdir: "", allowEmptyWorkdir: false },
   );
 
   assert.deepEqual(
@@ -50,26 +75,33 @@ test("Agent workdir resolution only allows empty cwd for an explicit unscoped so
   );
 });
 
-test("trusted channel turns never inherit desktop or queued project directories", () => {
+test("trusted channel turns use the same desktop and queued project directories", () => {
   assert.deepEqual(
     resolveAgentTurnWorkdir({
       ...projectDefaults,
-      hasTrustedPrincipal: true,
-      explicitWorkdir: "C:/projects/should-not-leak",
+      explicitWorkdir: "C:/projects/captured",
       gatewayWorkdir: "C:/projects/remote",
     }),
-    { workdir: "", allowEmptyWorkdir: true },
+    { workdir: "C:/projects/captured", allowEmptyWorkdir: false },
   );
 
   assert.equal(
     resolveGatewayQueuedTurnWorkdir({
-      hasTrustedPrincipal: true,
       requestedWorkdir: "C:/projects/remote",
       conversationWorkdir: "C:/projects/current",
       displayedWorkdir: "C:/projects/displayed",
       defaultWorkdir: "C:/projects/default",
     }),
-    "",
+    "C:/projects/remote",
+  );
+
+  assert.equal(
+    resolveGatewayQueuedTurnWorkdir({
+      conversationWorkdir: "C:/projects/current",
+      displayedWorkdir: "C:/projects/displayed",
+      defaultWorkdir: "C:/projects/default",
+    }),
+    "C:/projects/current",
   );
 });
 
@@ -104,6 +136,10 @@ test("Recent scope is wired to cwd-empty history and the guarded Agent runtime",
     "utf8",
   );
   const pageSource = readFileSync(new URL("../../src/pages/ChatPage.tsx", import.meta.url), "utf8");
+  const historyActionsSource = readFileSync(
+    new URL("../../src/pages/chat/history/useConversationHistoryActions.ts", import.meta.url),
+    "utf8",
+  );
   const sidebarSource = readFileSync(
     new URL("../../src/components/chat/ChatHistorySidebar.tsx", import.meta.url),
     "utf8",
@@ -112,11 +148,32 @@ test("Recent scope is wired to cwd-empty history and the guarded Agent runtime",
     new URL("../../src/pages/chat/turns/runAgentConversationTurn.ts", import.meta.url),
     "utf8",
   );
+  const queueSource = readFileSync(
+    new URL("../../src/pages/chat/queue/useChatTurnQueue.ts", import.meta.url),
+    "utf8",
+  );
 
   assert.match(workspaceSource, /isRecentScopeActive\s*\?\s*\{ kind: "unscoped" \}/);
   assert.match(workspaceSource, /startNewConversationActionRef\.current\(\{ workdir: "" \}\)/);
+  assert.match(
+    historyActionsSource,
+    /workdir: options\?\.workdir \?\? getDefaultNewConversationWorkdir\?\.\(\)/,
+  );
+  assert.match(
+    pageSource,
+    /const nextWorkdir = isRecentScopeActive \? "" : activeWorkspaceProjectPath\.trim\(\)/,
+  );
   assert.match(pageSource, /allowEmptyAgentWorkdir: isAgentMode && isRecentScopeActive/);
   assert.match(sidebarSource, /<RecentScopeRow/);
   assert.match(agentTurnSource, /if \(!effectiveWorkdir && !allowEmptyWorkdir\)/);
+  assert.match(
+    agentTurnSource,
+    /workspaceAccess:\s*allowEmptyWorkdir\s*\?\s*"none"\s*:\s*"full"/,
+  );
   assert.match(agentTurnSource, /workdir: effectiveWorkdir,\s*allowEmptyWorkdir,/);
+  assert.match(queueSource, /allowEmptyWorkdirOverride: queuedTurn\.allowEmptyWorkdir/);
+  assert.match(
+    queueSource,
+    /allowEmptyWorkdir:\s*isAgentExecutionMode\(executionMode\) && workdir\.length === 0 && allowEmptyAgentWorkdir/,
+  );
 });

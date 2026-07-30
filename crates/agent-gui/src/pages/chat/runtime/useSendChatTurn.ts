@@ -57,10 +57,7 @@ import {
 } from "../../../lib/settings";
 import type { SidebarStore } from "../../../lib/sidebar/store";
 import {
-  buildPreloadedRoutedSkillSystemPrompt,
   buildSkillsSystemPrompt,
-  readCompleteSkillText,
-  resolveAuthorizedSkillRoute,
   resolveExplicitSkillMentions,
   type SkillSummary,
 } from "../../../lib/skills";
@@ -165,6 +162,8 @@ type UseSendChatTurnParams = {
   persistConversation: (params: PersistConversationParams) => Promise<boolean>;
   pruneIdleConversationCaches: (extraKeepIds?: Iterable<string>) => void;
   requestQueuedChatTurnProcessing: (conversationId: string) => void;
+  /** Default workspace used when a new conversation has not captured its own cwd yet. */
+  defaultAgentWorkdir: string;
   /** The visible Agent scope is the explicit cwd-empty "Recent" scope. */
   allowEmptyAgentWorkdir: boolean;
 };
@@ -232,6 +231,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     persistConversation,
     pruneIdleConversationCaches,
     requestQueuedChatTurnProcessing,
+    defaultAgentWorkdir,
     allowEmptyAgentWorkdir,
   } = params;
 
@@ -264,6 +264,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     conversationIdOverride?: string;
     executionModeOverride?: ExecutionMode;
     workdirOverride?: string;
+    allowEmptyWorkdirOverride?: boolean;
     selectedSystemToolIdsOverride?: SystemToolId[];
     runtimeControlsOverride?: ChatRuntimeControls;
     gatewayBridgeRequestOverride?: ActiveGatewayBridgeRequest | null;
@@ -293,12 +294,12 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     const effectiveIsAgentMode = isAgentExecutionMode(effectiveExecutionMode);
     const workdirResolution = resolveAgentTurnWorkdir({
       isAgentMode: effectiveIsAgentMode,
-      hasTrustedPrincipal: Boolean(principal),
       explicitWorkdir: overrides?.workdirOverride,
+      allowEmptyWorkdirOverride: overrides?.allowEmptyWorkdirOverride,
       gatewayWorkdir: gatewayBridgeRequest?.workdirOverride,
       unscopedAgent: !gatewayBridgeRequest && allowEmptyAgentWorkdir,
       conversationWorkdir: runtimeEntry?.workdir,
-      defaultWorkdir: settings.system.workdir,
+      defaultWorkdir: defaultAgentWorkdir,
     });
     const effectiveWorkdir = workdirResolution.workdir;
     const effectiveSelectedSystemToolIds =
@@ -533,13 +534,12 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         if (commandCompactionFailure) {
           throw new Error(commandCompactionFailure);
         }
-        gatewayBridgeEvents.queueToken(
-          applied ? "已压缩当前会话上下文。" : "当前会话暂无可压缩的上下文。",
-        );
+        const finalText = applied
+          ? "已压缩当前会话上下文。"
+          : "当前会话暂无可压缩的上下文。";
         await gatewayBridgeEvents.queueEvent({
-          type: "tool_status",
-          status: null,
-          isCompaction: false,
+          type: "done",
+          final_text: finalText,
           conversation_id: conversationId,
         });
         gatewayBridgeEvents.close();
@@ -1077,144 +1077,72 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       },
     });
 
-    if (effectiveSkillsEnabled && (principal || selectedSkillNames.length > 0)) {
+    if (effectiveSkillsEnabled && selectedSkillNames.length > 0) {
       let skillsList = availableSkills;
       let rootDir = skillsRootDir;
-
-      if (principal) {
-        let routedSkill = resolveAuthorizedSkillRoute({
-          text,
-          defaultSkillName: principal.defaultSkillName,
-          installedSkills: skillsList,
-          principal,
-        });
-        if (routedSkill.kind === "missing") {
-          const fresh = await refreshSkills();
-          if (fresh) {
-            skillsList = fresh.skills;
-            rootDir = fresh.rootDir;
-            routedSkill = resolveAuthorizedSkillRoute({
-              text,
-              defaultSkillName: principal.defaultSkillName,
-              installedSkills: skillsList,
-              principal,
-            });
-          }
+      let byName = new Map(skillsList.map((skill) => [skill.name, skill]));
+      let missing = selectedSkillNames.filter((name) => !byName.has(name));
+      if (missing.length > 0) {
+        const fresh = await refreshSkills();
+        if (fresh) {
+          skillsList = fresh.skills;
+          rootDir = fresh.rootDir;
+          byName = new Map(skillsList.map((skill) => [skill.name, skill]));
+          missing = selectedSkillNames.filter((name) => !byName.has(name));
         }
-
-        if (routedSkill.kind !== "none" && routedSkill.kind !== "matched") {
-          const message = `Skill ${routedSkill.requestedName} is not installed or authorized for this WeCom user.`;
-          setConversationErrorState(message);
-          gatewayBridgeEvents.emitError(message, conversationId);
-          gatewayBridgeEvents.close();
-          markConversationRunStopped("failed");
-          restoreComposerOnStartFailure();
-          return true;
-        }
-
-        if (routedSkill.kind === "matched") {
-          let routedSkillContent = "";
-          try {
-            routedSkillContent = await readCompleteSkillText(routedSkill.skill.skillFile);
-          } catch (error) {
-            console.warn("Failed to preload the routed WeCom Skill", error);
-            const message = `Skill ${routedSkill.skill.name} could not be loaded completely.`;
-            setConversationErrorState(message);
-            gatewayBridgeEvents.emitError(message, conversationId);
-            gatewayBridgeEvents.close();
-            markConversationRunStopped("failed");
-            restoreComposerOnStartFailure();
-            return true;
-          }
-
-          const selectedSkills = [routedSkill.skill];
-          skillsRootDirForTools = rootDir;
-          skillAccessPolicyForTools = {
-            allowedSkillNames: selectedSkills.map((skill) => skill.name),
-            allowedSkillBaseDirs: selectedSkills.map((skill) => skill.baseDir),
-            protectedSkillNames: selectedSkills
-              .filter((skill) => skill.builtIn === true)
-              .map((skill) => skill.name),
-            protectedSkillBaseDirs: selectedSkills
-              .filter((skill) => skill.builtIn === true)
-              .map((skill) => skill.baseDir),
-            allowSkillInventory: false,
-            allowSkillManagement: false,
-            allowSkillMutation: false,
-          };
-          skillsPrompt = buildPreloadedRoutedSkillSystemPrompt({
-            skill: routedSkill.skill,
-            content: routedSkillContent,
-          });
-        }
-      } else {
-        // Desktop chats retain progressive disclosure and the user's current selection.
-        let byName = new Map(skillsList.map((skill) => [skill.name, skill]));
-        let missing = selectedSkillNames.filter((name) => !byName.has(name));
-        if (missing.length > 0) {
-          const fresh = await refreshSkills();
-          if (fresh) {
-            skillsList = fresh.skills;
-            rootDir = fresh.rootDir;
-            byName = new Map(skillsList.map((skill) => [skill.name, skill]));
-            missing = selectedSkillNames.filter((name) => !byName.has(name));
-          }
-        }
-
-        if (missing.length > 0) {
-          const message = `找不到以下 Skills：${missing.join(", ")}（请先重新扫描固定 Skills 目录）`;
-          setConversationErrorState(message);
-          gatewayBridgeEvents.emitError(message, conversationId);
-          gatewayBridgeEvents.close();
-          markConversationRunStopped("failed");
-          restoreComposerOnStartFailure();
-          return true;
-        }
-
-        const selectedSkills = selectedSkillNames.map((name) => byName.get(name)!).filter(Boolean);
-        const allowBuiltinSkillManagement = selectedSkills.some(
-          (skill) => skill.name === "skills-creator" || skill.name === "skills-installer",
-        );
-        skillsRootDirForTools = rootDir;
-        skillAccessPolicyForTools = {
-          allowedSkillNames: selectedSkills.map((skill) => skill.name),
-          allowedSkillBaseDirs: selectedSkills.map((skill) => skill.baseDir),
-          protectedSkillNames: selectedSkills
-            .filter((skill) => skill.builtIn === true)
-            .map((skill) => skill.name),
-          protectedSkillBaseDirs: selectedSkills
-            .filter((skill) => skill.builtIn === true)
-            .map((skill) => skill.baseDir),
-          allowSkillInventory: true,
-          allowSkillManagement: allowBuiltinSkillManagement,
-          allowSkillMutation: true,
-        };
-        const explicitSkills = resolveExplicitSkillMentions({
-          text,
-          structured: composerDraft?.skillMentions ?? [],
-          enabledSkills: selectedSkills,
-        });
-        skillsPrompt = buildSkillsSystemPrompt({
-          rootDir,
-          selected: selectedSkills,
-          explicit: explicitSkills,
-        });
       }
+
+      if (missing.length > 0) {
+        const message = `找不到以下 Skills：${missing.join(", ")}（请先重新扫描固定 Skills 目录）`;
+        setConversationErrorState(message);
+        gatewayBridgeEvents.emitError(message, conversationId);
+        gatewayBridgeEvents.close();
+        markConversationRunStopped("failed");
+        restoreComposerOnStartFailure();
+        return true;
+      }
+
+      const selectedSkills = selectedSkillNames
+        .map((name) => byName.get(name))
+        .filter((skill): skill is SkillSummary => Boolean(skill));
+      const allowBuiltinSkillManagement = selectedSkills.some(
+        (skill) => skill.name === "skills-creator" || skill.name === "skills-installer",
+      );
+      skillsRootDirForTools = rootDir;
+      skillAccessPolicyForTools = {
+        allowedSkillNames: selectedSkills.map((skill) => skill.name),
+        allowedSkillBaseDirs: selectedSkills.map((skill) => skill.baseDir),
+        protectedSkillNames: selectedSkills
+          .filter((skill) => skill.builtIn === true)
+          .map((skill) => skill.name),
+        protectedSkillBaseDirs: selectedSkills
+          .filter((skill) => skill.builtIn === true)
+          .map((skill) => skill.baseDir),
+        allowSkillInventory: true,
+        allowSkillManagement: allowBuiltinSkillManagement,
+        allowSkillMutation: true,
+      };
+      const explicitSkills = resolveExplicitSkillMentions({
+        text,
+        structured: composerDraft?.skillMentions ?? [],
+        enabledSkills: selectedSkills,
+      });
+      skillsPrompt = buildSkillsSystemPrompt({
+        rootDir,
+        selected: selectedSkills,
+        explicit: explicitSkills,
+      });
     }
 
-    if (!principal) {
-      try {
-        memoryPrompt = await buildMemoryOverviewSection(effectiveWorkdir);
-      } catch (error) {
-        console.warn("Failed to build memory overview prompt", error);
-        memoryPrompt = "";
-      }
+    try {
+      memoryPrompt = await buildMemoryOverviewSection(effectiveWorkdir);
+    } catch (error) {
+      console.warn("Failed to build memory overview prompt", error);
+      memoryPrompt = "";
     }
 
     const hookScope = createHookRunScope({
-      // Hooks are desktop-owned automation and may execute arbitrary actions;
-      // they are never inherited by an authenticated WeCom principal.
-      hooks: principal ? [] : getAutomationState().hooks.hooks,
+      hooks: getAutomationState().hooks.hooks,
       conversationId,
       workdir: effectiveWorkdir,
       onWarning: (warning) => {
@@ -1352,7 +1280,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionModel,
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
-            memoryEnabled: !principal,
+            memoryEnabled: true,
             effectiveWorkdir,
             allowEmptyWorkdir: workdirResolution.allowEmptyWorkdir,
             effectiveSkillsEnabled,
@@ -1369,13 +1297,14 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             applyMcpOps: (ops) => {
               setSettings((prev) => applyMcpOpsToAppSettings(prev, ops));
             },
-            remoteWebTunnelsEnabled: principal ? false : settings.remote.enableWebTunnels,
+            remoteWebTunnelsEnabled: settings.remote.enableWebTunnels,
             tunnelPublicBaseUrl: settings.remote.gatewayUrl.trim(),
             sshHosts: settings.ssh.hosts,
             associatedSshHostIds: effectiveAssociatedSshHostIds,
             sshManagerRemoteAllowed:
-              !principal &&
-              (!gatewayBridgeRequest || settings.remote.enableWebSshTerminal === true),
+              Boolean(principal) ||
+              !gatewayBridgeRequest ||
+              settings.remote.enableWebSshTerminal === true,
             onSshSessionsChanged: (change) => {
               if (change.action === "create") {
                 ensureSshTunnelToolTab(change.projectPathKey);
@@ -1435,7 +1364,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionModel,
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
-            memoryEnabled: !principal,
+            memoryEnabled: true,
             sessionId,
             conversationId,
             conversationCwd,

@@ -120,6 +120,30 @@ test("trusted channel ids can allocate an empty runtime without reading missing 
   assert.deepEqual(cache.get(id).state.meta.tools, [{ name: "ReadOnly" }]);
 });
 
+test("a stubbed conversation stays hydration-free on the very next message (wecom /new regression)", async () => {
+  const harness = createHarness();
+  const cache = new Map();
+  const params = readinessParams(cache);
+  const { ensureGatewayBridgeConversationReady } = harness.useGatewayBridgeReadiness(params);
+
+  const firstId = await ensureGatewayBridgeConversationReady("wecom:rotated-session", {
+    createIfMissing: true,
+  });
+  assert.equal(harness.historyReads(), 0);
+
+  // Simulate the next inbound message reusing the same channel-derived
+  // conversation id before any real send pipeline has persisted a sqlite
+  // row for it. This used to force a getChatHistory() lookup that failed
+  // with "history not found" because the conversation was "known" (in the
+  // runtime cache) but not yet marked as persisted.
+  const secondId = await ensureGatewayBridgeConversationReady("wecom:rotated-session", {
+    createIfMissing: true,
+  });
+
+  assert.equal(secondId, firstId);
+  assert.equal(harness.historyReads(), 0);
+});
+
 test("ordinary unknown desktop ids still require a persisted history record", async () => {
   const harness = createHarness();
   const { ensureGatewayBridgeConversationReady } = harness.useGatewayBridgeReadiness(

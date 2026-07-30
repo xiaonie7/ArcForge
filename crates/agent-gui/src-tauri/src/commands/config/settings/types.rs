@@ -35,8 +35,6 @@ pub struct WecomSettingsPayload {
     pub connector_id: String,
     #[serde(default)]
     pub allow_group_messages: bool,
-    #[serde(default = "default_wecom_access_policy")]
-    pub access_policy: Value,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -63,7 +61,6 @@ pub(crate) struct RuntimeWecomSettings {
     pub tenant_id: String,
     pub connector_id: String,
     pub allow_group_messages: bool,
-    pub access_policy_json: String,
     pub secret: String,
     pub channel_token: String,
 }

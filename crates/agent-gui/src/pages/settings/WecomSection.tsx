@@ -12,7 +12,6 @@ import {
   Key,
   Loader2,
   MessageSquare,
-  Plus,
   RefreshCw,
   Save,
   Send,
@@ -25,18 +24,10 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { useLocale } from "../../i18n";
-import type { WeComAccessRule, WeComAccessScope } from "../../lib/security/wecomAccessPolicy";
 import type { AppSettings, WecomGatewayMode, WecomSettings } from "../../lib/settings";
 import { isSupportedGatewayUrl } from "../../lib/settings/normalize";
 import { AgentActivationSwitch } from "./shared";
 import type { SettingsSectionProps } from "./types";
-import {
-  commitWeComAccessRuleDraft,
-  createWeComAccessRuleDraft,
-  editWeComAccessRuleDraft,
-  isCompleteWeComAccessRuleDraft,
-  type WeComAccessRuleDraft,
-} from "./wecomAccessDraft";
 
 type WecomWritePayload = WecomSettings & {
   secretUpdate?: string | null;
@@ -66,13 +57,6 @@ type WecomRuntimeLogs = {
 type WecomRuntimeLogsResponse = {
   gateway: string[] | string;
   connector: string[] | string;
-};
-
-type DatabaseProfileOption = {
-  id: string;
-  name: string;
-  driver: string;
-  enabled: boolean;
 };
 
 type WecomRuntimeSendMessageResponse = {
@@ -146,21 +130,6 @@ function formatRuntimeTimestamp(value?: number | null) {
 function normalizeRuntimeLogLines(value: string[] | string | null | undefined) {
   if (Array.isArray(value)) return value.map(String);
   return typeof value === "string" && value ? value.split(/\r?\n/) : [];
-}
-
-function parseAccessList(value: string) {
-  return Array.from(
-    new Set(
-      value
-        .split(/[\n,]/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
-function formatAccessList(value: readonly string[]) {
-  return value.join(", ");
 }
 
 function updateWecomSettings(
@@ -238,9 +207,6 @@ export function WecomSection(props: WecomSectionProps) {
   const [sendMessageError, setSendMessageError] = useState<string | null>(null);
   const [sendMessageResult, setSendMessageResult] =
     useState<WecomRuntimeSendMessageResponse | null>(null);
-  const [accessRuleDraft, setAccessRuleDraft] = useState<WeComAccessRuleDraft | null>(null);
-  const [databaseProfiles, setDatabaseProfiles] = useState<DatabaseProfileOption[]>([]);
-  const [databaseProfilesLoading, setDatabaseProfilesLoading] = useState(true);
 
   const gatewayUrl = settings.remote.gatewayUrl.trim();
   const isLocalMode = settings.wecom.gatewayMode === "local";
@@ -298,73 +264,6 @@ export function WecomSection(props: WecomSectionProps) {
   ]);
   const connectorReady = missingConfiguration === null;
 
-  const replaceAccessRules = useCallback(
-    (rules: readonly WeComAccessRule[]) => {
-      updateWecomSettings(setSettings, { accessPolicy: { rules } });
-    },
-    [setSettings],
-  );
-
-  const addAccessRule = useCallback(() => {
-    setAccessRuleDraft(createWeComAccessRuleDraft(settings.wecom.tenantId, settings.wecom.botId));
-  }, [settings.wecom.botId, settings.wecom.tenantId]);
-
-  const updateAccessRuleDraft = useCallback((patch: Partial<WeComAccessRuleDraft>) => {
-    setAccessRuleDraft((current) => (current ? editWeComAccessRuleDraft(current, patch) : current));
-  }, []);
-
-  const saveAccessRuleDraft = useCallback(() => {
-    if (!accessRuleDraft) return;
-    const accessPolicy = commitWeComAccessRuleDraft(settings.wecom.accessPolicy, accessRuleDraft);
-    if (!accessPolicy) return;
-    updateWecomSettings(setSettings, { accessPolicy });
-    setAccessRuleDraft(null);
-  }, [accessRuleDraft, setSettings, settings.wecom.accessPolicy]);
-
-  const updateAccessRule = useCallback(
-    (index: number, patch: Partial<WeComAccessRule>) => {
-      replaceAccessRules(
-        settings.wecom.accessPolicy.rules.map((rule, ruleIndex) =>
-          ruleIndex === index ? { ...rule, ...patch } : rule,
-        ),
-      );
-    },
-    [replaceAccessRules, settings.wecom.accessPolicy.rules],
-  );
-
-  const removeAccessRule = useCallback(
-    (index: number) => {
-      replaceAccessRules(
-        settings.wecom.accessPolicy.rules.filter((_, ruleIndex) => ruleIndex !== index),
-      );
-    },
-    [replaceAccessRules, settings.wecom.accessPolicy.rules],
-  );
-
-  const toggleAccessScope = useCallback(
-    (index: number, scope: WeComAccessScope) => {
-      const rule = settings.wecom.accessPolicy.rules[index];
-      if (!rule) return;
-      const scopes = rule.scopes.includes(scope)
-        ? rule.scopes.filter((item) => item !== scope)
-        : [...rule.scopes, scope];
-      updateAccessRule(index, { scopes });
-    },
-    [settings.wecom.accessPolicy.rules, updateAccessRule],
-  );
-
-  const toggleAccessDatabaseProfile = useCallback(
-    (index: number, profileId: string) => {
-      const rule = settings.wecom.accessPolicy.rules[index];
-      if (!rule) return;
-      const allowedDatabaseProfileIds = rule.allowedDatabaseProfileIds.includes(profileId)
-        ? rule.allowedDatabaseProfileIds.filter((item) => item !== profileId)
-        : [...rule.allowedDatabaseProfileIds, profileId];
-      updateAccessRule(index, { allowedDatabaseProfileIds });
-    },
-    [settings.wecom.accessPolicy.rules, updateAccessRule],
-  );
-
   const refreshRuntimeStatus = useCallback(async () => {
     setRuntimeLoading(true);
     try {
@@ -381,23 +280,6 @@ export function WecomSection(props: WecomSectionProps) {
   useEffect(() => {
     void refreshRuntimeStatus();
   }, [refreshRuntimeStatus]);
-
-  useEffect(() => {
-    let active = true;
-    void invoke<DatabaseProfileOption[]>("database_profiles_list")
-      .then((profiles) => {
-        if (active) setDatabaseProfiles(profiles);
-      })
-      .catch(() => {
-        if (active) setDatabaseProfiles([]);
-      })
-      .finally(() => {
-        if (active) setDatabaseProfilesLoading(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1232,356 +1114,6 @@ export function WecomSection(props: WecomSectionProps) {
             }
           />
         </div>
-      </div>
-
-      <div className="space-y-4 rounded-xl border border-border/60 bg-card p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-            <Shield className="h-4 w-4 text-muted-foreground" />
-            {t("settings.wecomAccessControl")}
-          </div>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={accessRuleDraft !== null}
-            onClick={addAccessRule}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {t("settings.wecomAddAccessRule")}
-          </Button>
-        </div>
-
-        {settings.wecom.accessPolicy.rules.length === 0 && accessRuleDraft === null ? (
-          <div className="border-t border-border/60 py-6 text-center text-xs text-muted-foreground">
-            {t("settings.wecomAccessControlEmpty")}
-          </div>
-        ) : (
-          <div className="divide-y divide-border/60 border-t border-border/60">
-            {accessRuleDraft ? (
-              <div className="space-y-4 py-4">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    {t("settings.wecomAccessRule").replace(
-                      "{index}",
-                      String(settings.wecom.accessPolicy.rules.length + 1),
-                    )}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={!isCompleteWeComAccessRuleDraft(accessRuleDraft)}
-                      onClick={saveAccessRuleDraft}
-                    >
-                      <Save className="h-3.5 w-3.5" />
-                      {t("settings.save")}
-                    </Button>
-                    <button
-                      type="button"
-                      title={t("settings.wecomRemoveAccessRule")}
-                      aria-label={t("settings.wecomRemoveAccessRule")}
-                      onClick={() => setAccessRuleDraft(null)}
-                      className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid gap-3 lg:grid-cols-3">
-                  {[
-                    {
-                      key: "tenantId",
-                      label: t("settings.wecomAccessTenantId"),
-                      value: accessRuleDraft.tenantId,
-                    },
-                    {
-                      key: "botId",
-                      label: t("settings.wecomAccessBotId"),
-                      value: accessRuleDraft.botId,
-                    },
-                    {
-                      key: "externalUserId",
-                      label: t("settings.wecomAccessUserId"),
-                      value: accessRuleDraft.externalUserId,
-                    },
-                  ].map((field) => (
-                    <div key={field.key} className="space-y-1.5">
-                      <label
-                        htmlFor={`wecom-access-draft-${field.key}`}
-                        className="text-xs font-medium text-muted-foreground"
-                      >
-                        {field.label}
-                      </label>
-                      <Input
-                        id={`wecom-access-draft-${field.key}`}
-                        value={field.value}
-                        onChange={(event) =>
-                          updateAccessRuleDraft({ [field.key]: event.target.value })
-                        }
-                        autoComplete="off"
-                        className="font-mono text-[13px]"
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
-            {settings.wecom.accessPolicy.rules.map((rule, index) => (
-              <div
-                // Policy rows have no persisted UI identity and are replaced as a complete list.
-                // biome-ignore lint/suspicious/noArrayIndexKey: the index disambiguates duplicate exact-match grants
-                key={`${rule.tenantId}:${rule.botId}:${rule.externalUserId}:${index}`}
-                className="space-y-4 py-4"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-medium text-muted-foreground">
-                    {t("settings.wecomAccessRule").replace("{index}", String(index + 1))}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <AgentActivationSwitch
-                      checked={rule.enabled}
-                      title={t("settings.wecomAccessRuleEnabled")}
-                      onToggle={() => updateAccessRule(index, { enabled: !rule.enabled })}
-                    />
-                    <button
-                      type="button"
-                      title={t("settings.wecomRemoveAccessRule")}
-                      aria-label={t("settings.wecomRemoveAccessRule")}
-                      onClick={() => removeAccessRule(index)}
-                      className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid gap-3 lg:grid-cols-3">
-                  {[
-                    {
-                      key: "tenantId",
-                      label: t("settings.wecomAccessTenantId"),
-                      value: rule.tenantId,
-                    },
-                    {
-                      key: "botId",
-                      label: t("settings.wecomAccessBotId"),
-                      value: rule.botId,
-                    },
-                    {
-                      key: "externalUserId",
-                      label: t("settings.wecomAccessUserId"),
-                      value: rule.externalUserId,
-                    },
-                  ].map((field) => (
-                    <div key={field.key} className="space-y-1.5">
-                      <label
-                        htmlFor={`wecom-access-${field.key}-${index}`}
-                        className="text-xs font-medium text-muted-foreground"
-                      >
-                        {field.label}
-                      </label>
-                      <Input
-                        id={`wecom-access-${field.key}-${index}`}
-                        value={field.value}
-                        onChange={(event) =>
-                          updateAccessRule(index, { [field.key]: event.target.value })
-                        }
-                        autoComplete="off"
-                        className="font-mono text-[13px]"
-                      />
-                    </div>
-                  ))}
-                </div>
-
-                <fieldset className="space-y-2">
-                  <legend className="text-xs font-medium text-muted-foreground">
-                    {t("settings.wecomAccessScopes")}
-                  </legend>
-                  <div className="flex flex-wrap gap-x-5 gap-y-2">
-                    {[
-                      ["tool:read", "settings.wecomAccessScopeTools"],
-                      ["skill:use", "settings.wecomAccessScopeSkills"],
-                      ["database:read", "settings.wecomAccessScopeDatabase"],
-                      ["mcp:invoke", "settings.wecomAccessScopeMcp"],
-                    ].map(([scope, label]) => (
-                      <label
-                        key={scope}
-                        className="flex items-center gap-2 text-xs text-foreground"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={rule.scopes.includes(scope as WeComAccessScope)}
-                          onChange={() => toggleAccessScope(index, scope as WeComAccessScope)}
-                          className="h-4 w-4 rounded border-input accent-primary"
-                        />
-                        {t(label)}
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {[
-                    {
-                      key: "allowedToolNames",
-                      label: t("settings.wecomAllowedTools"),
-                      value: rule.allowedToolNames,
-                    },
-                    {
-                      key: "allowedSkillNames",
-                      label: t("settings.wecomAllowedSkills"),
-                      value: rule.allowedSkillNames,
-                    },
-                    {
-                      key: "allowedSkillBaseDirs",
-                      label: t("settings.wecomAllowedSkillDirs"),
-                      value: rule.allowedSkillBaseDirs,
-                    },
-                    {
-                      key: "allowedMcpServerIds",
-                      label: t("settings.wecomAllowedMcpServers"),
-                      value: rule.allowedMcpServerIds,
-                    },
-                  ].map((field) => (
-                    <div key={field.key} className="space-y-1.5">
-                      <label
-                        htmlFor={`wecom-access-${field.key}-${index}`}
-                        className="text-xs font-medium text-muted-foreground"
-                      >
-                        {field.label}
-                      </label>
-                      <Input
-                        id={`wecom-access-${field.key}-${index}`}
-                        value={formatAccessList(field.value)}
-                        onChange={(event) => {
-                          const values = parseAccessList(event.target.value);
-                          updateAccessRule(index, {
-                            [field.key]: values,
-                            ...(field.key === "allowedSkillNames" &&
-                            !values.includes(rule.defaultSkillName)
-                              ? { defaultSkillName: "" }
-                              : {}),
-                          });
-                        }}
-                        placeholder={t("settings.wecomAccessListPlaceholder")}
-                        autoComplete="off"
-                        className="font-mono text-[13px]"
-                      />
-                    </div>
-                  ))}
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label className="space-y-1.5" htmlFor={`wecom-default-skill-${index}`}>
-                    <span className="text-xs font-medium text-muted-foreground">
-                      {t("settings.wecomDefaultSkill")}
-                    </span>
-                    <select
-                      id={`wecom-default-skill-${index}`}
-                      value={rule.defaultSkillName}
-                      onChange={(event) =>
-                        updateAccessRule(index, { defaultSkillName: event.target.value })
-                      }
-                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 font-mono text-[13px] text-foreground shadow-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                    >
-                      <option value="">{t("settings.wecomDefaultSkillNone")}</option>
-                      {rule.allowedSkillNames.map((skillName) => (
-                        <option key={skillName} value={skillName}>
-                          {skillName}
-                        </option>
-                      ))}
-                    </select>
-                    <span className="block text-[11px] leading-relaxed text-muted-foreground">
-                      {t("settings.wecomDefaultSkillHint")}
-                    </span>
-                  </label>
-
-                  <fieldset className="space-y-2">
-                    <legend className="text-xs font-medium text-muted-foreground">
-                      {t("settings.wecomAllowedDatabaseProfiles")}
-                    </legend>
-                    <p className="text-[11px] leading-relaxed text-muted-foreground">
-                      {t("settings.wecomAllowedDatabaseProfilesHint")}
-                    </p>
-                    {databaseProfilesLoading ? (
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        {t("settings.wecomDatabaseProfilesLoading")}
-                      </div>
-                    ) : databaseProfiles.some((profile) => profile.enabled) ? (
-                      <div className="max-h-36 space-y-2 overflow-y-auto rounded-md border border-border/60 p-2.5">
-                        {databaseProfiles
-                          .filter((profile) => profile.enabled)
-                          .map((profile) => (
-                            <label
-                              key={profile.id}
-                              className="flex items-start gap-2 text-xs text-foreground"
-                            >
-                              <input
-                                type="checkbox"
-                                checked={rule.allowedDatabaseProfileIds.includes(profile.id)}
-                                onChange={() => toggleAccessDatabaseProfile(index, profile.id)}
-                                className="mt-0.5 h-4 w-4 rounded border-input accent-primary"
-                              />
-                              <span className="min-w-0">
-                                <span className="block truncate">{profile.name}</span>
-                                <span className="block truncate font-mono text-[10px] text-muted-foreground">
-                                  {profile.driver} · {profile.id}
-                                </span>
-                              </span>
-                            </label>
-                          ))}
-                        {rule.allowedDatabaseProfileIds
-                          .filter(
-                            (profileId) =>
-                              !databaseProfiles.some(
-                                (profile) => profile.enabled && profile.id === profileId,
-                              ),
-                          )
-                          .map((profileId) => (
-                            <label
-                              key={profileId}
-                              className="flex items-start gap-2 text-xs text-muted-foreground"
-                            >
-                              <input
-                                type="checkbox"
-                                checked
-                                onChange={() => toggleAccessDatabaseProfile(index, profileId)}
-                                className="mt-0.5 h-4 w-4 rounded border-input accent-primary"
-                              />
-                              <span className="min-w-0 truncate font-mono">
-                                {profileId} ({t("settings.wecomDatabaseProfileUnavailable")})
-                              </span>
-                            </label>
-                          ))}
-                      </div>
-                    ) : (
-                      <div className="space-y-1.5">
-                        <Input
-                          id={`wecom-access-allowedDatabaseProfileIds-${index}`}
-                          value={formatAccessList(rule.allowedDatabaseProfileIds)}
-                          onChange={(event) =>
-                            updateAccessRule(index, {
-                              allowedDatabaseProfileIds: parseAccessList(event.target.value),
-                            })
-                          }
-                          placeholder={t("settings.wecomAccessListPlaceholder")}
-                          autoComplete="off"
-                          className="font-mono text-[13px]"
-                        />
-                        <p className="text-[11px] text-muted-foreground">
-                          {t("settings.wecomDatabaseProfilesEmpty")}
-                        </p>
-                      </div>
-                    )}
-                  </fieldset>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );

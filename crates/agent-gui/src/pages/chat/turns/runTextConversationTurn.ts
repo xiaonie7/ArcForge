@@ -419,6 +419,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
   });
   await gatewayBridgeEvents.queueEvent({
     type: "done",
+    final_text: gatewayAssistantText,
     conversation_id: conversationId,
   });
   gatewayBridgeEvents.close();

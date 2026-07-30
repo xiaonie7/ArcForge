@@ -3,10 +3,6 @@ import { homeDir } from "@tauri-apps/api/path";
 import type { RuntimeEnvironmentSnapshot, RuntimePlatform } from "../runtimePlatform";
 import type { PrincipalContext } from "../security/principalContext";
 import {
-  createBuiltinToolAuthorizationPolicy,
-  formatToolAuthorizationError,
-} from "../security/toolAuthorizationPolicy";
-import {
   type McpSettings,
   type McpSettingsOp,
   type ProviderId,
@@ -60,10 +56,8 @@ function createBuiltinToolRegistry(
 ): BuiltinToolRegistry {
   const tools: BuiltinToolBundle["tools"] = [];
   const metadataByName = new Map<string, BuiltinToolMetadata>();
-  const allMetadataByName = new Map<string, BuiltinToolMetadata>();
   const executorsByName = new Map<string, BuiltinToolBundle["executeToolCall"]>();
   const canonicalToolNameByLookupKey = new Map<string, string | null>();
-  const authorizationPolicy = createBuiltinToolAuthorizationPolicy(principal);
 
   const registerCanonicalToolName = (toolName: string) => {
     const key = toolName.trim().toLowerCase();
@@ -90,14 +84,9 @@ function createBuiltinToolRegistry(
       executorsByName.set(tool.name, bundle.executeToolCall);
       registerCanonicalToolName(tool.name);
       const metadata = bundle.metadataByName.get(tool.name);
+      tools.push(tool);
       if (metadata) {
-        allMetadataByName.set(tool.name, metadata);
-      }
-      if (authorizationPolicy.isToolVisible({ toolName: tool.name, metadata, principal })) {
-        tools.push(tool);
-        if (metadata) {
-          metadataByName.set(tool.name, metadata);
-        }
+        metadataByName.set(tool.name, metadata);
       }
     }
   }
@@ -133,28 +122,6 @@ function createBuiltinToolRegistry(
       }
       const effectiveToolCall =
         resolvedToolName === toolCall.name ? toolCall : { ...toolCall, name: resolvedToolName };
-      const decision = authorizationPolicy.authorize({
-        toolName: resolvedToolName,
-        metadata: allMetadataByName.get(resolvedToolName),
-        principal,
-      });
-      if (!decision.allowed) {
-        return {
-          role: "toolResult",
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          content: [{ type: "text", text: formatToolAuthorizationError(toolCall.name, decision) }],
-          details: {
-            authorization: {
-              code: decision.code,
-              principalId: principal?.principalId,
-              channel: principal?.channel,
-            },
-          },
-          isError: true,
-          timestamp: Date.now(),
-        };
-      }
       const effectiveContext = principal
         ? context
           ? { ...context, principal }
@@ -258,7 +225,6 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
   baseBundles.push(
     createDatabaseTools({
       runtimeScope: params.runtimeScope,
-      principal: params.principal,
       workspaceAccess,
     }),
   );
@@ -315,14 +281,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
     }
   }
 
-  const enabledServers = selectEnabledMcpServers(params.getMcpSettings()).filter((server) => {
-    if (!params.principal) return true;
-    return (
-      params.principal.chatType === "direct" &&
-      params.principal.scopes.includes("mcp:invoke") &&
-      params.principal.allowedMcpServerIds.includes(server.id)
-    );
-  });
+  const enabledServers = selectEnabledMcpServers(params.getMcpSettings());
   if (enabledServers.length > 0) {
     baseBundles.push(
       await createMcpTools({

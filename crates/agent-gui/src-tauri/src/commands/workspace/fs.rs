@@ -23,6 +23,7 @@ const READ_MAX_TEXT_BYTES: usize = 200 * 1024; // 200KB
 const EDITABLE_TEXT_MAX_BYTES: usize = 3 * 1024 * 1024; // 3MB
 const READ_MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024; // 25MB
 const READ_MAX_PREVIEW_BYTES: usize = 25 * 1024 * 1024; // 25MB
+const READ_MAX_CHANNEL_ARTIFACT_BYTES: usize = 20 * 1024 * 1024; // WeCom file limit
 const MAX_WORKSPACE_ARTIFACTS: usize = 12;
 const DOCUMENT_PREVIEW_CACHE_VERSION: &str = "v1";
 const IMAGE_SOURCE_HTTP_TIMEOUT_SECS: u64 = 20;
@@ -939,6 +940,14 @@ fn infer_workspace_preview_mime(path: &Path, bytes: &[u8]) -> Option<&'static st
         Some("mov") => Some("video/quicktime"),
         _ => None,
     }
+}
+
+fn public_workspace_file_id(meta: &fs::Metadata, canon: &Path) -> String {
+    let raw_file_id = file_identity(meta, canon);
+    raw_file_id
+        .strip_prefix("path:")
+        .map(|fallback_path| format!("path-hash:{}", hash_bytes(fallback_path.as_bytes())))
+        .unwrap_or(raw_file_id)
 }
 
 fn workspace_preview_kind(path: &Path, mime_type: &str) -> Option<&'static str> {
@@ -3034,11 +3043,7 @@ fn fs_describe_workspace_artifacts_impl(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| logical_path.clone());
-        let raw_file_id = file_identity(&metadata, &target);
-        let file_id = raw_file_id
-            .strip_prefix("path:")
-            .map(|fallback_path| format!("path-hash:{}", hash_bytes(fallback_path.as_bytes())))
-            .unwrap_or(raw_file_id);
+        let file_id = public_workspace_file_id(&metadata, &target);
 
         files.push(WorkspaceArtifactDescriptor {
             path: logical_path.clone(),
@@ -3055,6 +3060,101 @@ fn fs_describe_workspace_artifacts_impl(
     }
 
     Ok(DescribeWorkspaceArtifactsResponse { files })
+}
+
+#[derive(Debug)]
+pub(crate) struct WorkspaceArtifactContentResponse {
+    pub path: String,
+    pub file_name: String,
+    pub mime_type: String,
+    pub size_bytes: u64,
+    pub content: Vec<u8>,
+}
+
+pub(crate) fn fs_read_workspace_artifact_sync(
+    workdir: String,
+    path: String,
+    expected_file_id: String,
+    expected_size_bytes: u64,
+    expected_mtime_ms: u64,
+) -> Result<WorkspaceArtifactContentResponse, FsCommandError> {
+    let wd = canonicalize_workdir(&workdir)?;
+    fs_read_workspace_artifact_impl(
+        &wd,
+        &path,
+        &expected_file_id,
+        expected_size_bytes,
+        expected_mtime_ms,
+    )
+    .map_err(|error| FsCommandError::from(error).with_workdir(&wd))
+}
+
+fn fs_read_workspace_artifact_impl(
+    wd: &Path,
+    path: &str,
+    expected_file_id: &str,
+    expected_size_bytes: u64,
+    expected_mtime_ms: u64,
+) -> Result<WorkspaceArtifactContentResponse, FsError> {
+    let rel = sanitize_rel_path(path)?;
+    let logical_path = logical_rel_path(&rel);
+    let target = resolve_existing_file_target(wd, &rel).map_err(|error| match error {
+        FsError::OutOfBounds(_) => FsError::OutOfBounds(logical_path.clone()),
+        other => other,
+    })?;
+    let before = fs::metadata(&target)?;
+    let size_bytes = before.len();
+    if size_bytes > READ_MAX_CHANNEL_ARTIFACT_BYTES as u64 {
+        return Err(FsError::TooLarge {
+            path: logical_path,
+            message: format!(
+                "workspace artifact exceeds the {} MiB channel file limit",
+                READ_MAX_CHANNEL_ARTIFACT_BYTES / 1024 / 1024
+            ),
+        });
+    }
+
+    let actual_file_id = public_workspace_file_id(&before, &target);
+    let actual_mtime_ms = metadata_mtime_ms(&before);
+    if expected_file_id.trim().is_empty()
+        || actual_file_id != expected_file_id.trim()
+        || size_bytes != expected_size_bytes
+        || actual_mtime_ms != expected_mtime_ms
+    {
+        return Err(FsError::StaleFile {
+            path: logical_path,
+            message: "workspace artifact changed after PresentFile validation".to_string(),
+        });
+    }
+
+    let content = fs::read(&target)?;
+    let after = fs::metadata(&target)?;
+    if after.len() != size_bytes
+        || metadata_mtime_ms(&after) != actual_mtime_ms
+        || public_workspace_file_id(&after, &target) != actual_file_id
+        || content.len() as u64 != size_bytes
+    {
+        return Err(FsError::StaleFile {
+            path: logical_path,
+            message: "workspace artifact changed while it was being read".to_string(),
+        });
+    }
+
+    let file_name = rel
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| logical_path.clone());
+    let mime_type = infer_workspace_preview_mime(&target, &content)
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    Ok(WorkspaceArtifactContentResponse {
+        path: logical_path,
+        file_name,
+        mime_type,
+        size_bytes,
+        content,
+    })
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -5337,6 +5437,87 @@ mod tests {
             !serialized.to_string().contains(&display_path(&workdir)),
             "successful response must not expose the absolute workdir"
         );
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[test]
+    fn read_workspace_artifact_requires_present_file_metadata_and_returns_bytes() {
+        let workdir = unique_test_workdir("read-channel-artifact");
+        fs::create_dir_all(workdir.join("reports")).expect("create reports directory");
+        let contents = b"channel-deliverable";
+        fs::write(workdir.join("reports/result.txt"), contents).expect("write artifact");
+
+        let descriptor = fs_describe_workspace_artifacts_sync(
+            workdir.display().to_string(),
+            vec!["reports/result.txt".to_string()],
+        )
+        .expect("describe artifact")
+        .files
+        .remove(0);
+        let response = fs_read_workspace_artifact_sync(
+            workdir.display().to_string(),
+            descriptor.relative_path,
+            descriptor.file_id.expect("file id"),
+            descriptor.size_bytes,
+            descriptor.mtime_ms,
+        )
+        .expect("read validated artifact");
+
+        assert_eq!(response.path, "reports/result.txt");
+        assert_eq!(response.file_name, "result.txt");
+        assert_eq!(response.mime_type, "text/plain");
+        assert_eq!(response.size_bytes, contents.len() as u64);
+        assert_eq!(response.content, contents);
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[test]
+    fn read_workspace_artifact_rejects_stale_and_oversized_files() {
+        let workdir = unique_test_workdir("read-channel-artifact-invalid");
+        fs::create_dir_all(&workdir).expect("create workdir");
+        fs::write(workdir.join("result.txt"), b"before").expect("write artifact");
+        let descriptor = fs_describe_workspace_artifacts_sync(
+            workdir.display().to_string(),
+            vec!["result.txt".to_string()],
+        )
+        .expect("describe artifact")
+        .files
+        .remove(0);
+        fs::write(workdir.join("result.txt"), b"after-change").expect("replace artifact");
+
+        let stale = fs_read_workspace_artifact_sync(
+            workdir.display().to_string(),
+            descriptor.relative_path,
+            descriptor.file_id.expect("file id"),
+            descriptor.size_bytes,
+            descriptor.mtime_ms,
+        )
+        .expect_err("changed artifact should be rejected");
+        assert!(matches!(stale.code, FsErrorCode::StaleFile));
+
+        let oversized_path = workdir.join("oversized.bin");
+        let oversized = fs::File::create(&oversized_path).expect("create oversized file");
+        oversized
+            .set_len(READ_MAX_CHANNEL_ARTIFACT_BYTES as u64 + 1)
+            .expect("extend oversized file");
+        let oversized_descriptor = fs_describe_workspace_artifacts_sync(
+            workdir.display().to_string(),
+            vec!["oversized.bin".to_string()],
+        )
+        .expect("describe oversized artifact")
+        .files
+        .remove(0);
+        let too_large = fs_read_workspace_artifact_sync(
+            workdir.display().to_string(),
+            oversized_descriptor.relative_path,
+            oversized_descriptor.file_id.expect("file id"),
+            oversized_descriptor.size_bytes,
+            oversized_descriptor.mtime_ms,
+        )
+        .expect_err("oversized artifact should be rejected");
+        assert!(matches!(too_large.code, FsErrorCode::TooLarge));
 
         let _ = fs::remove_dir_all(workdir);
     }

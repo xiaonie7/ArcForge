@@ -23,8 +23,6 @@ import {
 type UseGatewayBridgeListenersParams = GatewayBridgeRuntimeRefs & {
   /** Group WeCom messages are opt-in and checked before queueing or execution. */
   allowWecomGroupMessages: boolean;
-  /** Desktop-owned ACL. Channel payloads can never supply or modify it. */
-  wecomAccessPolicy?: unknown;
   queueGatewayBridgeEventForRequest: (
     requestId: string,
     event: Record<string, unknown>,
@@ -376,11 +374,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
       }
       if (payload.origin) {
         try {
-          principal = await resolvePrincipalContext(
-            payload.origin,
-            requestId,
-            latestParamsRef.current.wecomAccessPolicy,
-          );
+          principal = await resolvePrincipalContext(payload.origin, requestId);
           // The connector cannot select or reuse a conversation id. Derive the
           // owner-scoped id from the authenticated principal instead.
           targetConversationId = await derivePrincipalConversationId(principal);
@@ -583,23 +577,11 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
             conversation_id: resolvedConversationId,
             worker_id: workerId,
           } as any);
-          latestParamsRef.current.queueGatewayBridgeEventForRequest(
-            requestId,
-            {
-              type: "token",
-              text: "已开启新会话。",
-              conversation_id: resolvedConversationId,
-            },
-            { workerId },
-          );
-          // Flush the short token response before the terminal event reaches
-          // the channel subscriber.
           await latestParamsRef.current.queueGatewayBridgeEventForRequest(
             requestId,
             {
-              type: "tool_status",
-              status: null,
-              isCompaction: false,
+              type: "done",
+              final_text: "已开启新会话。",
               conversation_id: resolvedConversationId,
             },
             { workerId },
@@ -619,9 +601,10 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
           workerId,
           startedAt: Date.now(),
           selectedModelOverride: principal ? undefined : payload.selectedModel,
-          runtimeControlsOverride: payload.runtimeControls
-            ? normalizeChatRuntimeControls(payload.runtimeControls)
-            : undefined,
+          runtimeControlsOverride:
+            !principal && payload.runtimeControls
+              ? normalizeChatRuntimeControls(payload.runtimeControls)
+              : undefined,
           executionModeOverride: principal
             ? undefined
             : normalizeGatewayExecutionMode(payload.executionMode),

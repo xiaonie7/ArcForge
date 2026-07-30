@@ -111,7 +111,6 @@ fn initialize_schema_locked(conn: &Connection) -> Result<(), String> {
             tenant_id TEXT NOT NULL DEFAULT '',
             connector_id TEXT NOT NULL DEFAULT 'wecom-desktop',
             allow_group_messages INTEGER NOT NULL DEFAULT 0,
-            access_policy_json TEXT NOT NULL DEFAULT '{\"rules\":[]}',
             aibot_secret TEXT NOT NULL DEFAULT '',
             channel_token TEXT NOT NULL DEFAULT '',
             updated_at INTEGER NOT NULL
@@ -148,24 +147,6 @@ fn initialize_schema_locked(conn: &Connection) -> Result<(), String> {
         ",
     )
     .map_err(|e| format!("初始化设置表失败：{e}"))?;
-    let has_wecom_access_policy = {
-        let mut stmt = conn
-            .prepare("PRAGMA table_info(wecom_settings)")
-            .map_err(|e| format!("prepare WeCom schema inspection failed: {e}"))?;
-        let columns = stmt
-            .query_map([], |row| row.get::<_, String>(1))
-            .map_err(|e| format!("inspect WeCom schema failed: {e}"))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("read WeCom schema failed: {e}"))?;
-        columns.iter().any(|column| column == "access_policy_json")
-    };
-    if !has_wecom_access_policy {
-        conn.execute(
-            "ALTER TABLE wecom_settings ADD COLUMN access_policy_json TEXT NOT NULL DEFAULT '{\"rules\":[]}'",
-            [],
-        )
-        .map_err(|e| format!("add WeCom access policy column failed: {e}"))?;
-    }
     let wecom_columns = {
         let mut stmt = conn
             .prepare("PRAGMA table_info(wecom_settings)")

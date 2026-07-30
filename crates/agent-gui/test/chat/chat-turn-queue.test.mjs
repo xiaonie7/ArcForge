@@ -26,6 +26,7 @@ function turn(id, conversationId, text) {
     uploadedFiles: [],
     executionMode: "tools",
     workdir: "/workspace",
+    allowEmptyWorkdir: false,
     selectedSystemToolIds: ["shell"],
     runtimeControls: {
       thinkingEnabled: false,
@@ -35,6 +36,17 @@ function turn(id, conversationId, text) {
     createdAt: 1,
   });
 }
+
+test("queued chat turns preserve explicit empty-workdir authorization", () => {
+  const recent = queue.createQueuedChatTurn({
+    ...turn("recent", "conversation-recent", "question"),
+    workdir: "   ",
+    allowEmptyWorkdir: true,
+  });
+
+  assert.equal(recent.workdir, "");
+  assert.equal(recent.allowEmptyWorkdir, true);
+});
 
 test("queued chat turns append, promote, remove, and take the next turn", () => {
   const first = turn("a1", "conversation-a", "first");

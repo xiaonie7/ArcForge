@@ -80,23 +80,18 @@ mod tests {
         assert!(saved.secret_configured);
         assert!(saved.channel_token_configured);
         assert!(!saved.enabled);
-        assert_eq!(saved.access_policy["rules"][0]["externalUserId"], "alice");
 
         let public = serde_json::to_value(&saved).expect("serialize public WeCom settings");
         assert!(public.get("secret").is_none());
         assert!(public.get("channelToken").is_none());
         assert!(public.get("secretUpdate").is_none());
         assert!(public.get("channelTokenUpdate").is_none());
+        assert!(public.get("accessPolicy").is_none());
 
         let runtime = load_wecom_runtime_settings(&conn).expect("load runtime WeCom settings");
         assert_eq!(runtime.secret, "aibot-secret");
         assert_eq!(runtime.channel_token, "channel-token");
         assert!(runtime.allow_group_messages);
-        assert_eq!(
-            serde_json::from_str::<Value>(&runtime.access_policy_json)
-                .expect("parse stored access policy")["rules"][0]["externalUserId"],
-            "alice"
-        );
 
         save_remote(
             &mut conn,
@@ -151,7 +146,10 @@ mod tests {
         assert!(enabled.enabled);
         assert!(enabled.secret_configured);
         assert!(enabled.channel_token_configured);
-        assert_eq!(enabled.access_policy["rules"][0]["externalUserId"], "alice");
+        assert!(serde_json::to_value(&enabled)
+            .expect("serialize enabled WeCom settings")
+            .get("accessPolicy")
+            .is_none());
 
         let cleared = save_wecom(
             &mut conn,
@@ -167,11 +165,10 @@ mod tests {
         assert!(!cleared.enabled);
         assert!(!cleared.secret_configured);
         assert!(cleared.channel_token_configured);
-        assert_eq!(cleared.access_policy["rules"][0]["externalUserId"], "alice");
     }
 
     #[test]
-    fn initialize_schema_migrates_wecom_access_policy_column() {
+    fn initialize_schema_does_not_create_wecom_access_policy_column() {
         let conn = Connection::open_in_memory().expect("open in-memory sqlite");
         conn.execute_batch(
             "CREATE TABLE wecom_settings (
@@ -198,7 +195,7 @@ mod tests {
         .expect("insert legacy WeCom settings");
 
         initialize_schema(&conn).expect("migrate WeCom schema");
-        assert!(table_columns(&conn, WECOM_SETTINGS_TABLE)
+        assert!(!table_columns(&conn, WECOM_SETTINGS_TABLE)
             .iter()
             .any(|column| column == "access_policy_json"));
         let columns = table_columns(&conn, WECOM_SETTINGS_TABLE);
@@ -207,6 +204,67 @@ mod tests {
         let migrated = load_wecom_runtime_settings(&conn).expect("load migrated WeCom settings");
         assert_eq!(migrated.gateway_mode, WecomGatewayMode::Local);
         assert_eq!(migrated.local_gateway_port, 18_780);
+    }
+
+    #[test]
+    fn wecom_save_ignores_and_preserves_legacy_access_policy_column() {
+        let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+        conn.execute_batch(
+            "CREATE TABLE wecom_settings (
+                config_id TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                bot_id TEXT NOT NULL DEFAULT '',
+                tenant_id TEXT NOT NULL DEFAULT '',
+                connector_id TEXT NOT NULL DEFAULT 'wecom-desktop',
+                allow_group_messages INTEGER NOT NULL DEFAULT 0,
+                access_policy_json TEXT NOT NULL DEFAULT '{\"rules\":[]}',
+                aibot_secret TEXT NOT NULL DEFAULT '',
+                channel_token TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );
+            INSERT INTO wecom_settings (
+                config_id, enabled, bot_id, tenant_id, connector_id,
+                allow_group_messages, access_policy_json, aibot_secret,
+                channel_token, updated_at
+            ) VALUES (
+                'default', 0, 'legacy-bot', 'legacy-tenant',
+                'legacy-connector', 0, '{\"rules\":[{\"externalUserId\":\"legacy-user\"}]}',
+                '', '', 0
+            );",
+        )
+        .expect("create legacy WeCom schema");
+        initialize_schema(&conn).expect("migrate legacy WeCom schema");
+
+        let saved = save_wecom(
+            &mut conn,
+            json!({
+                "enabled": false,
+                "gatewayMode": "local",
+                "localGatewayPort": 18780,
+                "botId": "bot-a",
+                "tenantId": "bot-a",
+                "connectorId": "wecom-desktop",
+                "allowGroupMessages": false,
+                "accessPolicy": { "rules": [{ "externalUserId": "ignored-user" }] }
+            }),
+        )
+        .expect("save WeCom settings over legacy schema");
+        assert!(serde_json::to_value(saved)
+            .expect("serialize public WeCom settings")
+            .get("accessPolicy")
+            .is_none());
+
+        let preserved = conn
+            .query_row(
+                "SELECT access_policy_json FROM wecom_settings WHERE config_id = 'default'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read preserved legacy policy");
+        assert_eq!(
+            serde_json::from_str::<Value>(&preserved).expect("parse preserved legacy policy"),
+            json!({ "rules": [{ "externalUserId": "legacy-user" }] })
+        );
     }
 
     #[test]
@@ -264,11 +322,8 @@ mod tests {
 
         let conn = Connection::open(&db_path).expect("reopen migrated settings database");
         let columns = table_columns(&conn, WECOM_SETTINGS_TABLE);
-        for column in [
-            "access_policy_json",
-            "gateway_mode",
-            "local_gateway_port",
-        ] {
+        assert!(!columns.iter().any(|column| column == "access_policy_json"));
+        for column in ["gateway_mode", "local_gateway_port"] {
             assert_eq!(
                 columns
                     .iter()

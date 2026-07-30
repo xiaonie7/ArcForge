@@ -1247,6 +1247,66 @@ func (*AgentServerFrame_Envelope) isAgentServerFrame_Payload() {}
 // ChannelInboundMessage contains only channel-authenticated message metadata.
 // Conversation ids, workdirs, roles, scopes, models and tools are intentionally
 // absent: the gateway and desktop policy layer resolve them from this identity.
+type ChannelInboundFile struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FileName      string                 `protobuf:"bytes,1,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
+	MimeType      string                 `protobuf:"bytes,2,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	Content       []byte                 `protobuf:"bytes,3,opt,name=content,proto3" json:"content,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelInboundFile) Reset() {
+	*x = ChannelInboundFile{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInboundFile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInboundFile) ProtoMessage() {}
+
+func (x *ChannelInboundFile) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInboundFile.ProtoReflect.Descriptor instead.
+func (*ChannelInboundFile) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ChannelInboundFile) GetFileName() string {
+	if x != nil {
+		return x.FileName
+	}
+	return ""
+}
+
+func (x *ChannelInboundFile) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *ChannelInboundFile) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
 type ChannelInboundMessage struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	ExternalMessageId string                 `protobuf:"bytes,1,opt,name=external_message_id,json=externalMessageId,proto3" json:"external_message_id,omitempty"`
@@ -1263,13 +1323,17 @@ type ChannelInboundMessage struct {
 	// Connector-owned opaque session id, isolated by channel user/chat. It
 	// changes on /new while the authenticated principal remains unchanged.
 	ChannelSessionId string `protobuf:"bytes,8,opt,name=channel_session_id,json=channelSessionId,proto3" json:"channel_session_id,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Connector-downloaded WeCom attachments. The gateway validates bounded
+	// inline bytes, then stages them through UploadReadableFiles before the chat
+	// command is accepted by the desktop runtime.
+	Files         []*ChannelInboundFile `protobuf:"bytes,9,rep,name=files,proto3" json:"files,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChannelInboundMessage) Reset() {
 	*x = ChannelInboundMessage{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[9]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1281,7 +1345,7 @@ func (x *ChannelInboundMessage) String() string {
 func (*ChannelInboundMessage) ProtoMessage() {}
 
 func (x *ChannelInboundMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[9]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1294,7 +1358,7 @@ func (x *ChannelInboundMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelInboundMessage.ProtoReflect.Descriptor instead.
 func (*ChannelInboundMessage) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{9}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ChannelInboundMessage) GetExternalMessageId() string {
@@ -1353,6 +1417,13 @@ func (x *ChannelInboundMessage) GetChannelSessionId() string {
 	return ""
 }
 
+func (x *ChannelInboundMessage) GetFiles() []*ChannelInboundFile {
+	if x != nil {
+		return x.Files
+	}
+	return nil
+}
+
 type ChannelAccepted struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	ExternalMessageId string                 `protobuf:"bytes,1,opt,name=external_message_id,json=externalMessageId,proto3" json:"external_message_id,omitempty"`
@@ -1365,7 +1436,7 @@ type ChannelAccepted struct {
 
 func (x *ChannelAccepted) Reset() {
 	*x = ChannelAccepted{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[10]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1377,7 +1448,7 @@ func (x *ChannelAccepted) String() string {
 func (*ChannelAccepted) ProtoMessage() {}
 
 func (x *ChannelAccepted) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[10]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1390,7 +1461,7 @@ func (x *ChannelAccepted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelAccepted.ProtoReflect.Descriptor instead.
 func (*ChannelAccepted) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{10}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ChannelAccepted) GetExternalMessageId() string {
@@ -1421,9 +1492,9 @@ func (x *ChannelAccepted) GetDeduped() bool {
 	return false
 }
 
-// ChannelDelta is the only streaming content exposed to a channel connector.
-// Tool calls, tool results, thinking and internal transcript events are never
-// forwarded on this link.
+// ChannelDelta exposes visible assistant text. Tool calls, thinking and
+// arbitrary tool results are never forwarded; only the separately validated
+// PresentFile artifact path below can produce ChannelFile frames.
 type ChannelDelta struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -1436,7 +1507,7 @@ type ChannelDelta struct {
 
 func (x *ChannelDelta) Reset() {
 	*x = ChannelDelta{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[11]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1448,7 +1519,7 @@ func (x *ChannelDelta) String() string {
 func (*ChannelDelta) ProtoMessage() {}
 
 func (x *ChannelDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[11]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1461,7 +1532,7 @@ func (x *ChannelDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelDelta.ProtoReflect.Descriptor instead.
 func (*ChannelDelta) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{11}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ChannelDelta) GetRunId() string {
@@ -1492,6 +1563,117 @@ func (x *ChannelDelta) GetText() string {
 	return ""
 }
 
+// ChannelFile carries one completed PresentFile artifact. File contents are
+// read by the desktop only after its workspace-relative path and all expected
+// metadata have been revalidated.
+type ChannelFile struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ConversationId string                 `protobuf:"bytes,2,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	Seq            int64                  `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
+	FileName       string                 `protobuf:"bytes,4,opt,name=file_name,json=fileName,proto3" json:"file_name,omitempty"`
+	MimeType       string                 `protobuf:"bytes,5,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
+	SizeBytes      uint64                 `protobuf:"varint,6,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	Content        []byte                 `protobuf:"bytes,7,opt,name=content,proto3" json:"content,omitempty"`
+	ErrorCode      string                 `protobuf:"bytes,8,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	Message        string                 `protobuf:"bytes,9,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ChannelFile) Reset() {
+	*x = ChannelFile{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelFile) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelFile) ProtoMessage() {}
+
+func (x *ChannelFile) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelFile.ProtoReflect.Descriptor instead.
+func (*ChannelFile) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ChannelFile) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ChannelFile) GetConversationId() string {
+	if x != nil {
+		return x.ConversationId
+	}
+	return ""
+}
+
+func (x *ChannelFile) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *ChannelFile) GetFileName() string {
+	if x != nil {
+		return x.FileName
+	}
+	return ""
+}
+
+func (x *ChannelFile) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
+func (x *ChannelFile) GetSizeBytes() uint64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *ChannelFile) GetContent() []byte {
+	if x != nil {
+		return x.Content
+	}
+	return nil
+}
+
+func (x *ChannelFile) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
+func (x *ChannelFile) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 type ChannelFinal struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -1505,7 +1687,7 @@ type ChannelFinal struct {
 
 func (x *ChannelFinal) Reset() {
 	*x = ChannelFinal{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[12]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1517,7 +1699,7 @@ func (x *ChannelFinal) String() string {
 func (*ChannelFinal) ProtoMessage() {}
 
 func (x *ChannelFinal) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[12]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1530,7 +1712,7 @@ func (x *ChannelFinal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelFinal.ProtoReflect.Descriptor instead.
 func (*ChannelFinal) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{12}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ChannelFinal) GetRunId() string {
@@ -1568,6 +1750,469 @@ func (x *ChannelFinal) GetMessage() string {
 	return ""
 }
 
+// The restricted channel exposes only AskUserQuestion's user-facing fields.
+// IDs are gateway-generated opaque aliases; desktop tool/question/option IDs
+// and labels never cross back from an untrusted channel answer.
+type ChannelInputOption struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Label         string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	Description   string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`
+	Recommended   bool                   `protobuf:"varint,4,opt,name=recommended,proto3" json:"recommended,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelInputOption) Reset() {
+	*x = ChannelInputOption{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInputOption) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInputOption) ProtoMessage() {}
+
+func (x *ChannelInputOption) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInputOption.ProtoReflect.Descriptor instead.
+func (*ChannelInputOption) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ChannelInputOption) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ChannelInputOption) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *ChannelInputOption) GetDescription() string {
+	if x != nil {
+		return x.Description
+	}
+	return ""
+}
+
+func (x *ChannelInputOption) GetRecommended() bool {
+	if x != nil {
+		return x.Recommended
+	}
+	return false
+}
+
+type ChannelInputQuestion struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Header        string                 `protobuf:"bytes,2,opt,name=header,proto3" json:"header,omitempty"`
+	Prompt        string                 `protobuf:"bytes,3,opt,name=prompt,proto3" json:"prompt,omitempty"`
+	Options       []*ChannelInputOption  `protobuf:"bytes,4,rep,name=options,proto3" json:"options,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelInputQuestion) Reset() {
+	*x = ChannelInputQuestion{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInputQuestion) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInputQuestion) ProtoMessage() {}
+
+func (x *ChannelInputQuestion) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInputQuestion.ProtoReflect.Descriptor instead.
+func (*ChannelInputQuestion) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *ChannelInputQuestion) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ChannelInputQuestion) GetHeader() string {
+	if x != nil {
+		return x.Header
+	}
+	return ""
+}
+
+func (x *ChannelInputQuestion) GetPrompt() string {
+	if x != nil {
+		return x.Prompt
+	}
+	return ""
+}
+
+func (x *ChannelInputQuestion) GetOptions() []*ChannelInputOption {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
+type ChannelInputRequest struct {
+	state          protoimpl.MessageState  `protogen:"open.v1"`
+	InteractionId  string                  `protobuf:"bytes,1,opt,name=interaction_id,json=interactionId,proto3" json:"interaction_id,omitempty"`
+	RunId          string                  `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ConversationId string                  `protobuf:"bytes,3,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	Seq            int64                   `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
+	DeadlineAtMs   int64                   `protobuf:"varint,5,opt,name=deadline_at_ms,json=deadlineAtMs,proto3" json:"deadline_at_ms,omitempty"`
+	Questions      []*ChannelInputQuestion `protobuf:"bytes,6,rep,name=questions,proto3" json:"questions,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *ChannelInputRequest) Reset() {
+	*x = ChannelInputRequest{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInputRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInputRequest) ProtoMessage() {}
+
+func (x *ChannelInputRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInputRequest.ProtoReflect.Descriptor instead.
+func (*ChannelInputRequest) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ChannelInputRequest) GetInteractionId() string {
+	if x != nil {
+		return x.InteractionId
+	}
+	return ""
+}
+
+func (x *ChannelInputRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *ChannelInputRequest) GetConversationId() string {
+	if x != nil {
+		return x.ConversationId
+	}
+	return ""
+}
+
+func (x *ChannelInputRequest) GetSeq() int64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *ChannelInputRequest) GetDeadlineAtMs() int64 {
+	if x != nil {
+		return x.DeadlineAtMs
+	}
+	return 0
+}
+
+func (x *ChannelInputRequest) GetQuestions() []*ChannelInputQuestion {
+	if x != nil {
+		return x.Questions
+	}
+	return nil
+}
+
+type ChannelInputAnswerSelection struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	QuestionId    string                 `protobuf:"bytes,1,opt,name=question_id,json=questionId,proto3" json:"question_id,omitempty"`
+	OptionId      string                 `protobuf:"bytes,2,opt,name=option_id,json=optionId,proto3" json:"option_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelInputAnswerSelection) Reset() {
+	*x = ChannelInputAnswerSelection{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInputAnswerSelection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInputAnswerSelection) ProtoMessage() {}
+
+func (x *ChannelInputAnswerSelection) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInputAnswerSelection.ProtoReflect.Descriptor instead.
+func (*ChannelInputAnswerSelection) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *ChannelInputAnswerSelection) GetQuestionId() string {
+	if x != nil {
+		return x.QuestionId
+	}
+	return ""
+}
+
+func (x *ChannelInputAnswerSelection) GetOptionId() string {
+	if x != nil {
+		return x.OptionId
+	}
+	return ""
+}
+
+type ChannelInputAnswer struct {
+	state         protoimpl.MessageState         `protogen:"open.v1"`
+	InteractionId string                         `protobuf:"bytes,1,opt,name=interaction_id,json=interactionId,proto3" json:"interaction_id,omitempty"`
+	Selections    []*ChannelInputAnswerSelection `protobuf:"bytes,2,rep,name=selections,proto3" json:"selections,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelInputAnswer) Reset() {
+	*x = ChannelInputAnswer{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInputAnswer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInputAnswer) ProtoMessage() {}
+
+func (x *ChannelInputAnswer) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInputAnswer.ProtoReflect.Descriptor instead.
+func (*ChannelInputAnswer) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *ChannelInputAnswer) GetInteractionId() string {
+	if x != nil {
+		return x.InteractionId
+	}
+	return ""
+}
+
+func (x *ChannelInputAnswer) GetSelections() []*ChannelInputAnswerSelection {
+	if x != nil {
+		return x.Selections
+	}
+	return nil
+}
+
+type ChannelInputAnswerResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	InteractionId string                 `protobuf:"bytes,1,opt,name=interaction_id,json=interactionId,proto3" json:"interaction_id,omitempty"`
+	Accepted      bool                   `protobuf:"varint,2,opt,name=accepted,proto3" json:"accepted,omitempty"`
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	Message       string                 `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelInputAnswerResult) Reset() {
+	*x = ChannelInputAnswerResult{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInputAnswerResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInputAnswerResult) ProtoMessage() {}
+
+func (x *ChannelInputAnswerResult) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInputAnswerResult.ProtoReflect.Descriptor instead.
+func (*ChannelInputAnswerResult) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *ChannelInputAnswerResult) GetInteractionId() string {
+	if x != nil {
+		return x.InteractionId
+	}
+	return ""
+}
+
+func (x *ChannelInputAnswerResult) GetAccepted() bool {
+	if x != nil {
+		return x.Accepted
+	}
+	return false
+}
+
+func (x *ChannelInputAnswerResult) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ChannelInputAnswerResult) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type ChannelInputResolved struct {
+	state         protoimpl.MessageState         `protogen:"open.v1"`
+	InteractionId string                         `protobuf:"bytes,1,opt,name=interaction_id,json=interactionId,proto3" json:"interaction_id,omitempty"`
+	Status        string                         `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Selections    []*ChannelInputAnswerSelection `protobuf:"bytes,3,rep,name=selections,proto3" json:"selections,omitempty"`
+	Message       string                         `protobuf:"bytes,4,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelInputResolved) Reset() {
+	*x = ChannelInputResolved{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelInputResolved) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelInputResolved) ProtoMessage() {}
+
+func (x *ChannelInputResolved) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelInputResolved.ProtoReflect.Descriptor instead.
+func (*ChannelInputResolved) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *ChannelInputResolved) GetInteractionId() string {
+	if x != nil {
+		return x.InteractionId
+	}
+	return ""
+}
+
+func (x *ChannelInputResolved) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ChannelInputResolved) GetSelections() []*ChannelInputAnswerSelection {
+	if x != nil {
+		return x.Selections
+	}
+	return nil
+}
+
+func (x *ChannelInputResolved) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
 type ChannelClientFrame struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -1576,6 +2221,7 @@ type ChannelClientFrame struct {
 	//	*ChannelClientFrame_Hello
 	//	*ChannelClientFrame_Inbound
 	//	*ChannelClientFrame_Pong
+	//	*ChannelClientFrame_InputAnswer
 	Payload       isChannelClientFrame_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1583,7 +2229,7 @@ type ChannelClientFrame struct {
 
 func (x *ChannelClientFrame) Reset() {
 	*x = ChannelClientFrame{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[13]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1595,7 +2241,7 @@ func (x *ChannelClientFrame) String() string {
 func (*ChannelClientFrame) ProtoMessage() {}
 
 func (x *ChannelClientFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[13]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1608,7 +2254,7 @@ func (x *ChannelClientFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelClientFrame.ProtoReflect.Descriptor instead.
 func (*ChannelClientFrame) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{13}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ChannelClientFrame) GetRequestId() string {
@@ -1652,6 +2298,15 @@ func (x *ChannelClientFrame) GetPong() *PongFrame {
 	return nil
 }
 
+func (x *ChannelClientFrame) GetInputAnswer() *ChannelInputAnswer {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelClientFrame_InputAnswer); ok {
+			return x.InputAnswer
+		}
+	}
+	return nil
+}
+
 type isChannelClientFrame_Payload interface {
 	isChannelClientFrame_Payload()
 }
@@ -1668,11 +2323,17 @@ type ChannelClientFrame_Pong struct {
 	Pong *PongFrame `protobuf:"bytes,4,opt,name=pong,proto3,oneof"`
 }
 
+type ChannelClientFrame_InputAnswer struct {
+	InputAnswer *ChannelInputAnswer `protobuf:"bytes,5,opt,name=input_answer,json=inputAnswer,proto3,oneof"`
+}
+
 func (*ChannelClientFrame_Hello) isChannelClientFrame_Payload() {}
 
 func (*ChannelClientFrame_Inbound) isChannelClientFrame_Payload() {}
 
 func (*ChannelClientFrame_Pong) isChannelClientFrame_Payload() {}
+
+func (*ChannelClientFrame_InputAnswer) isChannelClientFrame_Payload() {}
 
 type ChannelServerFrame struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -1685,6 +2346,10 @@ type ChannelServerFrame struct {
 	//	*ChannelServerFrame_Final
 	//	*ChannelServerFrame_LocalError
 	//	*ChannelServerFrame_Ping
+	//	*ChannelServerFrame_File
+	//	*ChannelServerFrame_InputRequest
+	//	*ChannelServerFrame_InputAnswerResult
+	//	*ChannelServerFrame_InputResolved
 	Payload       isChannelServerFrame_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1692,7 +2357,7 @@ type ChannelServerFrame struct {
 
 func (x *ChannelServerFrame) Reset() {
 	*x = ChannelServerFrame{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[14]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1704,7 +2369,7 @@ func (x *ChannelServerFrame) String() string {
 func (*ChannelServerFrame) ProtoMessage() {}
 
 func (x *ChannelServerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[14]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1717,7 +2382,7 @@ func (x *ChannelServerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChannelServerFrame.ProtoReflect.Descriptor instead.
 func (*ChannelServerFrame) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{14}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ChannelServerFrame) GetRequestId() string {
@@ -1788,6 +2453,42 @@ func (x *ChannelServerFrame) GetPing() *PingFrame {
 	return nil
 }
 
+func (x *ChannelServerFrame) GetFile() *ChannelFile {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelServerFrame_File); ok {
+			return x.File
+		}
+	}
+	return nil
+}
+
+func (x *ChannelServerFrame) GetInputRequest() *ChannelInputRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelServerFrame_InputRequest); ok {
+			return x.InputRequest
+		}
+	}
+	return nil
+}
+
+func (x *ChannelServerFrame) GetInputAnswerResult() *ChannelInputAnswerResult {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelServerFrame_InputAnswerResult); ok {
+			return x.InputAnswerResult
+		}
+	}
+	return nil
+}
+
+func (x *ChannelServerFrame) GetInputResolved() *ChannelInputResolved {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelServerFrame_InputResolved); ok {
+			return x.InputResolved
+		}
+	}
+	return nil
+}
+
 type isChannelServerFrame_Payload interface {
 	isChannelServerFrame_Payload()
 }
@@ -1816,6 +2517,22 @@ type ChannelServerFrame_Ping struct {
 	Ping *PingFrame `protobuf:"bytes,7,opt,name=ping,proto3,oneof"`
 }
 
+type ChannelServerFrame_File struct {
+	File *ChannelFile `protobuf:"bytes,8,opt,name=file,proto3,oneof"`
+}
+
+type ChannelServerFrame_InputRequest struct {
+	InputRequest *ChannelInputRequest `protobuf:"bytes,9,opt,name=input_request,json=inputRequest,proto3,oneof"`
+}
+
+type ChannelServerFrame_InputAnswerResult struct {
+	InputAnswerResult *ChannelInputAnswerResult `protobuf:"bytes,10,opt,name=input_answer_result,json=inputAnswerResult,proto3,oneof"`
+}
+
+type ChannelServerFrame_InputResolved struct {
+	InputResolved *ChannelInputResolved `protobuf:"bytes,11,opt,name=input_resolved,json=inputResolved,proto3,oneof"`
+}
+
 func (*ChannelServerFrame_Hello) isChannelServerFrame_Payload() {}
 
 func (*ChannelServerFrame_Accepted) isChannelServerFrame_Payload() {}
@@ -1827,6 +2544,14 @@ func (*ChannelServerFrame_Final) isChannelServerFrame_Payload() {}
 func (*ChannelServerFrame_LocalError) isChannelServerFrame_Payload() {}
 
 func (*ChannelServerFrame_Ping) isChannelServerFrame_Payload() {}
+
+func (*ChannelServerFrame_File) isChannelServerFrame_Payload() {}
+
+func (*ChannelServerFrame_InputRequest) isChannelServerFrame_Payload() {}
+
+func (*ChannelServerFrame_InputAnswerResult) isChannelServerFrame_Payload() {}
+
+func (*ChannelServerFrame_InputResolved) isChannelServerFrame_Payload() {}
 
 // TerminalClientFrame 为客户端（浏览器或桌面端）→ 网关方向的帧。
 type TerminalClientFrame struct {
@@ -1842,7 +2567,7 @@ type TerminalClientFrame struct {
 
 func (x *TerminalClientFrame) Reset() {
 	*x = TerminalClientFrame{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[15]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1854,7 +2579,7 @@ func (x *TerminalClientFrame) String() string {
 func (*TerminalClientFrame) ProtoMessage() {}
 
 func (x *TerminalClientFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[15]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1867,7 +2592,7 @@ func (x *TerminalClientFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalClientFrame.ProtoReflect.Descriptor instead.
 func (*TerminalClientFrame) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{15}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *TerminalClientFrame) GetPayload() isTerminalClientFrame_Payload {
@@ -1925,7 +2650,7 @@ type TerminalServerFrame struct {
 
 func (x *TerminalServerFrame) Reset() {
 	*x = TerminalServerFrame{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[16]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1937,7 +2662,7 @@ func (x *TerminalServerFrame) String() string {
 func (*TerminalServerFrame) ProtoMessage() {}
 
 func (x *TerminalServerFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[16]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1950,7 +2675,7 @@ func (x *TerminalServerFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TerminalServerFrame.ProtoReflect.Descriptor instead.
 func (*TerminalServerFrame) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{16}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *TerminalServerFrame) GetPayload() isTerminalServerFrame_Payload {
@@ -2003,7 +2728,7 @@ type StatusGetRequest struct {
 
 func (x *StatusGetRequest) Reset() {
 	*x = StatusGetRequest{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[17]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2015,7 +2740,7 @@ func (x *StatusGetRequest) String() string {
 func (*StatusGetRequest) ProtoMessage() {}
 
 func (x *StatusGetRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[17]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2028,7 +2753,7 @@ func (x *StatusGetRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusGetRequest.ProtoReflect.Descriptor instead.
 func (*StatusGetRequest) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{17}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{26}
 }
 
 // StatusEvent 镜像 session.Status 的 JSON 形状（字段一一对应）。
@@ -2053,7 +2778,7 @@ type StatusEvent struct {
 
 func (x *StatusEvent) Reset() {
 	*x = StatusEvent{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[18]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2065,7 +2790,7 @@ func (x *StatusEvent) String() string {
 func (*StatusEvent) ProtoMessage() {}
 
 func (x *StatusEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[18]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2078,7 +2803,7 @@ func (x *StatusEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusEvent.ProtoReflect.Descriptor instead.
 func (*StatusEvent) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{18}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *StatusEvent) GetOnline() bool {
@@ -2182,7 +2907,7 @@ type ChatPrepareRequest struct {
 
 func (x *ChatPrepareRequest) Reset() {
 	*x = ChatPrepareRequest{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[19]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2194,7 +2919,7 @@ func (x *ChatPrepareRequest) String() string {
 func (*ChatPrepareRequest) ProtoMessage() {}
 
 func (x *ChatPrepareRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[19]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2207,7 +2932,7 @@ func (x *ChatPrepareRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatPrepareRequest.ProtoReflect.Descriptor instead.
 func (*ChatPrepareRequest) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{19}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ChatPrepareRequest) GetReason() string {
@@ -2230,7 +2955,7 @@ type ChatSubscribeRequest struct {
 
 func (x *ChatSubscribeRequest) Reset() {
 	*x = ChatSubscribeRequest{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[20]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2242,7 +2967,7 @@ func (x *ChatSubscribeRequest) String() string {
 func (*ChatSubscribeRequest) ProtoMessage() {}
 
 func (x *ChatSubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[20]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2255,7 +2980,7 @@ func (x *ChatSubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatSubscribeRequest.ProtoReflect.Descriptor instead.
 func (*ChatSubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{20}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ChatSubscribeRequest) GetConversationId() string {
@@ -2299,7 +3024,7 @@ type ChatRunActivity struct {
 
 func (x *ChatRunActivity) Reset() {
 	*x = ChatRunActivity{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[21]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2311,7 +3036,7 @@ func (x *ChatRunActivity) String() string {
 func (*ChatRunActivity) ProtoMessage() {}
 
 func (x *ChatRunActivity) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[21]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2324,7 +3049,7 @@ func (x *ChatRunActivity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatRunActivity.ProtoReflect.Descriptor instead.
 func (*ChatRunActivity) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{21}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *ChatRunActivity) GetRunId() string {
@@ -2406,7 +3131,7 @@ type ChatRunSnapshot struct {
 
 func (x *ChatRunSnapshot) Reset() {
 	*x = ChatRunSnapshot{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[22]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2418,7 +3143,7 @@ func (x *ChatRunSnapshot) String() string {
 func (*ChatRunSnapshot) ProtoMessage() {}
 
 func (x *ChatRunSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[22]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2431,7 +3156,7 @@ func (x *ChatRunSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatRunSnapshot.ProtoReflect.Descriptor instead.
 func (*ChatRunSnapshot) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{22}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *ChatRunSnapshot) GetRunId() string {
@@ -2494,7 +3219,7 @@ type ChatSubscribeResult struct {
 
 func (x *ChatSubscribeResult) Reset() {
 	*x = ChatSubscribeResult{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[23]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2506,7 +3231,7 @@ func (x *ChatSubscribeResult) String() string {
 func (*ChatSubscribeResult) ProtoMessage() {}
 
 func (x *ChatSubscribeResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[23]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2519,7 +3244,7 @@ func (x *ChatSubscribeResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatSubscribeResult.ProtoReflect.Descriptor instead.
 func (*ChatSubscribeResult) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{23}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ChatSubscribeResult) GetConversationId() string {
@@ -2581,7 +3306,7 @@ type ChatUnsubscribeRequest struct {
 
 func (x *ChatUnsubscribeRequest) Reset() {
 	*x = ChatUnsubscribeRequest{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[24]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2593,7 +3318,7 @@ func (x *ChatUnsubscribeRequest) String() string {
 func (*ChatUnsubscribeRequest) ProtoMessage() {}
 
 func (x *ChatUnsubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[24]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2606,7 +3331,7 @@ func (x *ChatUnsubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatUnsubscribeRequest.ProtoReflect.Descriptor instead.
 func (*ChatUnsubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{24}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ChatUnsubscribeRequest) GetConversationId() string {
@@ -2625,7 +3350,7 @@ type ChatActivitiesRequest struct {
 
 func (x *ChatActivitiesRequest) Reset() {
 	*x = ChatActivitiesRequest{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[25]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2637,7 +3362,7 @@ func (x *ChatActivitiesRequest) String() string {
 func (*ChatActivitiesRequest) ProtoMessage() {}
 
 func (x *ChatActivitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[25]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2650,7 +3375,7 @@ func (x *ChatActivitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatActivitiesRequest.ProtoReflect.Descriptor instead.
 func (*ChatActivitiesRequest) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{25}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{34}
 }
 
 type ChatActivitiesResult struct {
@@ -2662,7 +3387,7 @@ type ChatActivitiesResult struct {
 
 func (x *ChatActivitiesResult) Reset() {
 	*x = ChatActivitiesResult{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[26]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2674,7 +3399,7 @@ func (x *ChatActivitiesResult) String() string {
 func (*ChatActivitiesResult) ProtoMessage() {}
 
 func (x *ChatActivitiesResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[26]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2687,7 +3412,7 @@ func (x *ChatActivitiesResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatActivitiesResult.ProtoReflect.Descriptor instead.
 func (*ChatActivitiesResult) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{26}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *ChatActivitiesResult) GetRunningConversations() []*ChatRunActivity {
@@ -2710,7 +3435,7 @@ type ChatStreamEvent struct {
 
 func (x *ChatStreamEvent) Reset() {
 	*x = ChatStreamEvent{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[27]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2722,7 +3447,7 @@ func (x *ChatStreamEvent) String() string {
 func (*ChatStreamEvent) ProtoMessage() {}
 
 func (x *ChatStreamEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[27]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2735,7 +3460,7 @@ func (x *ChatStreamEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatStreamEvent.ProtoReflect.Descriptor instead.
 func (*ChatStreamEvent) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{27}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *ChatStreamEvent) GetConversationId() string {
@@ -2772,7 +3497,7 @@ type ChatCommandAccepted struct {
 
 func (x *ChatCommandAccepted) Reset() {
 	*x = ChatCommandAccepted{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[28]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2784,7 +3509,7 @@ func (x *ChatCommandAccepted) String() string {
 func (*ChatCommandAccepted) ProtoMessage() {}
 
 func (x *ChatCommandAccepted) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[28]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2797,7 +3522,7 @@ func (x *ChatCommandAccepted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatCommandAccepted.ProtoReflect.Descriptor instead.
 func (*ChatCommandAccepted) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{28}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *ChatCommandAccepted) GetRunId() string {
@@ -2843,7 +3568,7 @@ type ChatCommandUpdate struct {
 
 func (x *ChatCommandUpdate) Reset() {
 	*x = ChatCommandUpdate{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[29]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2855,7 +3580,7 @@ func (x *ChatCommandUpdate) String() string {
 func (*ChatCommandUpdate) ProtoMessage() {}
 
 func (x *ChatCommandUpdate) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[29]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2868,7 +3593,7 @@ func (x *ChatCommandUpdate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatCommandUpdate.ProtoReflect.Descriptor instead.
 func (*ChatCommandUpdate) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{29}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *ChatCommandUpdate) GetRunId() string {
@@ -2923,7 +3648,7 @@ type ChatSubscriptionReset struct {
 
 func (x *ChatSubscriptionReset) Reset() {
 	*x = ChatSubscriptionReset{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[30]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2935,7 +3660,7 @@ func (x *ChatSubscriptionReset) String() string {
 func (*ChatSubscriptionReset) ProtoMessage() {}
 
 func (x *ChatSubscriptionReset) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[30]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2948,7 +3673,7 @@ func (x *ChatSubscriptionReset) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatSubscriptionReset.ProtoReflect.Descriptor instead.
 func (*ChatSubscriptionReset) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{30}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *ChatSubscriptionReset) GetConversationId() string {
@@ -2970,7 +3695,7 @@ type ChatCancelResult struct {
 
 func (x *ChatCancelResult) Reset() {
 	*x = ChatCancelResult{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[31]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2982,7 +3707,7 @@ func (x *ChatCancelResult) String() string {
 func (*ChatCancelResult) ProtoMessage() {}
 
 func (x *ChatCancelResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[31]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2995,7 +3720,7 @@ func (x *ChatCancelResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatCancelResult.ProtoReflect.Descriptor instead.
 func (*ChatCancelResult) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{31}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *ChatCancelResult) GetOk() bool {
@@ -3035,7 +3760,7 @@ type ChatActivityEvent struct {
 
 func (x *ChatActivityEvent) Reset() {
 	*x = ChatActivityEvent{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[32]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3047,7 +3772,7 @@ func (x *ChatActivityEvent) String() string {
 func (*ChatActivityEvent) ProtoMessage() {}
 
 func (x *ChatActivityEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[32]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3060,7 +3785,7 @@ func (x *ChatActivityEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChatActivityEvent.ProtoReflect.Descriptor instead.
 func (*ChatActivityEvent) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{32}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *ChatActivityEvent) GetConversationId() string {
@@ -3122,7 +3847,7 @@ type WorkspaceSubscribeRequest struct {
 
 func (x *WorkspaceSubscribeRequest) Reset() {
 	*x = WorkspaceSubscribeRequest{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[33]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3134,7 +3859,7 @@ func (x *WorkspaceSubscribeRequest) String() string {
 func (*WorkspaceSubscribeRequest) ProtoMessage() {}
 
 func (x *WorkspaceSubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[33]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3147,7 +3872,7 @@ func (x *WorkspaceSubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceSubscribeRequest.ProtoReflect.Descriptor instead.
 func (*WorkspaceSubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{33}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{42}
 }
 
 func (x *WorkspaceSubscribeRequest) GetWorkdir() string {
@@ -3167,7 +3892,7 @@ type WorkspaceUnsubscribeRequest struct {
 
 func (x *WorkspaceUnsubscribeRequest) Reset() {
 	*x = WorkspaceUnsubscribeRequest{}
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[34]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3179,7 +3904,7 @@ func (x *WorkspaceUnsubscribeRequest) String() string {
 func (*WorkspaceUnsubscribeRequest) ProtoMessage() {}
 
 func (x *WorkspaceUnsubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_v2_gateway_ws_proto_msgTypes[34]
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3192,7 +3917,7 @@ func (x *WorkspaceUnsubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceUnsubscribeRequest.ProtoReflect.Descriptor instead.
 func (*WorkspaceUnsubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{34}
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *WorkspaceUnsubscribeRequest) GetWorkdir() string {
@@ -3289,7 +4014,11 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x10AgentServerFrame\x129\n" +
 	"\x05hello\x18\x01 \x01(\v2!.liveagent.gateway.v2.ServerHelloH\x00R\x05hello\x12C\n" +
 	"\benvelope\x18\x02 \x01(\v2%.liveagent.gateway.v1.GatewayEnvelopeH\x00R\benvelopeB\t\n" +
-	"\apayload\"\xa1\x02\n" +
+	"\apayload\"h\n" +
+	"\x12ChannelInboundFile\x12\x1b\n" +
+	"\tfile_name\x18\x01 \x01(\tR\bfileName\x12\x1b\n" +
+	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x18\n" +
+	"\acontent\x18\x03 \x01(\fR\acontent\"\xe1\x02\n" +
 	"\x15ChannelInboundMessage\x12.\n" +
 	"\x13external_message_id\x18\x01 \x01(\tR\x11externalMessageId\x12(\n" +
 	"\x10external_user_id\x18\x02 \x01(\tR\x0eexternalUserId\x12\x17\n" +
@@ -3298,7 +4027,8 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x04text\x18\x05 \x01(\tR\x04text\x12\x1c\n" +
 	"\ttimestamp\x18\x06 \x01(\x03R\ttimestamp\x12\x18\n" +
 	"\acommand\x18\a \x01(\tR\acommand\x12,\n" +
-	"\x12channel_session_id\x18\b \x01(\tR\x10channelSessionId\"\x9b\x01\n" +
+	"\x12channel_session_id\x18\b \x01(\tR\x10channelSessionId\x12>\n" +
+	"\x05files\x18\t \x03(\v2(.liveagent.gateway.v2.ChannelInboundFileR\x05files\"\x9b\x01\n" +
 	"\x0fChannelAccepted\x12.\n" +
 	"\x13external_message_id\x18\x01 \x01(\tR\x11externalMessageId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12'\n" +
@@ -3308,21 +4038,72 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12'\n" +
 	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x12\x10\n" +
 	"\x03seq\x18\x03 \x01(\x03R\x03seq\x12\x12\n" +
-	"\x04text\x18\x04 \x01(\tR\x04text\"\x9f\x01\n" +
+	"\x04text\x18\x04 \x01(\tR\x04text\"\x8b\x02\n" +
+	"\vChannelFile\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12'\n" +
+	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x12\x10\n" +
+	"\x03seq\x18\x03 \x01(\x03R\x03seq\x12\x1b\n" +
+	"\tfile_name\x18\x04 \x01(\tR\bfileName\x12\x1b\n" +
+	"\tmime_type\x18\x05 \x01(\tR\bmimeType\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x06 \x01(\x04R\tsizeBytes\x12\x18\n" +
+	"\acontent\x18\a \x01(\fR\acontent\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\b \x01(\tR\terrorCode\x12\x18\n" +
+	"\amessage\x18\t \x01(\tR\amessage\"\x9f\x01\n" +
 	"\fChannelFinal\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12'\n" +
 	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x12\x16\n" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12\x1d\n" +
 	"\n" +
 	"error_code\x18\x04 \x01(\tR\terrorCode\x12\x18\n" +
-	"\amessage\x18\x05 \x01(\tR\amessage\"\xf9\x01\n" +
+	"\amessage\x18\x05 \x01(\tR\amessage\"~\n" +
+	"\x12ChannelInputOption\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12 \n" +
+	"\vdescription\x18\x03 \x01(\tR\vdescription\x12 \n" +
+	"\vrecommended\x18\x04 \x01(\bR\vrecommended\"\x9a\x01\n" +
+	"\x14ChannelInputQuestion\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x16\n" +
+	"\x06header\x18\x02 \x01(\tR\x06header\x12\x16\n" +
+	"\x06prompt\x18\x03 \x01(\tR\x06prompt\x12B\n" +
+	"\aoptions\x18\x04 \x03(\v2(.liveagent.gateway.v2.ChannelInputOptionR\aoptions\"\xfe\x01\n" +
+	"\x13ChannelInputRequest\x12%\n" +
+	"\x0einteraction_id\x18\x01 \x01(\tR\rinteractionId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12'\n" +
+	"\x0fconversation_id\x18\x03 \x01(\tR\x0econversationId\x12\x10\n" +
+	"\x03seq\x18\x04 \x01(\x03R\x03seq\x12$\n" +
+	"\x0edeadline_at_ms\x18\x05 \x01(\x03R\fdeadlineAtMs\x12H\n" +
+	"\tquestions\x18\x06 \x03(\v2*.liveagent.gateway.v2.ChannelInputQuestionR\tquestions\"[\n" +
+	"\x1bChannelInputAnswerSelection\x12\x1f\n" +
+	"\vquestion_id\x18\x01 \x01(\tR\n" +
+	"questionId\x12\x1b\n" +
+	"\toption_id\x18\x02 \x01(\tR\boptionId\"\x8e\x01\n" +
+	"\x12ChannelInputAnswer\x12%\n" +
+	"\x0einteraction_id\x18\x01 \x01(\tR\rinteractionId\x12Q\n" +
+	"\n" +
+	"selections\x18\x02 \x03(\v21.liveagent.gateway.v2.ChannelInputAnswerSelectionR\n" +
+	"selections\"\x8f\x01\n" +
+	"\x18ChannelInputAnswerResult\x12%\n" +
+	"\x0einteraction_id\x18\x01 \x01(\tR\rinteractionId\x12\x1a\n" +
+	"\baccepted\x18\x02 \x01(\bR\baccepted\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xc2\x01\n" +
+	"\x14ChannelInputResolved\x12%\n" +
+	"\x0einteraction_id\x18\x01 \x01(\tR\rinteractionId\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12Q\n" +
+	"\n" +
+	"selections\x18\x03 \x03(\v21.liveagent.gateway.v2.ChannelInputAnswerSelectionR\n" +
+	"selections\x12\x18\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xc8\x02\n" +
 	"\x12ChannelClientFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x129\n" +
 	"\x05hello\x18\x02 \x01(\v2!.liveagent.gateway.v2.ClientHelloH\x00R\x05hello\x12G\n" +
 	"\ainbound\x18\x03 \x01(\v2+.liveagent.gateway.v2.ChannelInboundMessageH\x00R\ainbound\x125\n" +
-	"\x04pong\x18\x04 \x01(\v2\x1f.liveagent.gateway.v2.PongFrameH\x00R\x04pongB\t\n" +
-	"\apayload\"\xb5\x03\n" +
+	"\x04pong\x18\x04 \x01(\v2\x1f.liveagent.gateway.v2.PongFrameH\x00R\x04pong\x12M\n" +
+	"\finput_answer\x18\x05 \x01(\v2(.liveagent.gateway.v2.ChannelInputAnswerH\x00R\vinputAnswerB\t\n" +
+	"\apayload\"\xf7\x05\n" +
 	"\x12ChannelServerFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x129\n" +
@@ -3332,7 +4113,12 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x05final\x18\x05 \x01(\v2\".liveagent.gateway.v2.ChannelFinalH\x00R\x05final\x12F\n" +
 	"\vlocal_error\x18\x06 \x01(\v2#.liveagent.gateway.v1.ErrorResponseH\x00R\n" +
 	"localError\x125\n" +
-	"\x04ping\x18\a \x01(\v2\x1f.liveagent.gateway.v2.PingFrameH\x00R\x04pingB\t\n" +
+	"\x04ping\x18\a \x01(\v2\x1f.liveagent.gateway.v2.PingFrameH\x00R\x04ping\x127\n" +
+	"\x04file\x18\b \x01(\v2!.liveagent.gateway.v2.ChannelFileH\x00R\x04file\x12P\n" +
+	"\rinput_request\x18\t \x01(\v2).liveagent.gateway.v2.ChannelInputRequestH\x00R\finputRequest\x12`\n" +
+	"\x13input_answer_result\x18\n" +
+	" \x01(\v2..liveagent.gateway.v2.ChannelInputAnswerResultH\x00R\x11inputAnswerResult\x12S\n" +
+	"\x0einput_resolved\x18\v \x01(\v2*.liveagent.gateway.v2.ChannelInputResolvedH\x00R\rinputResolvedB\t\n" +
 	"\apayload\"\x9e\x01\n" +
 	"\x13TerminalClientFrame\x129\n" +
 	"\x05hello\x18\x01 \x01(\v2!.liveagent.gateway.v2.ClientHelloH\x00R\x05hello\x12A\n" +
@@ -3456,7 +4242,7 @@ func file_proto_v2_gateway_ws_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_v2_gateway_ws_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_v2_gateway_ws_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
+var file_proto_v2_gateway_ws_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
 var file_proto_v2_gateway_ws_proto_goTypes = []any{
 	(ClientRole)(0),                     // 0: liveagent.gateway.v2.ClientRole
 	(*ClientHello)(nil),                 // 1: liveagent.gateway.v2.ClientHello
@@ -3468,106 +4254,125 @@ var file_proto_v2_gateway_ws_proto_goTypes = []any{
 	(*WebServerFrame)(nil),              // 7: liveagent.gateway.v2.WebServerFrame
 	(*AgentClientFrame)(nil),            // 8: liveagent.gateway.v2.AgentClientFrame
 	(*AgentServerFrame)(nil),            // 9: liveagent.gateway.v2.AgentServerFrame
-	(*ChannelInboundMessage)(nil),       // 10: liveagent.gateway.v2.ChannelInboundMessage
-	(*ChannelAccepted)(nil),             // 11: liveagent.gateway.v2.ChannelAccepted
-	(*ChannelDelta)(nil),                // 12: liveagent.gateway.v2.ChannelDelta
-	(*ChannelFinal)(nil),                // 13: liveagent.gateway.v2.ChannelFinal
-	(*ChannelClientFrame)(nil),          // 14: liveagent.gateway.v2.ChannelClientFrame
-	(*ChannelServerFrame)(nil),          // 15: liveagent.gateway.v2.ChannelServerFrame
-	(*TerminalClientFrame)(nil),         // 16: liveagent.gateway.v2.TerminalClientFrame
-	(*TerminalServerFrame)(nil),         // 17: liveagent.gateway.v2.TerminalServerFrame
-	(*StatusGetRequest)(nil),            // 18: liveagent.gateway.v2.StatusGetRequest
-	(*StatusEvent)(nil),                 // 19: liveagent.gateway.v2.StatusEvent
-	(*ChatPrepareRequest)(nil),          // 20: liveagent.gateway.v2.ChatPrepareRequest
-	(*ChatSubscribeRequest)(nil),        // 21: liveagent.gateway.v2.ChatSubscribeRequest
-	(*ChatRunActivity)(nil),             // 22: liveagent.gateway.v2.ChatRunActivity
-	(*ChatRunSnapshot)(nil),             // 23: liveagent.gateway.v2.ChatRunSnapshot
-	(*ChatSubscribeResult)(nil),         // 24: liveagent.gateway.v2.ChatSubscribeResult
-	(*ChatUnsubscribeRequest)(nil),      // 25: liveagent.gateway.v2.ChatUnsubscribeRequest
-	(*ChatActivitiesRequest)(nil),       // 26: liveagent.gateway.v2.ChatActivitiesRequest
-	(*ChatActivitiesResult)(nil),        // 27: liveagent.gateway.v2.ChatActivitiesResult
-	(*ChatStreamEvent)(nil),             // 28: liveagent.gateway.v2.ChatStreamEvent
-	(*ChatCommandAccepted)(nil),         // 29: liveagent.gateway.v2.ChatCommandAccepted
-	(*ChatCommandUpdate)(nil),           // 30: liveagent.gateway.v2.ChatCommandUpdate
-	(*ChatSubscriptionReset)(nil),       // 31: liveagent.gateway.v2.ChatSubscriptionReset
-	(*ChatCancelResult)(nil),            // 32: liveagent.gateway.v2.ChatCancelResult
-	(*ChatActivityEvent)(nil),           // 33: liveagent.gateway.v2.ChatActivityEvent
-	(*WorkspaceSubscribeRequest)(nil),   // 34: liveagent.gateway.v2.WorkspaceSubscribeRequest
-	(*WorkspaceUnsubscribeRequest)(nil), // 35: liveagent.gateway.v2.WorkspaceUnsubscribeRequest
-	(*v1.GatewayEnvelope)(nil),          // 36: liveagent.gateway.v1.GatewayEnvelope
-	(*v1.ChatCommandRequest)(nil),       // 37: liveagent.gateway.v1.ChatCommandRequest
-	(*v1.AgentEnvelope)(nil),            // 38: liveagent.gateway.v1.AgentEnvelope
-	(*v1.ErrorResponse)(nil),            // 39: liveagent.gateway.v1.ErrorResponse
-	(*v1.HistorySyncEvent)(nil),         // 40: liveagent.gateway.v1.HistorySyncEvent
-	(*v1.SettingsSyncEvent)(nil),        // 41: liveagent.gateway.v1.SettingsSyncEvent
-	(*v1.TerminalEvent)(nil),            // 42: liveagent.gateway.v1.TerminalEvent
-	(*v1.SftpEvent)(nil),                // 43: liveagent.gateway.v1.SftpEvent
-	(*v1.ChatQueueEvent)(nil),           // 44: liveagent.gateway.v1.ChatQueueEvent
-	(*v1.TunnelStateSnapshot)(nil),      // 45: liveagent.gateway.v1.TunnelStateSnapshot
-	(*v1.ManagedProcessSnapshot)(nil),   // 46: liveagent.gateway.v1.ManagedProcessSnapshot
-	(*v1.WorkspaceActivityEvent)(nil),   // 47: liveagent.gateway.v1.WorkspaceActivityEvent
-	(*v1.TerminalStreamFrame)(nil),      // 48: liveagent.gateway.v1.TerminalStreamFrame
+	(*ChannelInboundFile)(nil),          // 10: liveagent.gateway.v2.ChannelInboundFile
+	(*ChannelInboundMessage)(nil),       // 11: liveagent.gateway.v2.ChannelInboundMessage
+	(*ChannelAccepted)(nil),             // 12: liveagent.gateway.v2.ChannelAccepted
+	(*ChannelDelta)(nil),                // 13: liveagent.gateway.v2.ChannelDelta
+	(*ChannelFile)(nil),                 // 14: liveagent.gateway.v2.ChannelFile
+	(*ChannelFinal)(nil),                // 15: liveagent.gateway.v2.ChannelFinal
+	(*ChannelInputOption)(nil),          // 16: liveagent.gateway.v2.ChannelInputOption
+	(*ChannelInputQuestion)(nil),        // 17: liveagent.gateway.v2.ChannelInputQuestion
+	(*ChannelInputRequest)(nil),         // 18: liveagent.gateway.v2.ChannelInputRequest
+	(*ChannelInputAnswerSelection)(nil), // 19: liveagent.gateway.v2.ChannelInputAnswerSelection
+	(*ChannelInputAnswer)(nil),          // 20: liveagent.gateway.v2.ChannelInputAnswer
+	(*ChannelInputAnswerResult)(nil),    // 21: liveagent.gateway.v2.ChannelInputAnswerResult
+	(*ChannelInputResolved)(nil),        // 22: liveagent.gateway.v2.ChannelInputResolved
+	(*ChannelClientFrame)(nil),          // 23: liveagent.gateway.v2.ChannelClientFrame
+	(*ChannelServerFrame)(nil),          // 24: liveagent.gateway.v2.ChannelServerFrame
+	(*TerminalClientFrame)(nil),         // 25: liveagent.gateway.v2.TerminalClientFrame
+	(*TerminalServerFrame)(nil),         // 26: liveagent.gateway.v2.TerminalServerFrame
+	(*StatusGetRequest)(nil),            // 27: liveagent.gateway.v2.StatusGetRequest
+	(*StatusEvent)(nil),                 // 28: liveagent.gateway.v2.StatusEvent
+	(*ChatPrepareRequest)(nil),          // 29: liveagent.gateway.v2.ChatPrepareRequest
+	(*ChatSubscribeRequest)(nil),        // 30: liveagent.gateway.v2.ChatSubscribeRequest
+	(*ChatRunActivity)(nil),             // 31: liveagent.gateway.v2.ChatRunActivity
+	(*ChatRunSnapshot)(nil),             // 32: liveagent.gateway.v2.ChatRunSnapshot
+	(*ChatSubscribeResult)(nil),         // 33: liveagent.gateway.v2.ChatSubscribeResult
+	(*ChatUnsubscribeRequest)(nil),      // 34: liveagent.gateway.v2.ChatUnsubscribeRequest
+	(*ChatActivitiesRequest)(nil),       // 35: liveagent.gateway.v2.ChatActivitiesRequest
+	(*ChatActivitiesResult)(nil),        // 36: liveagent.gateway.v2.ChatActivitiesResult
+	(*ChatStreamEvent)(nil),             // 37: liveagent.gateway.v2.ChatStreamEvent
+	(*ChatCommandAccepted)(nil),         // 38: liveagent.gateway.v2.ChatCommandAccepted
+	(*ChatCommandUpdate)(nil),           // 39: liveagent.gateway.v2.ChatCommandUpdate
+	(*ChatSubscriptionReset)(nil),       // 40: liveagent.gateway.v2.ChatSubscriptionReset
+	(*ChatCancelResult)(nil),            // 41: liveagent.gateway.v2.ChatCancelResult
+	(*ChatActivityEvent)(nil),           // 42: liveagent.gateway.v2.ChatActivityEvent
+	(*WorkspaceSubscribeRequest)(nil),   // 43: liveagent.gateway.v2.WorkspaceSubscribeRequest
+	(*WorkspaceUnsubscribeRequest)(nil), // 44: liveagent.gateway.v2.WorkspaceUnsubscribeRequest
+	(*v1.GatewayEnvelope)(nil),          // 45: liveagent.gateway.v1.GatewayEnvelope
+	(*v1.ChatCommandRequest)(nil),       // 46: liveagent.gateway.v1.ChatCommandRequest
+	(*v1.AgentEnvelope)(nil),            // 47: liveagent.gateway.v1.AgentEnvelope
+	(*v1.ErrorResponse)(nil),            // 48: liveagent.gateway.v1.ErrorResponse
+	(*v1.HistorySyncEvent)(nil),         // 49: liveagent.gateway.v1.HistorySyncEvent
+	(*v1.SettingsSyncEvent)(nil),        // 50: liveagent.gateway.v1.SettingsSyncEvent
+	(*v1.TerminalEvent)(nil),            // 51: liveagent.gateway.v1.TerminalEvent
+	(*v1.SftpEvent)(nil),                // 52: liveagent.gateway.v1.SftpEvent
+	(*v1.ChatQueueEvent)(nil),           // 53: liveagent.gateway.v1.ChatQueueEvent
+	(*v1.TunnelStateSnapshot)(nil),      // 54: liveagent.gateway.v1.TunnelStateSnapshot
+	(*v1.ManagedProcessSnapshot)(nil),   // 55: liveagent.gateway.v1.ManagedProcessSnapshot
+	(*v1.WorkspaceActivityEvent)(nil),   // 56: liveagent.gateway.v1.WorkspaceActivityEvent
+	(*v1.TerminalStreamFrame)(nil),      // 57: liveagent.gateway.v1.TerminalStreamFrame
 }
 var file_proto_v2_gateway_ws_proto_depIdxs = []int32{
 	0,  // 0: liveagent.gateway.v2.ClientHello.role:type_name -> liveagent.gateway.v2.ClientRole
 	1,  // 1: liveagent.gateway.v2.WebClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
-	36, // 2: liveagent.gateway.v2.WebClientFrame.agent_request:type_name -> liveagent.gateway.v1.GatewayEnvelope
-	18, // 3: liveagent.gateway.v2.WebClientFrame.status_get:type_name -> liveagent.gateway.v2.StatusGetRequest
-	37, // 4: liveagent.gateway.v2.WebClientFrame.chat_command:type_name -> liveagent.gateway.v1.ChatCommandRequest
-	20, // 5: liveagent.gateway.v2.WebClientFrame.chat_prepare:type_name -> liveagent.gateway.v2.ChatPrepareRequest
-	21, // 6: liveagent.gateway.v2.WebClientFrame.chat_subscribe:type_name -> liveagent.gateway.v2.ChatSubscribeRequest
-	25, // 7: liveagent.gateway.v2.WebClientFrame.chat_unsubscribe:type_name -> liveagent.gateway.v2.ChatUnsubscribeRequest
-	26, // 8: liveagent.gateway.v2.WebClientFrame.chat_activities:type_name -> liveagent.gateway.v2.ChatActivitiesRequest
-	34, // 9: liveagent.gateway.v2.WebClientFrame.workspace_subscribe:type_name -> liveagent.gateway.v2.WorkspaceSubscribeRequest
-	35, // 10: liveagent.gateway.v2.WebClientFrame.workspace_unsubscribe:type_name -> liveagent.gateway.v2.WorkspaceUnsubscribeRequest
+	45, // 2: liveagent.gateway.v2.WebClientFrame.agent_request:type_name -> liveagent.gateway.v1.GatewayEnvelope
+	27, // 3: liveagent.gateway.v2.WebClientFrame.status_get:type_name -> liveagent.gateway.v2.StatusGetRequest
+	46, // 4: liveagent.gateway.v2.WebClientFrame.chat_command:type_name -> liveagent.gateway.v1.ChatCommandRequest
+	29, // 5: liveagent.gateway.v2.WebClientFrame.chat_prepare:type_name -> liveagent.gateway.v2.ChatPrepareRequest
+	30, // 6: liveagent.gateway.v2.WebClientFrame.chat_subscribe:type_name -> liveagent.gateway.v2.ChatSubscribeRequest
+	34, // 7: liveagent.gateway.v2.WebClientFrame.chat_unsubscribe:type_name -> liveagent.gateway.v2.ChatUnsubscribeRequest
+	35, // 8: liveagent.gateway.v2.WebClientFrame.chat_activities:type_name -> liveagent.gateway.v2.ChatActivitiesRequest
+	43, // 9: liveagent.gateway.v2.WebClientFrame.workspace_subscribe:type_name -> liveagent.gateway.v2.WorkspaceSubscribeRequest
+	44, // 10: liveagent.gateway.v2.WebClientFrame.workspace_unsubscribe:type_name -> liveagent.gateway.v2.WorkspaceUnsubscribeRequest
 	4,  // 11: liveagent.gateway.v2.WebClientFrame.pong:type_name -> liveagent.gateway.v2.PongFrame
 	2,  // 12: liveagent.gateway.v2.WebServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	38, // 13: liveagent.gateway.v2.WebServerFrame.agent_response:type_name -> liveagent.gateway.v1.AgentEnvelope
-	39, // 14: liveagent.gateway.v2.WebServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
+	47, // 13: liveagent.gateway.v2.WebServerFrame.agent_response:type_name -> liveagent.gateway.v1.AgentEnvelope
+	48, // 14: liveagent.gateway.v2.WebServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
 	3,  // 15: liveagent.gateway.v2.WebServerFrame.ping:type_name -> liveagent.gateway.v2.PingFrame
-	19, // 16: liveagent.gateway.v2.WebServerFrame.status:type_name -> liveagent.gateway.v2.StatusEvent
-	24, // 17: liveagent.gateway.v2.WebServerFrame.chat_subscribed:type_name -> liveagent.gateway.v2.ChatSubscribeResult
-	29, // 18: liveagent.gateway.v2.WebServerFrame.chat_accepted:type_name -> liveagent.gateway.v2.ChatCommandAccepted
-	27, // 19: liveagent.gateway.v2.WebServerFrame.chat_activities:type_name -> liveagent.gateway.v2.ChatActivitiesResult
-	28, // 20: liveagent.gateway.v2.WebServerFrame.chat_event:type_name -> liveagent.gateway.v2.ChatStreamEvent
-	30, // 21: liveagent.gateway.v2.WebServerFrame.chat_command_update:type_name -> liveagent.gateway.v2.ChatCommandUpdate
-	31, // 22: liveagent.gateway.v2.WebServerFrame.chat_subscription_reset:type_name -> liveagent.gateway.v2.ChatSubscriptionReset
-	33, // 23: liveagent.gateway.v2.WebServerFrame.chat_activity:type_name -> liveagent.gateway.v2.ChatActivityEvent
+	28, // 16: liveagent.gateway.v2.WebServerFrame.status:type_name -> liveagent.gateway.v2.StatusEvent
+	33, // 17: liveagent.gateway.v2.WebServerFrame.chat_subscribed:type_name -> liveagent.gateway.v2.ChatSubscribeResult
+	38, // 18: liveagent.gateway.v2.WebServerFrame.chat_accepted:type_name -> liveagent.gateway.v2.ChatCommandAccepted
+	36, // 19: liveagent.gateway.v2.WebServerFrame.chat_activities:type_name -> liveagent.gateway.v2.ChatActivitiesResult
+	37, // 20: liveagent.gateway.v2.WebServerFrame.chat_event:type_name -> liveagent.gateway.v2.ChatStreamEvent
+	39, // 21: liveagent.gateway.v2.WebServerFrame.chat_command_update:type_name -> liveagent.gateway.v2.ChatCommandUpdate
+	40, // 22: liveagent.gateway.v2.WebServerFrame.chat_subscription_reset:type_name -> liveagent.gateway.v2.ChatSubscriptionReset
+	42, // 23: liveagent.gateway.v2.WebServerFrame.chat_activity:type_name -> liveagent.gateway.v2.ChatActivityEvent
 	5,  // 24: liveagent.gateway.v2.WebServerFrame.ack:type_name -> liveagent.gateway.v2.AckResult
-	32, // 25: liveagent.gateway.v2.WebServerFrame.chat_cancelled:type_name -> liveagent.gateway.v2.ChatCancelResult
-	40, // 26: liveagent.gateway.v2.WebServerFrame.history_event:type_name -> liveagent.gateway.v1.HistorySyncEvent
-	41, // 27: liveagent.gateway.v2.WebServerFrame.settings_event:type_name -> liveagent.gateway.v1.SettingsSyncEvent
-	42, // 28: liveagent.gateway.v2.WebServerFrame.terminal_event:type_name -> liveagent.gateway.v1.TerminalEvent
-	43, // 29: liveagent.gateway.v2.WebServerFrame.sftp_event:type_name -> liveagent.gateway.v1.SftpEvent
-	44, // 30: liveagent.gateway.v2.WebServerFrame.chat_queue_event:type_name -> liveagent.gateway.v1.ChatQueueEvent
-	45, // 31: liveagent.gateway.v2.WebServerFrame.tunnel_state:type_name -> liveagent.gateway.v1.TunnelStateSnapshot
-	46, // 32: liveagent.gateway.v2.WebServerFrame.process_state:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
-	47, // 33: liveagent.gateway.v2.WebServerFrame.workspace_activity:type_name -> liveagent.gateway.v1.WorkspaceActivityEvent
+	41, // 25: liveagent.gateway.v2.WebServerFrame.chat_cancelled:type_name -> liveagent.gateway.v2.ChatCancelResult
+	49, // 26: liveagent.gateway.v2.WebServerFrame.history_event:type_name -> liveagent.gateway.v1.HistorySyncEvent
+	50, // 27: liveagent.gateway.v2.WebServerFrame.settings_event:type_name -> liveagent.gateway.v1.SettingsSyncEvent
+	51, // 28: liveagent.gateway.v2.WebServerFrame.terminal_event:type_name -> liveagent.gateway.v1.TerminalEvent
+	52, // 29: liveagent.gateway.v2.WebServerFrame.sftp_event:type_name -> liveagent.gateway.v1.SftpEvent
+	53, // 30: liveagent.gateway.v2.WebServerFrame.chat_queue_event:type_name -> liveagent.gateway.v1.ChatQueueEvent
+	54, // 31: liveagent.gateway.v2.WebServerFrame.tunnel_state:type_name -> liveagent.gateway.v1.TunnelStateSnapshot
+	55, // 32: liveagent.gateway.v2.WebServerFrame.process_state:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
+	56, // 33: liveagent.gateway.v2.WebServerFrame.workspace_activity:type_name -> liveagent.gateway.v1.WorkspaceActivityEvent
 	1,  // 34: liveagent.gateway.v2.AgentClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
-	38, // 35: liveagent.gateway.v2.AgentClientFrame.envelope:type_name -> liveagent.gateway.v1.AgentEnvelope
+	47, // 35: liveagent.gateway.v2.AgentClientFrame.envelope:type_name -> liveagent.gateway.v1.AgentEnvelope
 	2,  // 36: liveagent.gateway.v2.AgentServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	36, // 37: liveagent.gateway.v2.AgentServerFrame.envelope:type_name -> liveagent.gateway.v1.GatewayEnvelope
-	1,  // 38: liveagent.gateway.v2.ChannelClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
-	10, // 39: liveagent.gateway.v2.ChannelClientFrame.inbound:type_name -> liveagent.gateway.v2.ChannelInboundMessage
-	4,  // 40: liveagent.gateway.v2.ChannelClientFrame.pong:type_name -> liveagent.gateway.v2.PongFrame
-	2,  // 41: liveagent.gateway.v2.ChannelServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	11, // 42: liveagent.gateway.v2.ChannelServerFrame.accepted:type_name -> liveagent.gateway.v2.ChannelAccepted
-	12, // 43: liveagent.gateway.v2.ChannelServerFrame.delta:type_name -> liveagent.gateway.v2.ChannelDelta
-	13, // 44: liveagent.gateway.v2.ChannelServerFrame.final:type_name -> liveagent.gateway.v2.ChannelFinal
-	39, // 45: liveagent.gateway.v2.ChannelServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
-	3,  // 46: liveagent.gateway.v2.ChannelServerFrame.ping:type_name -> liveagent.gateway.v2.PingFrame
-	1,  // 47: liveagent.gateway.v2.TerminalClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
-	48, // 48: liveagent.gateway.v2.TerminalClientFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
-	2,  // 49: liveagent.gateway.v2.TerminalServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	48, // 50: liveagent.gateway.v2.TerminalServerFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
-	22, // 51: liveagent.gateway.v2.ChatSubscribeResult.activity:type_name -> liveagent.gateway.v2.ChatRunActivity
-	23, // 52: liveagent.gateway.v2.ChatSubscribeResult.snapshot:type_name -> liveagent.gateway.v2.ChatRunSnapshot
-	22, // 53: liveagent.gateway.v2.ChatActivitiesResult.running_conversations:type_name -> liveagent.gateway.v2.ChatRunActivity
-	54, // [54:54] is the sub-list for method output_type
-	54, // [54:54] is the sub-list for method input_type
-	54, // [54:54] is the sub-list for extension type_name
-	54, // [54:54] is the sub-list for extension extendee
-	0,  // [0:54] is the sub-list for field type_name
+	45, // 37: liveagent.gateway.v2.AgentServerFrame.envelope:type_name -> liveagent.gateway.v1.GatewayEnvelope
+	10, // 38: liveagent.gateway.v2.ChannelInboundMessage.files:type_name -> liveagent.gateway.v2.ChannelInboundFile
+	16, // 39: liveagent.gateway.v2.ChannelInputQuestion.options:type_name -> liveagent.gateway.v2.ChannelInputOption
+	17, // 40: liveagent.gateway.v2.ChannelInputRequest.questions:type_name -> liveagent.gateway.v2.ChannelInputQuestion
+	19, // 41: liveagent.gateway.v2.ChannelInputAnswer.selections:type_name -> liveagent.gateway.v2.ChannelInputAnswerSelection
+	19, // 42: liveagent.gateway.v2.ChannelInputResolved.selections:type_name -> liveagent.gateway.v2.ChannelInputAnswerSelection
+	1,  // 43: liveagent.gateway.v2.ChannelClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
+	11, // 44: liveagent.gateway.v2.ChannelClientFrame.inbound:type_name -> liveagent.gateway.v2.ChannelInboundMessage
+	4,  // 45: liveagent.gateway.v2.ChannelClientFrame.pong:type_name -> liveagent.gateway.v2.PongFrame
+	20, // 46: liveagent.gateway.v2.ChannelClientFrame.input_answer:type_name -> liveagent.gateway.v2.ChannelInputAnswer
+	2,  // 47: liveagent.gateway.v2.ChannelServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
+	12, // 48: liveagent.gateway.v2.ChannelServerFrame.accepted:type_name -> liveagent.gateway.v2.ChannelAccepted
+	13, // 49: liveagent.gateway.v2.ChannelServerFrame.delta:type_name -> liveagent.gateway.v2.ChannelDelta
+	15, // 50: liveagent.gateway.v2.ChannelServerFrame.final:type_name -> liveagent.gateway.v2.ChannelFinal
+	48, // 51: liveagent.gateway.v2.ChannelServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
+	3,  // 52: liveagent.gateway.v2.ChannelServerFrame.ping:type_name -> liveagent.gateway.v2.PingFrame
+	14, // 53: liveagent.gateway.v2.ChannelServerFrame.file:type_name -> liveagent.gateway.v2.ChannelFile
+	18, // 54: liveagent.gateway.v2.ChannelServerFrame.input_request:type_name -> liveagent.gateway.v2.ChannelInputRequest
+	21, // 55: liveagent.gateway.v2.ChannelServerFrame.input_answer_result:type_name -> liveagent.gateway.v2.ChannelInputAnswerResult
+	22, // 56: liveagent.gateway.v2.ChannelServerFrame.input_resolved:type_name -> liveagent.gateway.v2.ChannelInputResolved
+	1,  // 57: liveagent.gateway.v2.TerminalClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
+	57, // 58: liveagent.gateway.v2.TerminalClientFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
+	2,  // 59: liveagent.gateway.v2.TerminalServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
+	57, // 60: liveagent.gateway.v2.TerminalServerFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
+	31, // 61: liveagent.gateway.v2.ChatSubscribeResult.activity:type_name -> liveagent.gateway.v2.ChatRunActivity
+	32, // 62: liveagent.gateway.v2.ChatSubscribeResult.snapshot:type_name -> liveagent.gateway.v2.ChatRunSnapshot
+	31, // 63: liveagent.gateway.v2.ChatActivitiesResult.running_conversations:type_name -> liveagent.gateway.v2.ChatRunActivity
+	64, // [64:64] is the sub-list for method output_type
+	64, // [64:64] is the sub-list for method input_type
+	64, // [64:64] is the sub-list for extension type_name
+	64, // [64:64] is the sub-list for extension extendee
+	0,  // [0:64] is the sub-list for field type_name
 }
 
 func init() { file_proto_v2_gateway_ws_proto_init() }
@@ -3620,24 +4425,29 @@ func file_proto_v2_gateway_ws_proto_init() {
 		(*AgentServerFrame_Hello)(nil),
 		(*AgentServerFrame_Envelope)(nil),
 	}
-	file_proto_v2_gateway_ws_proto_msgTypes[13].OneofWrappers = []any{
+	file_proto_v2_gateway_ws_proto_msgTypes[22].OneofWrappers = []any{
 		(*ChannelClientFrame_Hello)(nil),
 		(*ChannelClientFrame_Inbound)(nil),
 		(*ChannelClientFrame_Pong)(nil),
+		(*ChannelClientFrame_InputAnswer)(nil),
 	}
-	file_proto_v2_gateway_ws_proto_msgTypes[14].OneofWrappers = []any{
+	file_proto_v2_gateway_ws_proto_msgTypes[23].OneofWrappers = []any{
 		(*ChannelServerFrame_Hello)(nil),
 		(*ChannelServerFrame_Accepted)(nil),
 		(*ChannelServerFrame_Delta)(nil),
 		(*ChannelServerFrame_Final)(nil),
 		(*ChannelServerFrame_LocalError)(nil),
 		(*ChannelServerFrame_Ping)(nil),
+		(*ChannelServerFrame_File)(nil),
+		(*ChannelServerFrame_InputRequest)(nil),
+		(*ChannelServerFrame_InputAnswerResult)(nil),
+		(*ChannelServerFrame_InputResolved)(nil),
 	}
-	file_proto_v2_gateway_ws_proto_msgTypes[15].OneofWrappers = []any{
+	file_proto_v2_gateway_ws_proto_msgTypes[24].OneofWrappers = []any{
 		(*TerminalClientFrame_Hello)(nil),
 		(*TerminalClientFrame_Frame)(nil),
 	}
-	file_proto_v2_gateway_ws_proto_msgTypes[16].OneofWrappers = []any{
+	file_proto_v2_gateway_ws_proto_msgTypes[25].OneofWrappers = []any{
 		(*TerminalServerFrame_Hello)(nil),
 		(*TerminalServerFrame_Frame)(nil),
 	}
@@ -3647,7 +4457,7 @@ func file_proto_v2_gateway_ws_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_v2_gateway_ws_proto_rawDesc), len(file_proto_v2_gateway_ws_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   35,
+			NumMessages:   44,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

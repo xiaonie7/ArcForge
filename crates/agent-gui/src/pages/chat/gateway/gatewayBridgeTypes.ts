@@ -91,6 +91,7 @@ export type SendChatAction = (overrides?: {
   conversationIdOverride?: string;
   executionModeOverride?: ExecutionMode;
   workdirOverride?: string;
+  allowEmptyWorkdirOverride?: boolean;
   selectedSystemToolIdsOverride?: SystemToolId[];
   runtimeControlsOverride?: ChatRuntimeControls;
   gatewayBridgeRequestOverride?: ActiveGatewayBridgeRequest | null;

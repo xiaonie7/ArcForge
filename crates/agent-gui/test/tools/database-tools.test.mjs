@@ -21,9 +21,10 @@ function loadDatabaseTools(handler) {
 function wecomPrincipal(overrides = {}) {
   return {
     channel: "wecom",
+    tenantId: "tenant-1",
+    botId: "bot-1",
+    externalUserId: "user-1",
     chatType: "direct",
-    scopes: ["database:read"],
-    allowedDatabaseProfileIds: ["finance"],
     ...overrides,
   };
 }
@@ -46,18 +47,23 @@ test("database tools split read and write metadata and keep writes out of cron",
   assert.deepEqual(recent.tools.map((tool) => tool.name), ["DatabaseQuery"]);
 });
 
-test("WeCom exposes a saved-profile-only query schema and never exposes writes", () => {
+test("WeCom exposes the same database tools and query schema as desktop chat", () => {
   const { module } = loadDatabaseTools(() => undefined);
-  const bundle = module.createDatabaseTools({
+  const desktop = module.createDatabaseTools({ runtimeScope: "chat" });
+  const wecom = module.createDatabaseTools({
     runtimeScope: "chat",
     principal: wecomPrincipal(),
   });
 
-  assert.deepEqual(bundle.tools.map((tool) => tool.name), ["DatabaseQuery"]);
-  const query = bundle.tools[0];
-  assert.equal(query.parameters.properties.connection, undefined);
-  assert.match(query.description, /saved database profile explicitly granted/);
-  assert.doesNotMatch(query.description, /connection details are not accepted.*password/i);
+  assert.deepEqual(
+    wecom.tools.map((tool) => tool.name),
+    desktop.tools.map((tool) => tool.name),
+  );
+  const desktopQuery = desktop.tools.find((tool) => tool.name === "DatabaseQuery");
+  const wecomQuery = wecom.tools.find((tool) => tool.name === "DatabaseQuery");
+  assert.deepEqual(wecomQuery.parameters, desktopQuery.parameters);
+  assert.ok(wecomQuery.parameters.properties.connection);
+  assert.ok(wecom.tools.some((tool) => tool.name === "DatabaseExecute"));
 });
 
 test("database schemas require typed parameters and saved profiles for writes", () => {
@@ -163,7 +169,7 @@ test("list_connections exposes safe summaries only", async () => {
   assert.deepEqual(calls, [{ command: "database_profiles_list", args: undefined }]);
 });
 
-test("WeCom list_connections returns only enabled profiles in the ACL allowlist", async () => {
+test("WeCom list_connections returns every enabled profile without an ACL filter", async () => {
   const { module, calls } = loadDatabaseTools((command) => {
     assert.equal(command, "database_profiles_list");
     return [
@@ -195,6 +201,7 @@ test("WeCom list_connections returns only enabled profiles in the ACL allowlist"
   });
   const bundle = module.createDatabaseTools({
     runtimeScope: "chat",
+    // Legacy grant-shaped fields must not alter the channel's database view.
     principal: wecomPrincipal({ allowedDatabaseProfileIds: ["finance", "disabled"] }),
   });
   const result = await bundle.executeToolCall({
@@ -204,86 +211,66 @@ test("WeCom list_connections returns only enabled profiles in the ACL allowlist"
   });
 
   assert.equal(result.isError, false);
-  assert.deepEqual(result.details.connections.map((profile) => profile.id), ["finance"]);
-  assert.doesNotMatch(result.content[0].text, /HR|Disabled/);
+  assert.deepEqual(result.details.connections.map((profile) => profile.id), ["finance", "hr"]);
+  assert.match(result.content[0].text, /Finance/);
+  assert.match(result.content[0].text, /HR/);
+  assert.doesNotMatch(result.content[0].text, /Disabled/);
   assert.equal(calls.length, 1);
 });
 
-test("WeCom rejects unauthorized database arguments before invoking IPC", async () => {
-  const cases = [
-    {
-      label: "group chat",
-      principal: wecomPrincipal({ chatType: "group" }),
-      arguments: { action: "list_connections" },
-    },
-    {
-      label: "missing scope",
-      principal: wecomPrincipal({ scopes: [] }),
-      arguments: { action: "list_connections" },
-    },
-    {
-      label: "empty profile grant",
-      principal: wecomPrincipal({ allowedDatabaseProfileIds: [] }),
-      arguments: { action: "list_connections" },
-    },
-    {
-      label: "ad-hoc connection",
-      principal: wecomPrincipal(),
-      arguments: {
-        action: "query",
-        connection: { driver: "mysql", password: "must-not-survive" },
-        sql: "SELECT 1",
-      },
-    },
-    {
-      label: "missing profile",
-      principal: wecomPrincipal(),
-      arguments: { action: "query", sql: "SELECT 1" },
-    },
-    {
-      label: "profile outside allowlist",
-      principal: wecomPrincipal(),
-      arguments: { action: "query", profile_id: "hr", sql: "SELECT 1" },
-    },
-  ];
-
-  for (const item of cases) {
-    const { module, calls } = loadDatabaseTools(() => {
-      throw new Error(`IPC must not run for ${item.label}`);
-    });
-    const bundle = module.createDatabaseTools({
-      runtimeScope: "chat",
-      principal: item.principal,
-    });
-    const toolCall = {
-      id: `db-denied-${item.label}`,
-      name: "DatabaseQuery",
-      arguments: item.arguments,
-    };
-    const result = await bundle.executeToolCall(toolCall);
-    assert.equal(result.isError, true, item.label);
-    assert.match(result.content[0].text, /blocked/i, item.label);
-    assert.equal(calls.length, 0, item.label);
-    if (item.label === "ad-hoc connection") {
-      assert.equal(toolCall.arguments.connection.password, "[redacted credential]");
+test("WeCom accepts transient reads and saved-profile writes through the normal IPC path", async () => {
+  const { module, calls } = loadDatabaseTools((command) => {
+    if (command === "database_query") {
+      return {
+        profileId: "",
+        columns: [{ name: "one", dataType: "INT" }],
+        rows: [[{ type: "integer", value: "1" }]],
+        rowCount: 1,
+        truncated: false,
+        durationMs: 1,
+      };
     }
-  }
-
-  const { module, calls } = loadDatabaseTools(() => {
-    throw new Error("database_execute IPC must not run");
+    assert.equal(command, "database_execute");
+    return { profileId: "finance", affectedRows: 1, durationMs: 2 };
   });
   const bundle = module.createDatabaseTools({
     runtimeScope: "chat",
-    principal: wecomPrincipal(),
+    principal: wecomPrincipal({
+      chatType: "group",
+      scopes: [],
+      allowedDatabaseProfileIds: [],
+    }),
   });
+  const queryCall = {
+    id: "db-query-wecom",
+    name: "DatabaseQuery",
+    arguments: {
+      action: "query",
+      connection: {
+        driver: "mysql",
+        host: "db.internal",
+        database_name: "ledger",
+        username: "reader",
+        password: "must-not-survive",
+      },
+      sql: "SELECT 1",
+    },
+  };
+  const queryResult = await bundle.executeToolCall(queryCall);
   const writeResult = await bundle.executeToolCall({
     id: "db-write-wecom",
     name: "DatabaseExecute",
     arguments: { profile_id: "finance", sql: "DELETE FROM ledger WHERE id = 1" },
   });
-  assert.equal(writeResult.isError, true);
-  assert.match(writeResult.content[0].text, /writes are disabled for WeCom/i);
-  assert.equal(calls.length, 0);
+
+  assert.equal(queryResult.isError, false);
+  assert.equal(writeResult.isError, false);
+  assert.equal(queryCall.arguments.connection.password, "[redacted credential]");
+  assert.deepEqual(
+    calls.map((call) => call.command),
+    ["database_query", "database_execute"],
+  );
+  assert.equal(calls[0].args.input.connection.password, "must-not-survive");
 });
 
 test("query and execute map model snake_case arguments to backend camelCase", async () => {

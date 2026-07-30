@@ -7,14 +7,6 @@ const settings = createTsModuleLoader().loadModule("src/lib/settings/index.ts");
 const { isSupportedGatewayUrl } = createTsModuleLoader().loadModule(
   "src/lib/settings/normalize.ts",
 );
-const { resolveWeComGrant } = createTsModuleLoader().loadModule(
-  "src/lib/security/wecomAccessPolicy.ts",
-);
-const {
-  commitWeComAccessRuleDraft,
-  createWeComAccessRuleDraft,
-  editWeComAccessRuleDraft,
-} = createTsModuleLoader().loadModule("src/pages/settings/wecomAccessDraft.ts");
 const wecomSectionSource = readFileSync(
   new URL("../../src/pages/settings/WecomSection.tsx", import.meta.url),
   "utf8",
@@ -43,7 +35,6 @@ test("WeCom settings default to a private-message connector identity", () => {
     tenantId: "",
     connectorId: "wecom-desktop",
     allowGroupMessages: false,
-    accessPolicy: { rules: [] },
   });
 });
 
@@ -72,7 +63,6 @@ test("WeCom settings normalize identity fields and never retain write-only secre
     tenantId: "bot-a",
     connectorId: "connector-a",
     allowGroupMessages: false,
-    accessPolicy: { rules: [] },
   });
   assert.equal(Object.hasOwn(normalized, "secret"), false);
   assert.equal(Object.hasOwn(normalized, "channelToken"), false);
@@ -196,84 +186,17 @@ test("WeCom proactive send strings are localized in Chinese and English", () => 
   }
 });
 
-test("WeCom permission editor exposes exact user identity and resource allowlists", () => {
-  assert.match(wecomSectionSource, /settings\.wecom\.accessPolicy\.rules\.length === 0/);
-  assert.match(wecomSectionSource, /updateWecomSettings\(setSettings, \{ accessPolicy: \{ rules \} \}\)/);
-
-  for (const field of ["tenantId", "botId", "externalUserId"]) {
-    assert.match(wecomSectionSource, new RegExp(`key: "${field}"`));
-  }
-  for (const scope of ["tool:read", "skill:use", "database:read", "mcp:invoke"]) {
-    assert.match(wecomSectionSource, new RegExp(`\\["${scope}",`));
-  }
-  for (const field of [
-    "allowedToolNames",
-    "allowedSkillNames",
-    "allowedSkillBaseDirs",
-    "allowedMcpServerIds",
-  ]) {
-    assert.match(wecomSectionSource, new RegExp(`key: "${field}"`));
-  }
-  assert.match(wecomSectionSource, /defaultSkillName/);
-  assert.match(wecomSectionSource, /allowedDatabaseProfileIds/);
-  assert.match(wecomSectionSource, /invoke<DatabaseProfileOption\[\]>\("database_profiles_list"\)/);
-});
-
-test("WeCom database and default Skill permission labels are localized", () => {
-  for (const key of [
-    "settings.wecomAccessScopeDatabase",
-    "settings.wecomDefaultSkill",
-    "settings.wecomDefaultSkillNone",
-    "settings.wecomDefaultSkillHint",
-    "settings.wecomAllowedDatabaseProfiles",
-    "settings.wecomAllowedDatabaseProfilesHint",
-    "settings.wecomDatabaseProfilesLoading",
-    "settings.wecomDatabaseProfilesEmpty",
-    "settings.wecomDatabaseProfileUnavailable",
-  ]) {
-    assert.equal(i18nSource.split(`"${key}"`).length - 1, 2, key);
-  }
-});
-
-test("WeCom permission editor keeps an incomplete user rule as a local draft", () => {
-  const draft = createWeComAccessRuleDraft("tenant-1", "bot-1");
-  assert.equal(draft.externalUserId, "");
-  assert.equal(draft.defaultSkillName, "");
-  assert.deepEqual(draft.allowedDatabaseProfileIds, []);
-  assert.equal(commitWeComAccessRuleDraft({ rules: [] }, draft), null);
-
-  const completed = editWeComAccessRuleDraft(draft, { externalUserId: " alice " });
-  const policy = commitWeComAccessRuleDraft({ rules: [] }, completed);
-  assert.equal(policy.rules.length, 1);
-  assert.equal(policy.rules[0].externalUserId, "alice");
-
-  assert.match(wecomSectionSource, /useState<WeComAccessRuleDraft \| null>/);
-  assert.match(wecomSectionSource, /commitWeComAccessRuleDraft/);
-  assert.match(wecomSectionSource, /disabled=\{!isCompleteWeComAccessRuleDraft\(accessRuleDraft\)\}/);
-});
-
-test("WeCom permissions default to deny when no exact user rule matches", () => {
-  const accessPolicy = settings.normalizeWecomSettings({
+test("WeCom settings do not expose a per-user permission editor", () => {
+  const normalized = settings.normalizeWecomSettings({
     accessPolicy: {
-      rules: [
-        {
-          tenantId: "tenant-1",
-          botId: "bot-1",
-          externalUserId: "alice",
-          scopes: ["tool:read"],
-          allowedToolNames: ["Read"],
-        },
-      ],
+      rules: [{ tenantId: "tenant-1", botId: "bot-1", externalUserId: "alice" }],
     },
-  }).accessPolicy;
+  });
 
-  const unmatched = resolveWeComGrant(
-    { tenantId: "tenant-1", botId: "bot-1", externalUserId: "bob" },
-    accessPolicy,
-  );
-  assert.equal(unmatched.matched, false);
-  assert.deepEqual(unmatched.scopes, []);
-  assert.deepEqual(unmatched.allowedToolNames, []);
+  assert.equal(Object.hasOwn(normalized, "accessPolicy"), false);
+  assert.doesNotMatch(wecomSectionSource, /accessPolicy|allowedToolNames|allowedSkillNames/);
+  assert.doesNotMatch(wecomSectionSource, /allowedDatabaseProfileIds|allowedMcpServerIds/);
+  assert.doesNotMatch(i18nSource, /settings\.wecomAccessControl|settings\.wecomAddAccessRule/);
 });
 
 test("WeCom autosave waits for Remote Gateway settings before validating WeCom", async () => {

@@ -71,6 +71,7 @@ message GatewayEnvelope {
     WorkspaceWatchRequest workspace_watch = 90;
     ManagedProcessRequest managed_process_request = 91;
     HistoryBranchRequest history_branch = 92;
+    FsReadWorkspaceArtifactRequest fs_read_workspace_artifact = 93;
   }
 
   // Legacy tunnel control/frame payloads (pre-rewrite protocol) and the
@@ -139,6 +140,7 @@ message AgentEnvelope {
     ManagedProcessResponse managed_process_response = 91;
     ManagedProcessSnapshot managed_process_snapshot = 92;
     HistoryBranchResponse history_branch_resp = 93;
+    FsReadWorkspaceArtifactResponse fs_read_workspace_artifact_resp = 94;
     ErrorResponse error = 99;
   }
 
@@ -1054,6 +1056,26 @@ message FsReadWorkspaceImageResponse {
   uint64 size_bytes = 4;
   uint64 mtime_ms = 5;
   string content_hash = 6;
+}
+
+// Reads a completed workspace artifact for delivery to an authenticated
+// channel connector. Every descriptor observed from PresentFile is echoed as
+// expected metadata so the desktop can reject stale or replaced files before
+// and after reading their bytes.
+message FsReadWorkspaceArtifactRequest {
+  string workdir = 1;
+  string path = 2;
+  string expected_file_id = 3;
+  uint64 expected_size_bytes = 4;
+  uint64 expected_mtime_ms = 5;
+}
+
+message FsReadWorkspaceArtifactResponse {
+  string path = 1;
+  string file_name = 2;
+  string mime_type = 3;
+  uint64 size_bytes = 4;
+  bytes content = 5;
 }
 
 message FsWriteTextRequest {

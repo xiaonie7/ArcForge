@@ -216,13 +216,13 @@ export type RunAgentConversationTurnParams = {
     model: string;
   };
   effectiveWorkdir: string;
-  /** True only for an explicitly selected cwd-empty scope or a trusted channel principal. */
+  /** True only for an explicitly selected cwd-empty scope. */
   allowEmptyWorkdir?: boolean;
   effectiveSkillsEnabled: boolean;
   showSilentMemoryExtraction: boolean;
   skillsRootDir?: string;
   skillAccessPolicy?: SkillAccessPolicy;
-  /** Disable shared memory and extraction for channel principals by default. */
+  /** Allows callers such as unattended runtimes to disable shared memory and extraction. */
   memoryEnabled?: boolean;
   principal?: PrincipalContext;
   onManagedSkillsChanged?: (change: {
@@ -420,6 +420,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   const buildRegistryStartedAt = perfNowMs();
   const builtinRegistry = await buildBuiltinToolRegistry({
     workdir: effectiveWorkdir,
+    workspaceAccess: allowEmptyWorkdir ? "none" : "full",
     providerId,
     runtimePlatform,
     runtimeEnvironment,
@@ -1175,6 +1176,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
   });
   await gatewayBridgeEvents.queueEvent({
     type: "done",
+    final_text: gatewayAssistantText,
     conversation_id: conversationId,
   });
   gatewayBridgeEvents.close();

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
+import inspect
 import json
 import logging
+import mimetypes
 import re
 import sys
 import threading
@@ -14,10 +18,12 @@ from typing import Any
 
 from aibot import WSClient, WSClientOptions, generate_req_id
 
-from .channel_client import ChannelClient, make_inbound
+from .channel_client import ChannelClient, ChannelResponseFile, make_inbound
 from .commands import SessionSequencer, SessionStore, parse_command
 from .config import ConnectorConfig, load_config
 from .dedupe import DedupeStore
+from .interactions import InteractionCoordinator
+from .protocol import ChannelInboundFile
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +38,21 @@ _MAX_REQUEST_ID_BYTES = 128
 _MAX_CHAT_ID_CHARACTERS = 256
 _AUTHENTICATION_TIMEOUT_SECONDS = 30.0
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
+_MEDIA_UPLOAD_INIT = "aibot_upload_media_init"
+_MEDIA_UPLOAD_CHUNK = "aibot_upload_media_chunk"
+_MEDIA_UPLOAD_FINISH = "aibot_upload_media_finish"
+_MEDIA_UPLOAD_CHUNK_BYTES = 512 * 1024
+_MEDIA_UPLOAD_ATTEMPTS = 3
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+_MAX_FILE_NAME_BYTES = 255
+_WINDOWS_RESERVED_FILE_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 _HELP_TEXT = "\n".join(
     (
@@ -39,6 +60,7 @@ _HELP_TEXT = "\n".join(
         "/new - 开启新会话",
         "/compact - 压缩当前会话上下文",
         "/help - 查看命令",
+        "也可以直接发送文件或图片；Agent 生成的文件会回传到当前会话。",
     )
 )
 
@@ -96,7 +118,309 @@ async def _reply_final(client: Any, frame: dict[str, Any], stream_id: str, text:
     await client.reply_stream(frame, stream_id, text or "(empty response)", True)
 
 
-async def _handle_text(
+async def _submit_with_input_handlers(
+    channel: Any,
+    inbound: Any,
+    *,
+    input_request_handler: Any,
+    input_resolved_handler: Any,
+) -> Any:
+    """Call new and pre-input ChannelClient implementations without version checks."""
+
+    submit = channel.submit
+    signature_target = getattr(submit, "side_effect", None)
+    if not callable(signature_target):
+        signature_target = submit
+    try:
+        parameters = inspect.signature(signature_target).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts_kwargs or "input_request_handler" in parameters:
+        return await submit(
+            inbound,
+            input_request_handler=input_request_handler,
+            input_resolved_handler=input_resolved_handler,
+        )
+    if "on_input_request" in parameters:
+        return await submit(
+            inbound,
+            on_input_request=input_request_handler,
+            on_input_resolved=input_resolved_handler,
+        )
+    return await submit(inbound)
+
+
+class _MediaInputError(RuntimeError):
+    def __init__(self, message: str, *, retryable: bool = False) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def _safe_file_name(value: object, fallback: str) -> str:
+    raw_value = value if isinstance(value, str) else ""
+    candidate = (
+        raw_value.encode("utf-8", "replace")
+        .decode("utf-8")
+        .replace("\\", "/")
+        .rsplit("/", 1)[-1]
+        .strip()
+    )
+    candidate = "".join(
+        "_"
+        if (
+            ord(character) < 32
+            or 127 <= ord(character) <= 159
+            or character in '<>:"|?*'
+        )
+        else character
+        for character in candidate
+    ).rstrip(" .")
+    if candidate in {"", ".", ".."}:
+        candidate = fallback
+    if candidate.split(".", 1)[0].upper() in _WINDOWS_RESERVED_FILE_NAMES:
+        candidate = f"_{candidate}"
+    while len(candidate.encode("utf-8")) > _MAX_FILE_NAME_BYTES:
+        candidate = candidate[:-1]
+    return candidate or fallback
+
+
+def _media_body(frame: dict[str, Any], media_kind: str) -> dict[str, Any]:
+    value = _body(frame).get(media_kind)
+    return value if isinstance(value, dict) else {}
+
+
+def _sniff_image(content: bytes) -> tuple[str, str] | None:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image.png", "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image.jpg", "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image.gif", "image/gif"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image.webp", "image/webp"
+    if content.startswith(b"BM"):
+        return "image.bmp", "image/bmp"
+    return None
+
+
+async def _download_inbound_media(
+    wecom: Any,
+    frame: dict[str, Any],
+    media_kind: str,
+    config: ConnectorConfig,
+) -> ChannelInboundFile:
+    media = _media_body(frame, media_kind)
+    url = media.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise _MediaInputError("无法读取文件，请重新发送。")
+    aes_key = media.get("aeskey") or media.get("aes_key")
+    if aes_key is not None and not isinstance(aes_key, str):
+        raise _MediaInputError("无法读取文件，请重新发送。")
+    try:
+        content, downloaded_name = await wecom.download_file(
+            url.strip(),
+            aes_key.strip() if isinstance(aes_key, str) else None,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        raise _MediaInputError(
+            "文件下载失败，请重新发送。",
+            retryable=True,
+        ) from exc
+    if not isinstance(content, (bytes, bytearray, memoryview)):
+        raise _MediaInputError("文件内容无效，请重新发送。")
+    content = bytes(content)
+    size_limit = config.max_file_bytes
+    if media_kind == "image":
+        size_limit = min(size_limit, _MAX_IMAGE_BYTES)
+    if len(content) > size_limit:
+        limit_mb = max(1, size_limit // (1024 * 1024))
+        raise _MediaInputError(f"文件过大，请发送不超过 {limit_mb} MB 的文件。")
+
+    detected_image = _sniff_image(content) if media_kind == "image" else None
+    fallback = detected_image[0] if detected_image else (
+        "image.bin" if media_kind == "image" else "attachment.bin"
+    )
+    file_name = _safe_file_name(
+        downloaded_name or media.get("filename") or media.get("file_name"),
+        fallback,
+    )
+    guessed_mime, _encoding = mimetypes.guess_type(file_name)
+    mime_type = (
+        detected_image[1]
+        if detected_image
+        else guessed_mime or "application/octet-stream"
+    )
+    return ChannelInboundFile(
+        file_name=file_name,
+        mime_type=mime_type,
+        content=content,
+    )
+
+
+def _ack_mappings(acknowledgement: object) -> list[dict[str, Any]]:
+    if not isinstance(acknowledgement, dict):
+        return []
+    mappings = [acknowledgement]
+    body = acknowledgement.get("body")
+    if isinstance(body, dict):
+        mappings.append(body)
+        body_data = body.get("data")
+        if isinstance(body_data, dict):
+            mappings.append(body_data)
+    data = acknowledgement.get("data")
+    if isinstance(data, dict):
+        mappings.append(data)
+    return mappings
+
+
+def _ensure_wecom_acknowledged(acknowledgement: object) -> None:
+    mappings = _ack_mappings(acknowledgement)
+    if not mappings:
+        raise RuntimeError("WeCom returned an invalid acknowledgement")
+    for mapping in mappings:
+        error_code = mapping.get("errcode")
+        if error_code not in (None, 0, "0"):
+            raise RuntimeError("WeCom rejected the request")
+
+
+def _ack_value(acknowledgement: object, name: str) -> str:
+    _ensure_wecom_acknowledged(acknowledgement)
+    for mapping in _ack_mappings(acknowledgement):
+        value = mapping.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    raise RuntimeError("WeCom acknowledgement omitted a required value")
+
+
+async def _upload_media_stage(
+    client: Any,
+    command: str,
+    body: dict[str, Any],
+    *,
+    attempts: int = 1,
+) -> object:
+    synthetic_frame = {
+        "headers": {"req_id": generate_req_id(command)},
+    }
+    attempt_count = max(1, attempts)
+    for attempt in range(attempt_count):
+        try:
+            acknowledgement = await client.reply(synthetic_frame, body, command)
+            _ensure_wecom_acknowledged(acknowledgement)
+            return acknowledgement
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if attempt + 1 >= attempt_count:
+                raise
+            await asyncio.sleep(0.5 * (2**attempt))
+    raise RuntimeError("WeCom media upload failed")
+
+
+async def _upload_wecom_file(client: Any, file: ChannelResponseFile) -> str:
+    file_name = _safe_file_name(file.file_name, "attachment.bin")
+    content = bytes(file.content)
+    total_chunks = (
+        len(content) + _MEDIA_UPLOAD_CHUNK_BYTES - 1
+    ) // _MEDIA_UPLOAD_CHUNK_BYTES
+    acknowledgement = await _upload_media_stage(
+        client,
+        _MEDIA_UPLOAD_INIT,
+        {
+            "type": "file",
+            "filename": file_name,
+            "total_size": len(content),
+            "total_chunks": total_chunks,
+            "md5": hashlib.md5(content).hexdigest(),  # noqa: S324 - protocol checksum
+        },
+    )
+    upload_id = _ack_value(acknowledgement, "upload_id")
+    # The WeCom SDK declares zero chunks for an empty file but still sends one
+    # empty chunk before finish.
+    for chunk_index in range(max(1, total_chunks)):
+        start = chunk_index * _MEDIA_UPLOAD_CHUNK_BYTES
+        chunk = content[start : start + _MEDIA_UPLOAD_CHUNK_BYTES]
+        await _upload_media_stage(
+            client,
+            _MEDIA_UPLOAD_CHUNK,
+            {
+                "upload_id": upload_id,
+                "chunk_index": chunk_index,
+                "base64_data": base64.b64encode(chunk).decode("ascii"),
+            },
+            attempts=_MEDIA_UPLOAD_ATTEMPTS,
+        )
+    acknowledgement = await _upload_media_stage(
+        client,
+        _MEDIA_UPLOAD_FINISH,
+        {"upload_id": upload_id},
+    )
+    return _ack_value(acknowledgement, "media_id")
+
+
+def _safe_original_request(frame: dict[str, Any]) -> bool:
+    headers = frame.get("headers")
+    if not isinstance(headers, dict):
+        return False
+    request_id = headers.get("req_id")
+    request_id_size = _utf8_size(request_id) if isinstance(request_id, str) else None
+    return (
+        isinstance(request_id, str)
+        and bool(request_id)
+        and request_id_size is not None
+        and request_id_size <= _MAX_REQUEST_ID_BYTES
+        and _REQUEST_ID_PATTERN.fullmatch(request_id) is not None
+    )
+
+
+async def _deliver_wecom_file(
+    client: Any,
+    frame: dict[str, Any],
+    target_id: str,
+    media_id: str,
+) -> None:
+    body = {"msgtype": "file", "file": {"media_id": media_id}}
+    if target_id:
+        acknowledgement = await client.send_message(target_id, body)
+    elif _safe_original_request(frame):
+        acknowledgement = await client.reply(frame, body)
+    else:
+        raise RuntimeError("WeCom callback cannot be used for a file reply")
+    _ensure_wecom_acknowledged(acknowledgement)
+
+
+async def _send_response_files(
+    client: Any,
+    frame: dict[str, Any],
+    target_id: str,
+    files: list[ChannelResponseFile],
+) -> tuple[int, int]:
+    delivered = 0
+    failed = 0
+    for file in files:
+        if file.error_code or not isinstance(file.content, bytes):
+            failed += 1
+            continue
+        try:
+            media_id = await _upload_wecom_file(client, file)
+            await _deliver_wecom_file(client, frame, target_id, media_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            failed += 1
+            logger.warning("WeCom file delivery failed")
+        else:
+            delivered += 1
+    return delivered, failed
+
+
+async def _handle_message(
     wecom: Any,
     channel: ChannelClient,
     dedupe: DedupeStore,
@@ -104,10 +428,13 @@ async def _handle_text(
     config: ConnectorConfig,
     frame: dict[str, Any],
     sequencer: SessionSequencer | None = None,
+    interactions: InteractionCoordinator | None = None,
+    *,
+    media_kind: str = "",
 ) -> None:
     body = _body(frame)
     text = _text(frame)
-    if not text:
+    if not text and media_kind not in {"file", "image"}:
         return
     if len(text.encode("utf-8")) > config.max_text_bytes:
         await _reply_final(wecom, frame, _stream_id(), "消息过长，请分段发送。")
@@ -140,7 +467,23 @@ async def _handle_text(
             await _reply_final(wecom, frame, _stream_id(), existing.text)
         return
 
-    command = parse_command(text)
+    if interactions is not None and not media_kind:
+        interaction_reply = await interactions.handle_text(
+            session_key=session_key,
+            text=text,
+            channel=channel,
+        )
+        if interaction_reply is not None:
+            dedupe.complete(
+                session_key,
+                external_id,
+                text=interaction_reply,
+                status="completed",
+            )
+            await _reply_final(wecom, frame, _stream_id(), interaction_reply)
+            return
+
+    command = parse_command(text) if not media_kind else ""
     stream_id = _stream_id()
     failure_message = "处理失败，请稍后重试。"
 
@@ -159,7 +502,29 @@ async def _handle_text(
     try:
         await wecom.reply_stream(frame, stream_id, "正在处理，请稍候…", False)
     except Exception:
-        logger.exception("WeCom placeholder reply failed")
+        logger.warning("WeCom placeholder reply failed")
+
+    inbound_files: list[ChannelInboundFile] = []
+    if media_kind:
+        try:
+            inbound_files.append(
+                await _download_inbound_media(wecom, frame, media_kind, config)
+            )
+        except _MediaInputError as exc:
+            answer = str(exc)
+            if exc.retryable:
+                dedupe.forget(session_key, external_id)
+            else:
+                dedupe.complete(
+                    session_key,
+                    external_id,
+                    text=answer,
+                    status="failed",
+                )
+            logger.warning("WeCom inbound media was rejected")
+            with contextlib.suppress(Exception):
+                await _reply_final(wecom, frame, stream_id, answer)
+            return
 
     async def submit_in_order() -> None:
         rotation = None
@@ -177,14 +542,49 @@ async def _handle_text(
             text="" if command else text,
             command=command,
             channel_session_id=channel_session_id,
+            files=inbound_files,
         )
-        result = await channel.submit(inbound)
+        if interactions is None:
+            result = await channel.submit(inbound)
+        else:
+            async def input_request_handler(request: object) -> None:
+                await interactions.present(
+                    request,
+                    session_key=session_key,
+                    wecom=wecom,
+                    frame=frame,
+                    stream_id=stream_id,
+                )
+
+            async def input_resolved_handler(resolved: object) -> None:
+                await interactions.handle_resolved(resolved, wecom=wecom)
+
+            result = await _submit_with_input_handlers(
+                channel,
+                inbound,
+                input_request_handler=input_request_handler,
+                input_resolved_handler=input_resolved_handler,
+            )
         if result.status != "completed":
             answer = result.message or failure_message
         else:
             answer = result.text.strip()
-            if not answer:
+            response_files = list(getattr(result, "files", ()) or ())
+            file_target_id = chat_id if chat_type == "group" else (chat_id or user_id)
+            delivered, failed = await _send_response_files(
+                wecom,
+                frame,
+                file_target_id,
+                response_files,
+            )
+            if not answer and delivered:
+                answer = "文件已发送。"
+            elif not answer and response_files:
+                answer = "文件发送失败，请稍后重试。"
+            elif not answer:
                 raise RuntimeError("ArcForge channel completed without response text")
+            if failed and answer != "文件发送失败，请稍后重试。":
+                answer += "\n\n有文件未能发送，请稍后重试。"
             if rotation is not None and not sessions.commit_rotation(rotation):
                 raise RuntimeError("WeCom session changed while /new was running")
         dedupe.complete(
@@ -193,7 +593,12 @@ async def _handle_text(
             text=answer,
             status=result.status or "failed",
         )
-        await _reply_final(wecom, frame, stream_id, answer)
+        try:
+            await _reply_final(wecom, frame, stream_id, answer)
+        except Exception:
+            # The turn and any file deliveries have already completed. Keep the
+            # dedupe entry so a callback retry only replays the final text.
+            logger.warning("WeCom final reply failed")
 
     try:
         if sequencer is None:
@@ -216,6 +621,52 @@ async def _handle_text(
             await _reply_final(wecom, frame, stream_id, failure_message)
 
 
+async def _handle_text(
+    wecom: Any,
+    channel: ChannelClient,
+    dedupe: DedupeStore,
+    sessions: SessionStore,
+    config: ConnectorConfig,
+    frame: dict[str, Any],
+    sequencer: SessionSequencer | None = None,
+    interactions: InteractionCoordinator | None = None,
+) -> None:
+    await _handle_message(
+        wecom,
+        channel,
+        dedupe,
+        sessions,
+        config,
+        frame,
+        sequencer,
+        interactions,
+    )
+
+
+async def _handle_media(
+    wecom: Any,
+    channel: ChannelClient,
+    dedupe: DedupeStore,
+    sessions: SessionStore,
+    config: ConnectorConfig,
+    frame: dict[str, Any],
+    media_kind: str,
+    sequencer: SessionSequencer | None = None,
+    interactions: InteractionCoordinator | None = None,
+) -> None:
+    await _handle_message(
+        wecom,
+        channel,
+        dedupe,
+        sessions,
+        config,
+        frame,
+        sequencer,
+        interactions,
+        media_kind=media_kind,
+    )
+
+
 def register_handlers(
     client: Any,
     channel: ChannelClient,
@@ -223,11 +674,76 @@ def register_handlers(
     dedupe: DedupeStore,
     sessions: SessionStore,
     sequencer: SessionSequencer,
+    interactions: InteractionCoordinator | None = None,
 ) -> None:
+    interactions = interactions or InteractionCoordinator()
+
     @client.on("message.text")
     async def on_text(frame: dict[str, Any]) -> None:
         asyncio.create_task(
-            _handle_text(client, channel, dedupe, sessions, config, frame, sequencer)
+            _handle_text(
+                client,
+                channel,
+                dedupe,
+                sessions,
+                config,
+                frame,
+                sequencer,
+                interactions,
+            )
+        )
+
+    @client.on("message.file")
+    async def on_file(frame: dict[str, Any]) -> None:
+        asyncio.create_task(
+            _handle_media(
+                client,
+                channel,
+                dedupe,
+                sessions,
+                config,
+                frame,
+                "file",
+                sequencer,
+                interactions,
+            )
+        )
+
+    @client.on("message.image")
+    async def on_image(frame: dict[str, Any]) -> None:
+        asyncio.create_task(
+            _handle_media(
+                client,
+                channel,
+                dedupe,
+                sessions,
+                config,
+                frame,
+                "image",
+                sequencer,
+                interactions,
+            )
+        )
+
+    @client.on("event.template_card_event")
+    def on_template_card_event(frame: dict[str, Any]) -> None:
+        body = _body(frame)
+        chat_id, user_id, chat_type = _routing(body)
+        session_key = None
+        if user_id and chat_type in {"single", "group"}:
+            with contextlib.suppress(ValueError):
+                session_key = sessions.key(
+                    chat_type=chat_type,
+                    chat_id=chat_id,
+                    external_user_id=user_id,
+                )
+        asyncio.create_task(
+            interactions.handle_card_event(
+                frame=frame,
+                session_key=session_key,
+                wecom=client,
+                channel=channel,
+            )
         )
 
 

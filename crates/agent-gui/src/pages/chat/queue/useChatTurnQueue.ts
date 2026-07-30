@@ -113,6 +113,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         createdAt: number;
         executionMode: ExecutionMode;
         workdir: string;
+        allowEmptyWorkdir: boolean;
         selectedSystemToolIds: SystemToolId[];
         runtimeControls: ChatRuntimeControls;
         gatewayRequest?: QueuedChatTurn["gatewayRequest"];
@@ -299,6 +300,9 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         ? queuedChatTurnEditSlotRef.current
         : null;
     const executionMode = editSlot?.executionMode ?? settings.system.executionMode;
+    const allowEmptyWorkdir =
+      editSlot?.allowEmptyWorkdir ??
+      (isAgentExecutionMode(executionMode) && allowEmptyAgentWorkdir);
     const workdirForTurn = resolveLocalQueuedTurnWorkdir({
       isAgentMode: isAgentExecutionMode(executionMode),
       editedWorkdir: editSlot?.workdir,
@@ -314,6 +318,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       uploadedFiles,
       executionMode,
       workdir: workdirForTurn,
+      allowEmptyWorkdir,
       selectedSystemToolIds: editSlot?.selectedSystemToolIds ?? settings.system.selectedSystemTools,
       runtimeControls: editSlot?.runtimeControls ?? settings.chatRuntimeControls,
       createdAt: editSlot?.createdAt,
@@ -398,6 +403,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
           conversationIdOverride: targetConversationId,
           executionModeOverride: queuedTurn.executionMode,
           workdirOverride: queuedTurn.workdir,
+          allowEmptyWorkdirOverride: queuedTurn.allowEmptyWorkdir,
           selectedSystemToolIdsOverride: queuedTurn.selectedSystemToolIds,
           runtimeControlsOverride: queuedTurn.runtimeControls,
           gatewayBridgeRequestOverride: gatewayBridgeRequest,
@@ -511,6 +517,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       createdAt: queuedTurn.createdAt,
       executionMode: queuedTurn.executionMode,
       workdir: queuedTurn.workdir,
+      allowEmptyWorkdir: queuedTurn.allowEmptyWorkdir,
       selectedSystemToolIds: queuedTurn.selectedSystemToolIds.slice(),
       runtimeControls: { ...queuedTurn.runtimeControls },
       gatewayRequest: queuedTurn.gatewayRequest ? { ...queuedTurn.gatewayRequest } : undefined,
@@ -577,15 +584,15 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       ? settings.system.executionMode
       : (normalizeGatewayExecutionMode(payload.executionMode) ?? settings.system.executionMode);
     const workdir = resolveGatewayQueuedTurnWorkdir({
-      hasTrustedPrincipal: Boolean(principal),
-      requestedWorkdir: normalizeGatewayWorkdir(payload.workdir),
+      requestedWorkdir: principal ? undefined : normalizeGatewayWorkdir(payload.workdir),
       conversationWorkdir: conversationRuntimeCacheRef.current.get(targetConversationId)?.workdir,
       displayedWorkdir: displayedConversationWorkdir,
       defaultWorkdir: settings.system.workdir,
     });
-    const runtimeControls = payload.runtimeControls
-      ? normalizeChatRuntimeControls(payload.runtimeControls)
-      : settings.chatRuntimeControls;
+    const runtimeControls =
+      !principal && payload.runtimeControls
+        ? normalizeChatRuntimeControls(payload.runtimeControls)
+        : settings.chatRuntimeControls;
     const selectedSystemToolIds = principal
       ? settings.system.selectedSystemTools
       : normalizeSystemToolSelection(payload.selectedSystemTools);
@@ -599,6 +606,8 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       uploadedFiles,
       executionMode,
       workdir: isAgentExecutionMode(executionMode) ? workdir : "",
+      allowEmptyWorkdir:
+        isAgentExecutionMode(executionMode) && workdir.length === 0 && allowEmptyAgentWorkdir,
       selectedSystemToolIds:
         selectedSystemToolIds.length > 0
           ? selectedSystemToolIds
@@ -614,7 +623,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
             ? payload.queuePolicy
             : "auto",
         selectedModel: principal ? undefined : payload.selectedModel,
-        runtimeControls: payload.runtimeControls,
+        runtimeControls: principal ? undefined : payload.runtimeControls,
         principal,
       },
     });

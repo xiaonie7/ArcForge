@@ -5,10 +5,6 @@ fn default_wecom_local_gateway_port() -> u16 {
     DEFAULT_WECOM_LOCAL_GATEWAY_PORT
 }
 
-fn default_wecom_access_policy() -> Value {
-    json!({ "rules": [] })
-}
-
 fn default_wecom_connector_id() -> String {
     DEFAULT_WECOM_CONNECTOR_ID.to_string()
 }
@@ -46,8 +42,6 @@ fn public_wecom_settings(runtime: &RuntimeWecomSettings) -> WecomSettingsPayload
         tenant_id: runtime.tenant_id.clone(),
         connector_id: runtime.connector_id.clone(),
         allow_group_messages: runtime.allow_group_messages,
-        access_policy: serde_json::from_str(&runtime.access_policy_json)
-            .unwrap_or_else(|_| default_wecom_access_policy()),
     }
 }
 
@@ -55,7 +49,7 @@ fn load_wecom_runtime_settings_inner(conn: &Connection) -> Result<RuntimeWecomSe
     let row = conn
         .query_row(
             &format!(
-                "SELECT enabled, gateway_mode, local_gateway_port, bot_id, tenant_id, connector_id, allow_group_messages, access_policy_json, aibot_secret, channel_token \
+                "SELECT enabled, gateway_mode, local_gateway_port, bot_id, tenant_id, connector_id, allow_group_messages, aibot_secret, channel_token \
                  FROM {WECOM_SETTINGS_TABLE} WHERE config_id = 'default'"
             ),
             [],
@@ -72,9 +66,8 @@ fn load_wecom_runtime_settings_inner(conn: &Connection) -> Result<RuntimeWecomSe
                     tenant_id: row.get(4)?,
                     connector_id: row.get(5)?,
                     allow_group_messages: row.get::<_, i64>(6)? != 0,
-                    access_policy_json: row.get(7)?,
-                    secret: row.get(8)?,
-                    channel_token: row.get(9)?,
+                    secret: row.get(7)?,
+                    channel_token: row.get(8)?,
                 })
             },
         )
@@ -89,8 +82,6 @@ fn load_wecom_runtime_settings_inner(conn: &Connection) -> Result<RuntimeWecomSe
         tenant_id: String::new(),
         connector_id: default_wecom_connector_id(),
         allow_group_messages: false,
-        access_policy_json: serde_json::to_string(&default_wecom_access_policy())
-            .unwrap_or_else(|_| "{\"rules\":[]}".to_string()),
         secret: String::new(),
         channel_token: String::new(),
     }))
@@ -118,16 +109,22 @@ fn write_wecom_runtime_settings(
         .transaction()
         .map_err(|e| format!("begin {WECOM_SETTINGS_TABLE} transaction failed: {e}"))?;
     tx.execute(
-        &format!("DELETE FROM {WECOM_SETTINGS_TABLE} WHERE config_id = 'default'"),
-        [],
-    )
-    .map_err(|e| format!("clear {WECOM_SETTINGS_TABLE} failed: {e}"))?;
-    tx.execute(
         &format!(
             "INSERT INTO {WECOM_SETTINGS_TABLE} \
              (config_id, enabled, gateway_mode, local_gateway_port, bot_id, tenant_id, connector_id, allow_group_messages, \
-              access_policy_json, aibot_secret, channel_token, updated_at) \
-             VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+              aibot_secret, channel_token, updated_at) \
+             VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             ON CONFLICT(config_id) DO UPDATE SET \
+              enabled = excluded.enabled, \
+              gateway_mode = excluded.gateway_mode, \
+              local_gateway_port = excluded.local_gateway_port, \
+              bot_id = excluded.bot_id, \
+              tenant_id = excluded.tenant_id, \
+              connector_id = excluded.connector_id, \
+              allow_group_messages = excluded.allow_group_messages, \
+              aibot_secret = excluded.aibot_secret, \
+              channel_token = excluded.channel_token, \
+              updated_at = excluded.updated_at"
         ),
         params![
             if runtime.enabled { 1i64 } else { 0i64 },
@@ -144,7 +141,6 @@ fn write_wecom_runtime_settings(
             } else {
                 0i64
             },
-            &runtime.access_policy_json,
             &runtime.secret,
             &runtime.channel_token,
             now_ms(),
@@ -163,14 +159,6 @@ pub(crate) fn save_wecom(
     payload: Value,
 ) -> Result<WecomSettingsPayload, String> {
     let mut object = expect_object(payload, "settings_save_wecom payload")?;
-    let access_policy_update = match object.remove("accessPolicy") {
-        None => None,
-        Some(Value::Null) => Some(default_wecom_access_policy()),
-        Some(value @ Value::Object(_)) => Some(value),
-        Some(_) => {
-            return Err("settings_save_wecom accessPolicy must be an object or null".to_string())
-        }
-    };
     let secret_update = match object.remove("secretUpdate") {
         None => None,
         Some(Value::Null) => Some(None),
@@ -208,10 +196,6 @@ pub(crate) fn save_wecom(
     runtime.tenant_id = requested.tenant_id;
     runtime.connector_id = requested.connector_id;
     runtime.allow_group_messages = requested.allow_group_messages;
-    if let Some(access_policy) = access_policy_update {
-        runtime.access_policy_json = serde_json::to_string(&access_policy)
-            .map_err(|e| format!("serialize WeCom access policy failed: {e}"))?;
-    }
 
     if let Some(update) = secret_update {
         match update {

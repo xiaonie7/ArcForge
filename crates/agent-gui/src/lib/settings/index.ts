@@ -10,10 +10,6 @@ import {
   shouldSendAnthropicLongContextHeader,
 } from "../providers/anthropicModels";
 import { getAvailableThinkingLevelsForModel } from "../providers/runtime/modelFactory";
-import {
-  normalizeWeComAccessPolicy,
-  type WeComAccessPolicy,
-} from "../security/wecomAccessPolicy";
 import { createUuid } from "../shared/id";
 import { mergeAlwaysEnabledSkillNames } from "../skills/builtin";
 import { SYSTEM_TOOL_OPTIONS, type SystemToolId } from "../tools/systemToolOptions";
@@ -323,8 +319,6 @@ export type WecomSettings = {
   tenantId: string;
   connectorId: string;
   allowGroupMessages: boolean;
-  /** Local, exact-match grants for authenticated WeCom principals. */
-  accessPolicy: WeComAccessPolicy;
 };
 
 export type AppSettings = {
@@ -1063,7 +1057,6 @@ export function normalizeWecomSettings(input: unknown): WecomSettings {
     // Group messages are opt-in because a response is visible to every
     // participant and cannot provide private per-user history isolation.
     allowGroupMessages: obj.allowGroupMessages === true,
-    accessPolicy: normalizeWeComAccessPolicy(obj.accessPolicy),
   };
 }
 

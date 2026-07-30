@@ -436,6 +436,41 @@ func (m *Manager) ActiveConversationActivities() []RunActivity {
 	return activities
 }
 
+// ConversationRunWorkdir returns the desktop-reported workspace for the
+// currently active run. Channel commands intentionally arrive without a
+// connector-selected workdir, so their authoritative cwd is learned from the
+// runtime snapshot published by the desktop after the run starts.
+func (m *Manager) ConversationRunWorkdir(conversationID string, runID string) (string, bool) {
+	s := m.convStreams
+	conversationID = strings.TrimSpace(conversationID)
+	runID = strings.TrimSpace(runID)
+	if conversationID == "" || runID == "" {
+		return "", false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stream := s.streams[conversationID]
+	if stream == nil || stream.activity == nil || stream.activity.RunID != runID {
+		return "", false
+	}
+	// A runtime snapshot belongs to this exact run and is authoritative. The
+	// conversation and queued activity workdirs may still contain the previous
+	// run's sticky workspace when a channel command starts with an empty cwd.
+	if snapshot := stream.latestSnapshot; snapshot != nil && snapshot.RunID == runID {
+		if workdir := strings.TrimSpace(snapshot.Workdir); workdir != "" {
+			return workdir, true
+		}
+	}
+	if workdir := strings.TrimSpace(stream.activity.Workdir); workdir != "" {
+		return workdir, true
+	}
+	if workdir := strings.TrimSpace(stream.workdir); workdir != "" {
+		return workdir, true
+	}
+	return "", false
+}
+
 // appendEventLocked assigns the next seq, freezes the payload, stores the
 // event, and fans it out to subscribers.
 func (s *conversationStreamStore) appendEventLocked(

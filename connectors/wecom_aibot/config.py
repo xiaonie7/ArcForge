@@ -106,6 +106,7 @@ class ConnectorConfig:
     connector_id: str
     allow_group_messages: bool = False
     max_text_bytes: int = 128 * 1024
+    max_file_bytes: int = 20 * 1024 * 1024
     dedupe_ttl_seconds: int = 24 * 60 * 60
     delta_interval_seconds: float = 0.12
 
@@ -155,6 +156,18 @@ def load_config() -> ConnectorConfig:
         connector_id=connector_id,
         allow_group_messages=allow_groups,
         max_text_bytes=max(1, int(_env("ARCFORGE_GATEWAY_CHANNEL_MAX_TEXT_BYTES", "131072"))),
+        max_file_bytes=max(
+            1,
+            min(
+                20 * 1024 * 1024,
+                int(
+                    _env(
+                        "ARCFORGE_GATEWAY_CHANNEL_MAX_FILE_BYTES",
+                        str(20 * 1024 * 1024),
+                    )
+                ),
+            ),
+        ),
         dedupe_ttl_seconds=max(60, int(_env("ARCFORGE_GATEWAY_CHANNEL_DEDUPE_TTL_SECONDS", "86400"))),
         delta_interval_seconds=max(0.02, float(_env("ARCFORGE_GATEWAY_CHANNEL_DELTA_INTERVAL_SECONDS", "0.12"))),
     )

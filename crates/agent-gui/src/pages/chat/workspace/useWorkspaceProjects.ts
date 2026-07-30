@@ -32,6 +32,10 @@ import {
   createWorkspaceProjectFromPath,
   getDefaultWorkspaceProjectPath,
 } from "./workspaceProjectsModel";
+import {
+  shouldStartConversationForRecentSelection,
+  shouldStartConversationForWorkspaceActivation,
+} from "./workspaceScopeTransition";
 
 type UseWorkspaceProjectsParams = {
   settings: AppSettings;
@@ -197,6 +201,12 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
           (item) =>
             workspaceProjectPathKey(item.path) === normalizedPathKey || item.id === project.id,
         ) ?? project;
+      const shouldStartConversation = shouldStartConversationForWorkspaceActivation({
+        forceNewConversation: options?.startConversation === true,
+        isRecentScopeActive,
+        activeProjectId: activeWorkspaceProjectId,
+        targetProjectId: targetProject.id,
+      });
       // 目标工作区已完全激活时提前返回，避免流式进行中触发无谓的 settings 写入与重渲染
       if (
         !isRecentScopeActive &&
@@ -268,7 +278,7 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
           system: nextSystem,
         };
       });
-      if (options?.startConversation) {
+      if (shouldStartConversation) {
         prepareComposerForConversationChangeActionRef.current();
         startNewConversationActionRef.current({ workdir: targetProject.path });
       }
@@ -294,8 +304,18 @@ export function useWorkspaceProjects(params: UseWorkspaceProjectsParams) {
 
   const handleSelectRecentScope = useCallback(() => {
     setActiveView("chat");
+    if (!shouldStartConversationForRecentSelection(isRecentScopeActive)) {
+      return;
+    }
     setIsRecentScopeActive(true);
-  }, [setActiveView]);
+    prepareComposerForConversationChangeActionRef.current();
+    startNewConversationActionRef.current({ workdir: "" });
+  }, [
+    isRecentScopeActive,
+    prepareComposerForConversationChangeActionRef,
+    setActiveView,
+    startNewConversationActionRef,
+  ]);
 
   const handleNewConversationForRecentScope = useCallback(() => {
     setActiveView("chat");

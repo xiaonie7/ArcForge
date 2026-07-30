@@ -73,6 +73,7 @@ function createRegistryHarness() {
               worktreeRoot: "/tmp/arcforge-subagents/agent-a",
               workdir: "/tmp/arcforge-subagents/agent-a",
               branchName: "arcforge/subagent/agent-a",
+              baseRevision: "a".repeat(40),
             };
           }
           if (command === "subagent_worktree_status") {
@@ -93,6 +94,47 @@ function createRegistryHarness() {
               branchDeleted: true,
             };
           }
+          if (command === "execution_broker_register_run") {
+            return { bindingId: "binding-1", isolationLevel: "workspace_only" };
+          }
+          if (command === "execution_broker_close_run") return undefined;
+          if (command === "subagent_worktree_validate") {
+            const runId = args.input.runId;
+            const runSpecHash = args.input.runSpecHash;
+            return {
+              candidate: {
+                kind: "candidate_bundle",
+                candidateId: `candidate-${runId}`,
+                taskId: runId,
+                runId,
+                runSpecHash,
+                candidateHash: "b".repeat(64),
+                baseRevision: "a".repeat(40),
+                changedPaths: [],
+                status: "",
+                diffStat: "",
+                diff: "",
+                diffTruncated: false,
+                untrackedFiles: [],
+                createdAt: Date.now(),
+              },
+              validation: {
+                kind: "validation_report",
+                reportId: `report-${runId}`,
+                reportHash: "c".repeat(64),
+                taskId: runId,
+                runId,
+                runSpecHash,
+                candidateHash: "b".repeat(64),
+                baseRevision: "a".repeat(40),
+                status: "passed",
+                scope: "structural",
+                checks: [],
+                testStatus: "not_run",
+                createdAt: Date.now(),
+              },
+            };
+          }
           throw new Error(`Unexpected invoke: ${command}`);
         },
       },
@@ -101,7 +143,10 @@ function createRegistryHarness() {
   return { loader, runnerCalls, listedServerIds, listedServerCommands };
 }
 
-async function buildRegistry(harness, { withSubagentRuntime, storeIpc, workspaceAccess } = {}) {
+async function buildRegistry(
+  harness,
+  { withSubagentRuntime, storeIpc, workspaceAccess, principal } = {},
+) {
   const { loader } = harness;
   const { buildBuiltinToolRegistry } = loader.loadModule("src/lib/tools/builtinRegistry.ts");
   const { createFileToolState } = loader.loadModule("src/lib/tools/fileToolState.ts");
@@ -113,8 +158,35 @@ async function buildRegistry(harness, { withSubagentRuntime, storeIpc, workspace
     skillsEnabled: true,
     runtimeScope: "chat",
     workspaceAccess,
+    principal,
     selectedSystemToolIds: [],
     getMcpSettings: () => mcpSettingsHolder.value,
+    remoteWebTunnelsEnabled: true,
+    tunnelProjectPathKey: "/tmp/arcforge-subagent-registry-test",
+    sshManagerRemoteAllowed: true,
+    associatedSshHostIds: ["host-1"],
+    sshHosts: [
+      {
+        id: "host-1",
+        name: "Test host",
+        description: "",
+        host: "ssh.example.test",
+        port: 22,
+        username: "tester",
+        authType: "password",
+        password: "",
+        privateKey: "",
+        privateKeyPath: "",
+        privateKeyPassphrase: "",
+        proxy: {
+          type: "socks5",
+          url: "",
+          port: 1080,
+          username: "",
+          password: "",
+        },
+      },
+    ],
   };
   if (!withSubagentRuntime) {
     return { registry: await buildBuiltinToolRegistry(baseParams), mcpSettingsHolder };
@@ -170,6 +242,49 @@ test("registry with a subagent runtime exposes Agent and the parent SendMessage"
   assert.equal(registry.metadataByName.get("Agent").isReadOnly, false);
   assert.equal(registry.metadataByName.get("SendMessage").isReadOnly, true);
   assert.ok(registry.hasTool("agent"));
+});
+
+test("a WeCom principal receives the same full tool registry as desktop chat", async () => {
+  const desktop = await buildRegistry(createRegistryHarness(), { withSubagentRuntime: true });
+  const wecom = await buildRegistry(createRegistryHarness(), {
+    withSubagentRuntime: true,
+    principal: {
+      principalId: "wecom:user-1",
+      channel: "wecom",
+      tenantId: "tenant-1",
+      botId: "bot-1",
+      externalUserId: "user-1",
+      chatId: "",
+      chatType: "direct",
+      externalMessageId: "message-1",
+      connectorId: "connector-1",
+      channelSessionId: "session-1",
+      channelCommand: "",
+      authTime: 1_700_000_000_000,
+      requestId: "request-1",
+    },
+  });
+
+  const desktopNames = desktop.registry.tools.map((tool) => tool.name);
+  const wecomNames = wecom.registry.tools.map((tool) => tool.name);
+  assert.deepEqual(wecomNames, desktopNames);
+  for (const name of [
+    "Read",
+    "Write",
+    "Bash",
+    "DatabaseExecute",
+    "MemoryManager",
+    "SkillsManager",
+    "McpManager",
+    "CronTaskManager",
+    "TunnelManager",
+    "SSHManager",
+    "ReadTerminal",
+    "Agent",
+    "mcp_docs_search",
+  ]) {
+    assert.ok(wecomNames.includes(name), `${name} must remain available to WeCom`);
+  }
 });
 
 test("workspaceAccess none keeps resource tools but excludes every workdir-bound surface", async () => {
@@ -255,7 +370,7 @@ test("Agent tool description embeds the hydrated roster and enabled templates", 
   assert.match(agentTool.description, /reviewer \(Reviewer\) - Review code paths/);
 });
 
-test("worktree children get fs/shell/ro-memory/MCP tools but no skills, system, or manager tools", async () => {
+test("worktree children get the candidate fs/shell surface but no resource or manager tools", async () => {
   const harness = createRegistryHarness();
   const { registry } = await buildRegistry(harness, { withSubagentRuntime: true });
 
@@ -264,7 +379,7 @@ test("worktree children get fs/shell/ro-memory/MCP tools but no skills, system, 
       agents: [{ id: "agent-a", prompt: "Use docs if useful.", mode: "worktree" }],
     }),
   );
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, false, JSON.stringify(result));
   // MCP tools listed once for the parent registry and once for the child.
   assert.deepEqual(harness.listedServerIds, [["docs"], ["docs"]]);
   assert.equal(harness.runnerCalls.length, 1);
@@ -273,14 +388,13 @@ test("worktree children get fs/shell/ro-memory/MCP tools but no skills, system, 
   assert.ok(names.includes("Read"));
   assert.ok(names.includes("Write"));
   assert.ok(names.includes("Bash"));
-  assert.ok(names.includes("mcp_docs_search"));
   assert.ok(names.includes("SendMessage"));
-  // Read-only memory stays available in worktree mode.
-  assert.ok(names.includes("MemoryManager"));
 
   assert.ok(!names.includes("Agent"));
   assert.ok(!names.includes("SkillsManager"));
   assert.ok(!names.includes("McpManager"));
+  assert.ok(!names.includes("mcp_docs_search"));
+  assert.ok(!names.includes("MemoryManager"));
   assert.ok(!names.includes("CronTaskManager"));
   assert.ok(!names.includes("ReadTerminal"));
 
@@ -307,7 +421,7 @@ test("subagent registries list MCP servers from live settings, not turn-start sn
       agents: [{ id: "agent-live", prompt: "Use docs if useful.", mode: "worktree" }],
     }),
   );
-  assert.equal(result.isError, false);
+  assert.equal(result.isError, false, JSON.stringify(result));
   assert.deepEqual(harness.listedServerCommands, [["mock-mcp-server"], ["mock-mcp-server-v2"]]);
 });
 

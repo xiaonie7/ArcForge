@@ -15,6 +15,10 @@ const agentTurnSource = readFileSync(
   new URL("../../src/pages/chat/turns/runAgentConversationTurn.ts", import.meta.url),
   "utf8",
 );
+const sendTurnSource = readFileSync(
+  new URL("../../src/pages/chat/runtime/useSendChatTurn.ts", import.meta.url),
+  "utf8",
+);
 
 function createController(options = {}) {
   const sent = [];
@@ -232,10 +236,18 @@ test("gateway bridge close blocks normal events but allows forced title updates"
   );
 });
 
-test("conversation turns wait for the terminal bridge event before returning", () => {
-  const awaitedDone = /await gatewayBridgeEvents\.queueEvent\(\{\s*type: "done"/;
-  assert.match(textTurnSource, awaitedDone);
-  assert.match(agentTurnSource, awaitedDone);
+test("conversation turns carry only the canonical answer on the terminal bridge event", () => {
+  const finalAnswerDone =
+    /await gatewayBridgeEvents\.queueEvent\(\{\s*type: "done",\s*final_text: gatewayAssistantText,/;
+  assert.match(textTurnSource, finalAnswerDone);
+  assert.match(agentTurnSource, finalAnswerDone);
+});
+
+test("compact command carries its user-facing result on the terminal bridge event", () => {
+  assert.match(
+    sendTurnSource,
+    /const finalText = applied[\s\S]*?type: "done",\s*final_text: finalText,/,
+  );
 });
 
 test("gateway bridge checkpoint emits compaction summary payload", () => {

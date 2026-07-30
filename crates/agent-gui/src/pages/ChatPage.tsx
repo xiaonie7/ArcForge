@@ -1257,7 +1257,6 @@ export function ChatPage(props: ChatPageProps) {
 
   useGatewayBridgeListeners({
     allowWecomGroupMessages: settings.wecom.allowGroupMessages,
-    wecomAccessPolicy: settings.wecom.accessPolicy,
     currentConversationIdRef,
     conversationRuntimeCacheRef,
     ensureGatewayBridgeConversationReadyRef,
@@ -1323,6 +1322,7 @@ export function ChatPage(props: ChatPageProps) {
     persistConversation,
     pruneIdleConversationCaches,
     requestQueuedChatTurnProcessing,
+    defaultAgentWorkdir: activeWorkspaceProjectPath || workdir,
     allowEmptyAgentWorkdir: isAgentMode && isRecentScopeActive,
   });
 
