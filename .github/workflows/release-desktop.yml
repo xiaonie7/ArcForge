@@ -42,11 +42,18 @@ jobs:
         with:
           go-version: 1.25.12
           check-latest: true
+          cache-dependency-path: crates/agent-gateway/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: 3.12
+
+      - name: Set up Protobuf compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "25.3"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install desktop dependencies
         run: pnpm install --frozen-lockfile
