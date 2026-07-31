@@ -135,7 +135,7 @@ ArcForge 目前是快速迭代中的开发预览版：
 ### 启动桌面开发环境
 
 ```powershell
-git clone https://github.com/xiaonieli7/ArcForge.git
+git clone https://github.com/xiaonie7/ArcForge.git
 cd ArcForge
 
 pnpm --dir crates/agent-gui install --frozen-lockfile
