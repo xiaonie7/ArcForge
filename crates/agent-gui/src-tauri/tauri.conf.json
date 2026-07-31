@@ -47,7 +47,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgzMEVGMDI0MUE0MTNGODAKUldTQVAwRWFKUEFPZzRLT3RwODZZOW44NERQZnc3c0lsNEFoUEFSalJZM2lQSXRMcGlaR0JXM0YK",
       "endpoints": [
         "https://github.com/xiaonieli7/ArcForge/releases/latest/download/latest.json"
       ]
