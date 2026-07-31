@@ -45,6 +45,9 @@ from connectors.wecom_aibot.worker import (
     _handle_text,
     _handle_control_line,
     _register_connection_handlers,
+    _reply_final,
+    _split_wecom_reply,
+    _WECOM_REPLY_MAX_BYTES,
     _routing,
     _send_response_files,
     _serve_control_requests,
@@ -118,6 +121,47 @@ class RoutingTests(unittest.TestCase):
             _routing({"userid": "alice"}),
             ("", "alice", ""),
         )
+
+
+class ReplyChunkingTests(unittest.IsolatedAsyncioTestCase):
+    def test_split_is_byte_safe_and_preserves_text(self):
+        text = "第一行\n" + ("中" * 5) + "🙂" + "\n第三行"
+        chunks = _split_wecom_reply(text, max_bytes=8)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(chunks), text)
+        self.assertTrue(all(len(chunk.encode("utf-8")) <= 8 for chunk in chunks))
+
+    def test_exact_sdk_limit_stays_as_one_chunk(self):
+        text = "a" * _WECOM_REPLY_MAX_BYTES
+
+        self.assertEqual(_split_wecom_reply(text), [text])
+
+    async def test_long_reply_finishes_stream_then_sends_continuation(self):
+        text = "中" * 7000
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(return_value={"errcode": 0}),
+            send_message=AsyncMock(return_value={"errcode": 0}),
+        )
+        frame = {
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "chatid": "",
+            }
+        }
+
+        await _reply_final(wecom, frame, "stream-1", text)
+
+        wecom.reply_stream.assert_awaited_once()
+        first_chunk = wecom.reply_stream.await_args.args[2]
+        self.assertLessEqual(len(first_chunk.encode("utf-8")), _WECOM_REPLY_MAX_BYTES)
+        wecom.send_message.assert_awaited_once()
+        target_id, body = wecom.send_message.await_args.args
+        self.assertEqual(target_id, "alice")
+        continuation = body["markdown"]["content"]
+        self.assertEqual(first_chunk + continuation, text)
+        self.assertLessEqual(len(continuation.encode("utf-8")), _WECOM_REPLY_MAX_BYTES)
 
 
 class CommandTests(unittest.TestCase):

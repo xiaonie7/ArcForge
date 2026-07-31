@@ -1,0 +1,111 @@
+name: Release desktop
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+          cache-dependency-path: |
+            crates/agent-gui/pnpm-lock.yaml
+            crates/agent-gateway/web/pnpm-lock.yaml
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 1.25.12
+          check-latest: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+
+      - name: Install desktop dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: crates/agent-gui
+
+      - name: Prepare release version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $metadataJson = node scripts/release/prepare-app-version-from-tag.mjs "$env:RELEASE_TAG" `
+            --tauri-config crates/agent-gui/src-tauri/tauri.version.generated.conf.json `
+            --json
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to prepare the release version."
+          }
+
+          $metadata = $metadataJson | ConvertFrom-Json
+          "app-version=$($metadata.appVersion)" >> $env:GITHUB_OUTPUT
+          "release-tag=$($metadata.releaseTag)" >> $env:GITHUB_OUTPUT
+          "is-prerelease=$($metadata.isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Validate updater signing configuration
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $config = Get-Content -Raw crates/agent-gui/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $publicKey = [string]$config.plugins.updater.pubkey
+          if ([string]::IsNullOrWhiteSpace($publicKey) -or $publicKey -eq "REPLACE_WITH_TAURI_UPDATER_PUBLIC_KEY") {
+            throw "Replace the updater public-key placeholder in crates/agent-gui/src-tauri/tauri.conf.json before creating a release."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "The TAURI_SIGNING_PRIVATE_KEY GitHub Actions secret is required for a signed release."
+          }
+
+      - name: Build and publish desktop release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCFORGE_APP_VERSION: ${{ steps.version.outputs.app-version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: crates/agent-gui
+          tauriScript: pnpm tauri
+          tagName: ${{ github.ref_name }}
+          releaseName: ArcForge ${{ github.ref_name }}
+          releaseBody: |
+            Windows x64 desktop release for ArcForge.
+
+            The NSIS installer and its signed updater artifact are included in the release assets.
+          releaseDraft: false
+          prerelease: ${{ steps.version.outputs.is-prerelease }}
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadUpdaterSignatures: true
+          args: >-
+            --config src-tauri/tauri.windows.conf.json
+            --config src-tauri/tauri.version.generated.conf.json
+            --target x86_64-pc-windows-msvc

@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis",
       "msi"
@@ -42,6 +43,14 @@
       "nsis": {
         "installerIcon": "icons/icon-windows.ico"
       }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENBRjFERUMyREQzOUY2ODcKUldTSDlqbmR3dDd4eXNjOTJFVHFwNXJYTmxzUU9nclE2U0ZXN0VmaWFQeU9wNWdHNmJyUUY4bVoK",
+      "endpoints": [
+        "https://github.com/xiaonieli7/ArcForge/releases/latest/download/latest.json"
+      ]
     }
   }
 }

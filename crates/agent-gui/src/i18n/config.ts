@@ -1084,6 +1084,15 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.aboutDescription":
       "面向 Windows 专业用户的本地优先桌面 Work Agent。将用户目标和本地上下文转化为可审查的交付物、可验证的证据，以及需要明确授权的真实动作。",
     "settings.aboutCurrentVersion": "当前版本",
+    "settings.aboutUpdateTitle": "在线更新",
+    "settings.aboutUpdateIdle": "检查最新版本",
+    "settings.aboutUpdateCheck": "检查更新",
+    "settings.aboutUpdateChecking": "正在检查更新…",
+    "settings.aboutUpdateAvailable": "发现新版本",
+    "settings.aboutUpdateInstall": "下载并安装",
+    "settings.aboutUpdateDownloading": "正在下载更新",
+    "settings.aboutUpdateUpToDate": "已是最新版本",
+    "settings.aboutUpdateDesktopOnly": "在线更新仅适用于桌面应用",
 
     /* ── Settings System ── */
     "settings.appearance": "外观主题",
@@ -3252,6 +3261,15 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.aboutDescription":
       "A local-first desktop Work Agent for Windows professionals. ArcForge turns user goals and local context into reviewable deliverables, verifiable evidence, and real-world actions that require explicit authorization.",
     "settings.aboutCurrentVersion": "Current Version",
+    "settings.aboutUpdateTitle": "Online Updates",
+    "settings.aboutUpdateIdle": "Check for the latest release",
+    "settings.aboutUpdateCheck": "Check for updates",
+    "settings.aboutUpdateChecking": "Checking for updates…",
+    "settings.aboutUpdateAvailable": "Update available",
+    "settings.aboutUpdateInstall": "Download and install",
+    "settings.aboutUpdateDownloading": "Downloading update",
+    "settings.aboutUpdateUpToDate": "You are up to date",
+    "settings.aboutUpdateDesktopOnly": "Online updates are available in the desktop app only",
 
     /* ── Settings System ── */
     "settings.appearance": "Appearance",

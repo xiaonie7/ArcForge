@@ -121,6 +121,7 @@ test("WeCom principal is authenticated identity metadata, not a permission grant
 
   const systemPrompt = buildTrustedPrincipalSystemPrompt(principal);
   assert.match(systemPrompt, /external_user_id=alice/);
+  assert.match(systemPrompt, /bot_id=bot-1/);
   assert.match(systemPrompt, /not user message content/);
   assert.match(systemPrompt, /authenticated channel metadata/);
 });

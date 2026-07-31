@@ -45,6 +45,8 @@ _MEDIA_UPLOAD_CHUNK_BYTES = 512 * 1024
 _MEDIA_UPLOAD_ATTEMPTS = 3
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_FILE_NAME_BYTES = 255
+# The WeCom SDK documents 20,480 UTF-8 bytes as the stream reply content limit.
+_WECOM_REPLY_MAX_BYTES = 20 * 1024
 _WINDOWS_RESERVED_FILE_NAMES = {
     "CON",
     "PRN",
@@ -114,8 +116,80 @@ def _stream_id() -> str:
     return generate_req_id("arcforge-stream")
 
 
+def _utf8_prefix_length(text: str, max_bytes: int) -> int:
+    """Return the largest character prefix that fits within max_bytes."""
+    used = 0
+    for index, character in enumerate(text):
+        character_bytes = len(character.encode("utf-8"))
+        if used + character_bytes > max_bytes:
+            return index
+        used += character_bytes
+    return len(text)
+
+
+def _split_wecom_reply(text: str, max_bytes: int = _WECOM_REPLY_MAX_BYTES) -> list[str]:
+    """Split a reply at UTF-8 byte boundaries, preferring Markdown line breaks."""
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    if len(text.encode("utf-8")) <= max_bytes:
+        return [text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+
+    def flush() -> None:
+        nonlocal current, current_bytes
+        if current:
+            chunks.append("".join(current))
+            current = []
+            current_bytes = 0
+
+    for segment in text.splitlines(keepends=True):
+        segment_bytes = len(segment.encode("utf-8"))
+        if segment_bytes <= max_bytes:
+            if current and current_bytes + segment_bytes > max_bytes:
+                flush()
+            current.append(segment)
+            current_bytes += segment_bytes
+            continue
+
+        flush()
+        remainder = segment
+        while len(remainder.encode("utf-8")) > max_bytes:
+            prefix_length = _utf8_prefix_length(remainder, max_bytes)
+            if prefix_length <= 0:
+                raise ValueError("max_bytes is too small for UTF-8 text")
+            chunks.append(remainder[:prefix_length])
+            remainder = remainder[prefix_length:]
+        if remainder:
+            current.append(remainder)
+            current_bytes = len(remainder.encode("utf-8"))
+
+    flush()
+    return chunks
+
+
+def _reply_target_id(frame: dict[str, Any]) -> str:
+    chat_id, user_id, chat_type = _routing(_body(frame))
+    return chat_id if chat_type == "group" else (chat_id or user_id)
+
+
 async def _reply_final(client: Any, frame: dict[str, Any], stream_id: str, text: str) -> None:
-    await client.reply_stream(frame, stream_id, text or "(empty response)", True)
+    chunks = _split_wecom_reply(text or "(empty response)")
+    await client.reply_stream(frame, stream_id, chunks[0], True)
+    if len(chunks) == 1:
+        return
+
+    target_id = _reply_target_id(frame)
+    if not target_id:
+        raise RuntimeError("WeCom reply continuation target is unavailable")
+    for chunk in chunks[1:]:
+        acknowledgement = await client.send_message(
+            target_id,
+            {"msgtype": "markdown", "markdown": {"content": chunk}},
+        )
+        _ensure_wecom_acknowledged(acknowledgement)
 
 
 async def _submit_with_input_handlers(
