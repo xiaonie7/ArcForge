@@ -1,6 +1,6 @@
 [package]
 name = "arcforge"
-version = "0.1.1"
+version = "0.1.5"
 description = "ArcForge desktop Work Agent for Windows"
 authors = ["nieli"]
 edition = "2021"
