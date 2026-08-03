@@ -194,7 +194,10 @@ function DatabaseProfileModal(props: {
   }
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-5 backdrop-blur-sm">
+    <div
+      className="settings-modal-overlay fixed inset-0 z-[100] flex items-center justify-center bg-black/45 p-5 backdrop-blur-sm"
+      data-state="open"
+    >
       <div
         role="dialog"
         aria-modal="true"

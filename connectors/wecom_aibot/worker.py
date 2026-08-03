@@ -13,6 +13,7 @@ import mimetypes
 import re
 import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +48,13 @@ _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_FILE_NAME_BYTES = 255
 # The WeCom SDK documents 20,480 UTF-8 bytes as the stream reply content limit.
 _WECOM_REPLY_MAX_BYTES = 20 * 1024
+# WeCom rejects a stream that has not been updated for more than six minutes.
+# Refresh at four minutes so scheduler and network jitter cannot consume the
+# entire safety window.
+_WECOM_STREAM_REFRESH_SECONDS = 4 * 60
+_WECOM_INTERACTION_DRAIN_SECONDS = 5.0
+_WECOM_REPLY_CONTEXT_ERROR_CODES = frozenset({846605, 846608})
+_WECOM_REPLY_CONTEXT_ERROR_PATTERN = re.compile(r"(?<!\d)(846605|846608)(?!\d)")
 _WINDOWS_RESERVED_FILE_NAMES = {
     "CON",
     "PRN",
@@ -175,21 +183,146 @@ def _reply_target_id(frame: dict[str, Any]) -> str:
     return chat_id if chat_type == "group" else (chat_id or user_id)
 
 
-async def _reply_final(client: Any, frame: dict[str, Any], stream_id: str, text: str) -> None:
-    chunks = _split_wecom_reply(text or "(empty response)")
-    await client.reply_stream(frame, stream_id, chunks[0], True)
-    if len(chunks) == 1:
-        return
+def _wecom_error_code(value: object) -> int | None:
+    """Extract a known numeric error code without exposing remote error text."""
 
+    candidates: list[object] = []
+    if isinstance(value, BaseException):
+        candidates.extend(
+            getattr(value, name, None) for name in ("errcode", "error_code", "code")
+        )
+        candidates.extend(value.args)
+    else:
+        for mapping in _ack_mappings(value):
+            candidates.extend(
+                mapping.get(name) for name in ("errcode", "error_code", "code")
+            )
+
+    found_success = False
+    for candidate in candidates:
+        if isinstance(candidate, bool) or candidate is None:
+            continue
+        error_code: int | None = None
+        if isinstance(candidate, int):
+            error_code = candidate
+        elif isinstance(candidate, str):
+            stripped = candidate.strip()
+            if stripped.lstrip("-").isdigit():
+                error_code = int(stripped)
+            else:
+                match = _WECOM_REPLY_CONTEXT_ERROR_PATTERN.search(stripped)
+                if match is not None:
+                    error_code = int(match.group(1))
+        if error_code not in (None, 0):
+            return error_code
+        if error_code == 0:
+            found_success = True
+
+    if isinstance(value, BaseException):
+        match = _WECOM_REPLY_CONTEXT_ERROR_PATTERN.search(str(value))
+        if match is not None:
+            return int(match.group(1))
+    return 0 if found_success else None
+
+
+def _reply_context_expired(value: object) -> bool:
+    return _wecom_error_code(value) in _WECOM_REPLY_CONTEXT_ERROR_CODES
+
+
+async def _send_proactive_reply_chunks(
+    client: Any,
+    frame: dict[str, Any],
+    chunks: list[str],
+) -> None:
     target_id = _reply_target_id(frame)
     if not target_id:
-        raise RuntimeError("WeCom reply continuation target is unavailable")
-    for chunk in chunks[1:]:
+        raise RuntimeError("WeCom proactive reply target is unavailable")
+    for chunk in chunks:
         acknowledgement = await client.send_message(
             target_id,
             {"msgtype": "markdown", "markdown": {"content": chunk}},
         )
         _ensure_wecom_acknowledged(acknowledgement)
+
+
+async def _reply_final(
+    client: Any, frame: dict[str, Any], stream_id: str, text: str
+) -> None:
+    chunks = _split_wecom_reply(text or "(empty response)")
+    try:
+        acknowledgement = await client.reply_stream(frame, stream_id, chunks[0], True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        if not _reply_context_expired(exc):
+            raise
+        await _send_proactive_reply_chunks(client, frame, chunks)
+        logger.info("WeCom final reply used proactive fallback")
+        return
+
+    error_code = _wecom_error_code(acknowledgement)
+    if error_code in _WECOM_REPLY_CONTEXT_ERROR_CODES:
+        await _send_proactive_reply_chunks(client, frame, chunks)
+        logger.info("WeCom final reply used proactive fallback")
+        return
+    if error_code not in (None, 0):
+        raise RuntimeError("WeCom rejected the final stream reply")
+    if len(chunks) == 1:
+        return
+
+    await _send_proactive_reply_chunks(client, frame, chunks[1:])
+
+
+async def _maintain_reply_stream(
+    client: Any,
+    frame: dict[str, Any],
+    stream_id: str,
+    *,
+    refresh_allowed: asyncio.Event,
+    send_lock: asyncio.Lock,
+    stop: asyncio.Event,
+    interval_seconds: float = _WECOM_STREAM_REFRESH_SECONDS,
+) -> None:
+    """Refresh a long-running reply while leaving interactive cards untouched."""
+
+    started_at = time.monotonic()
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+        if stop.is_set():
+            return
+        if not refresh_allowed.is_set():
+            continue
+
+        async with send_lock:
+            if stop.is_set() or not refresh_allowed.is_set():
+                continue
+            elapsed_minutes = max(1, int((time.monotonic() - started_at) / 60))
+            content = f"正在处理，已用时约 {elapsed_minutes} 分钟，请稍候…"
+            try:
+                acknowledgement = await client.reply_stream(
+                    frame,
+                    stream_id,
+                    content,
+                    False,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if _reply_context_expired(exc):
+                    logger.warning("WeCom reply stream expired during keepalive")
+                    return
+                logger.warning("WeCom reply stream keepalive failed")
+                continue
+
+            error_code = _wecom_error_code(acknowledgement)
+            if error_code in _WECOM_REPLY_CONTEXT_ERROR_CODES:
+                logger.warning("WeCom reply stream expired during keepalive")
+                return
+            if error_code not in (None, 0):
+                logger.warning("WeCom reply stream keepalive was rejected")
 
 
 async def _submit_with_input_handlers(
@@ -573,10 +706,58 @@ async def _handle_message(
 
     # Acknowledge before waiting behind a previous turn so WeCom does not time
     # out while preserving per-user delivery order into the desktop runtime.
+    refresh_allowed = asyncio.Event()
+    refresh_allowed.set()
+    stream_stop = asyncio.Event()
+    stream_send_lock = asyncio.Lock()
+    stream_keepalive_task: asyncio.Task[None] | None = None
+    placeholder_sent = False
     try:
-        await wecom.reply_stream(frame, stream_id, "正在处理，请稍候…", False)
+        acknowledgement = await wecom.reply_stream(
+            frame,
+            stream_id,
+            "正在处理，请稍候…",
+            False,
+        )
+        error_code = _wecom_error_code(acknowledgement)
+        if error_code not in (None, 0):
+            raise RuntimeError("WeCom rejected the placeholder reply")
+        placeholder_sent = True
     except Exception:
         logger.warning("WeCom placeholder reply failed")
+
+    if placeholder_sent:
+        stream_keepalive_task = asyncio.create_task(
+            _maintain_reply_stream(
+                wecom,
+                frame,
+                stream_id,
+                refresh_allowed=refresh_allowed,
+                send_lock=stream_send_lock,
+                stop=stream_stop,
+            ),
+            name="arcforge-wecom-stream-keepalive",
+        )
+
+    async def stop_stream_keepalive() -> None:
+        stream_stop.set()
+        if stream_keepalive_task is not None:
+            await stream_keepalive_task
+
+    async def deliver_final(answer: str) -> None:
+        await stop_stream_keepalive()
+        if not refresh_allowed.is_set():
+            try:
+                await asyncio.wait_for(
+                    refresh_allowed.wait(),
+                    timeout=_WECOM_INTERACTION_DRAIN_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "WeCom input resolution update did not finish before final reply"
+                )
+        async with stream_send_lock:
+            await _reply_final(wecom, frame, stream_id, answer)
 
     inbound_files: list[ChannelInboundFile] = []
     if media_kind:
@@ -584,6 +765,9 @@ async def _handle_message(
             inbound_files.append(
                 await _download_inbound_media(wecom, frame, media_kind, config)
             )
+        except asyncio.CancelledError:
+            await stop_stream_keepalive()
+            raise
         except _MediaInputError as exc:
             answer = str(exc)
             if exc.retryable:
@@ -597,7 +781,7 @@ async def _handle_message(
                 )
             logger.warning("WeCom inbound media was rejected")
             with contextlib.suppress(Exception):
-                await _reply_final(wecom, frame, stream_id, answer)
+                await deliver_final(answer)
             return
 
     async def submit_in_order() -> None:
@@ -621,17 +805,34 @@ async def _handle_message(
         if interactions is None:
             result = await channel.submit(inbound)
         else:
+
             async def input_request_handler(request: object) -> None:
-                await interactions.present(
-                    request,
-                    session_key=session_key,
-                    wecom=wecom,
-                    frame=frame,
-                    stream_id=stream_id,
-                )
+                # The card and the keepalive share one stream. Pause before
+                # taking the send lock so a refresh can never overwrite a
+                # question after it has been presented.
+                refresh_allowed.clear()
+                presented = False
+                try:
+                    async with stream_send_lock:
+                        presented = await interactions.present(
+                            request,
+                            session_key=session_key,
+                            wecom=wecom,
+                            frame=frame,
+                            stream_id=stream_id,
+                        )
+                finally:
+                    if not presented:
+                        refresh_allowed.set()
 
             async def input_resolved_handler(resolved: object) -> None:
-                await interactions.handle_resolved(resolved, wecom=wecom)
+                try:
+                    async with stream_send_lock:
+                        await interactions.handle_resolved(resolved, wecom=wecom)
+                finally:
+                    # Resolution itself updates the stream. Resume the regular
+                    # four-minute cadence only after that update is complete.
+                    refresh_allowed.set()
 
             result = await _submit_with_input_handlers(
                 channel,
@@ -668,7 +869,7 @@ async def _handle_message(
             status=result.status or "failed",
         )
         try:
-            await _reply_final(wecom, frame, stream_id, answer)
+            await deliver_final(answer)
         except Exception:
             # The turn and any file deliveries have already completed. Keep the
             # dedupe entry so a callback retry only replays the final text.
@@ -692,7 +893,9 @@ async def _handle_message(
             dedupe.forget(session_key, external_id)
         logger.exception("WeCom message processing failed")
         with contextlib.suppress(Exception):
-            await _reply_final(wecom, frame, stream_id, failure_message)
+            await deliver_final(failure_message)
+    finally:
+        await stop_stream_keepalive()
 
 
 async def _handle_text(

@@ -44,6 +44,7 @@ from connectors.wecom_aibot.worker import (
     _handle_media,
     _handle_text,
     _handle_control_line,
+    _maintain_reply_stream,
     _register_connection_handlers,
     _reply_final,
     _split_wecom_reply,
@@ -162,6 +163,115 @@ class ReplyChunkingTests(unittest.IsolatedAsyncioTestCase):
         continuation = body["markdown"]["content"]
         self.assertEqual(first_chunk + continuation, text)
         self.assertLessEqual(len(continuation.encode("utf-8")), _WECOM_REPLY_MAX_BYTES)
+
+    async def test_expired_stream_falls_back_to_proactive_for_every_chunk(self):
+        text = "中" * 7000
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(
+                side_effect=RuntimeError(
+                    "Reply ack error: errcode=846608, errmsg=stream expired"
+                )
+            ),
+            send_message=AsyncMock(return_value={"errcode": 0}),
+        )
+        frame = {
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "chatid": "",
+            }
+        }
+
+        await _reply_final(wecom, frame, "stream-1", text)
+
+        wecom.reply_stream.assert_awaited_once()
+        self.assertEqual(wecom.send_message.await_count, 2)
+        self.assertEqual(
+            "".join(
+                call.args[1]["markdown"]["content"]
+                for call in wecom.send_message.await_args_list
+            ),
+            text,
+        )
+        self.assertTrue(
+            all(call.args[0] == "alice" for call in wecom.send_message.await_args_list)
+        )
+
+    async def test_expired_stream_ack_uses_group_chat_for_proactive_fallback(self):
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(return_value={"errcode": 846608}),
+            send_message=AsyncMock(return_value={"body": {"errcode": 0}}),
+        )
+        frame = {
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "group",
+                "chatid": "room-1",
+            }
+        }
+
+        await _reply_final(wecom, frame, "stream-1", "done")
+
+        wecom.send_message.assert_awaited_once_with(
+            "room-1",
+            {"msgtype": "markdown", "markdown": {"content": "done"}},
+        )
+
+    async def test_non_expiry_stream_failure_does_not_risk_duplicate_send(self):
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(
+                side_effect=RuntimeError("temporary transport error")
+            ),
+            send_message=AsyncMock(return_value={"errcode": 0}),
+        )
+        frame = {
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "chatid": "",
+            }
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "temporary transport error"):
+            await _reply_final(wecom, frame, "stream-1", "done")
+
+        wecom.send_message.assert_not_awaited()
+
+
+class ReplyStreamKeepaliveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_keepalive_waits_while_interaction_is_active_then_resumes(self):
+        sent = asyncio.Event()
+
+        async def reply_stream(*_args):
+            sent.set()
+            return {"errcode": 0}
+
+        wecom = SimpleNamespace(reply_stream=AsyncMock(side_effect=reply_stream))
+        refresh_allowed = asyncio.Event()
+        send_lock = asyncio.Lock()
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            _maintain_reply_stream(
+                wecom,
+                {},
+                "stream-1",
+                refresh_allowed=refresh_allowed,
+                send_lock=send_lock,
+                stop=stop,
+                interval_seconds=0.01,
+            )
+        )
+
+        await asyncio.sleep(0.03)
+        wecom.reply_stream.assert_not_awaited()
+        refresh_allowed.set()
+        await asyncio.wait_for(sent.wait(), timeout=0.2)
+        stop.set()
+        await asyncio.wait_for(task, timeout=0.2)
+
+        content = wecom.reply_stream.await_args.args[2]
+        self.assertIn("正在处理", content)
+        self.assertFalse(wecom.reply_stream.await_args.args[3])
 
 
 class CommandTests(unittest.TestCase):
@@ -746,6 +856,104 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         wecom.reply_stream_with_card.assert_awaited_once()
         answer_replies = [call.args[2] for call in wecom.reply_stream.await_args_list]
         self.assertTrue(any("选择已提交" in text for text in answer_replies))
+
+    async def test_turn_keepalive_pauses_for_input_card_and_resumes_after_resolution(
+        self,
+    ):
+        interactions = InteractionCoordinator()
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        dedupe = DedupeStore()
+        wecom = self._wecom()
+        keepalive_started = asyncio.Event()
+        captured = {}
+
+        async def fake_keepalive(
+            _client,
+            _frame,
+            _stream_id,
+            *,
+            refresh_allowed,
+            send_lock,
+            stop,
+            interval_seconds=240,
+        ):
+            captured["refresh_allowed"] = refresh_allowed
+            captured["send_lock"] = send_lock
+            captured["interval_seconds"] = interval_seconds
+            keepalive_started.set()
+            await stop.wait()
+
+        async def submit(
+            _inbound,
+            *,
+            input_request_handler=None,
+            input_resolved_handler=None,
+        ):
+            await asyncio.wait_for(keepalive_started.wait(), timeout=1)
+            await input_request_handler(self._request())
+            self.assertFalse(captured["refresh_allowed"].is_set())
+            self.assertFalse(captured["send_lock"].locked())
+            await input_resolved_handler(
+                {"interaction_id": "input-1", "status": "answered"}
+            )
+            self.assertTrue(captured["refresh_allowed"].is_set())
+            return SimpleNamespace(status="completed", text="done", message="")
+
+        channel = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+        with patch(
+            "connectors.wecom_aibot.worker._maintain_reply_stream",
+            new=fake_keepalive,
+        ):
+            await _handle_text(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                self._frame("message-1", "开始分析"),
+                interactions=interactions,
+            )
+
+        wecom.reply_stream_with_card.assert_awaited_once()
+        self.assertEqual(await interactions.pending_count(), 0)
+
+    async def test_final_reply_waits_for_delayed_input_resolution_update(self):
+        interactions = InteractionCoordinator()
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        dedupe = DedupeStore()
+        wecom = self._wecom()
+
+        async def submit(
+            _inbound,
+            *,
+            input_request_handler=None,
+            input_resolved_handler=None,
+        ):
+            await input_request_handler(self._request())
+
+            async def resolve_later():
+                await asyncio.sleep(0.01)
+                await input_resolved_handler(
+                    {"interaction_id": "input-1", "status": "answered"}
+                )
+
+            asyncio.create_task(resolve_later())
+            return SimpleNamespace(status="completed", text="done", message="")
+
+        channel = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+        await _handle_text(
+            wecom,
+            channel,
+            dedupe,
+            sessions,
+            _config(),
+            self._frame("message-1", "开始分析"),
+            interactions=interactions,
+        )
+
+        replies = [call.args[2:4] for call in wecom.reply_stream.await_args_list]
+        self.assertIn(("选择已完成，桌面端正在继续处理。", False), replies)
+        self.assertEqual(replies[-1], ("done", True))
 
     async def test_card_failure_falls_back_to_numbered_markdown_without_remote_error(self):
         interactions = InteractionCoordinator()

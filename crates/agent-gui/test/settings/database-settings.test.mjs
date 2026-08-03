@@ -33,6 +33,11 @@ test("database password editing is write-only and supports retain, replace, and 
   assert.doesNotMatch(sectionSource, /profile\.password\b/);
 });
 
+test("database profile modal opts into the visible settings modal state", () => {
+  assert.match(sectionSource, /className="settings-modal-overlay [^"]*"/);
+  assert.match(sectionSource, /data-state="open"/);
+});
+
 test("database settings are navigable and explain transient user or Skill connections", () => {
   assert.match(settingsTypesSource, /\| "database"/);
   assert.match(settingsPageSource, /id: "database"/);
