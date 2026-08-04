@@ -226,7 +226,7 @@ export function createTranscriptRowModel(options?: TranscriptRowModelOptions): T
     historyItems: RenderTimelineItem[],
     live: LiveTailInput,
   ): TranscriptRowsSnapshot => {
-    const liveTailVisible = live.isSending;
+    const liveTailVisible = live.isSending && !live.isSettled;
     const isInitialBuild = !hasBuilt;
     hasBuilt = true;
 

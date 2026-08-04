@@ -89,6 +89,7 @@ export type RunTextConversationTurnParams = {
   compaction: CompactionController;
   cancellation: TurnCancellation;
   resetLiveTranscript: (store: LiveTranscriptStore) => void;
+  settleLiveTranscript: (store: LiveTranscriptStore) => void;
   appendDraftAssistantText: (delta: string, store: LiveTranscriptStore) => void;
   batchLiveRoundsUpdate: (
     updater: (prev: LiveRound[]) => LiveRound[],
@@ -132,6 +133,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     compaction,
     cancellation,
     resetLiveTranscript,
+    settleLiveTranscript,
     appendDraftAssistantText,
     batchLiveRoundsUpdate,
     updateGatewayBridgeToolStatus,
@@ -399,7 +401,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     finalAssistant.stopReason !== "error" &&
     finalAssistant.stopReason !== "aborted";
   commitAssistantRoundMeta(finalAssistant, textRound);
-  resetLiveTranscript(transcriptStore);
+  settleLiveTranscript(transcriptStore);
   updateConversationRuntimeEntry(conversationId, (prev) => ({
     ...prev,
     state: finalState,

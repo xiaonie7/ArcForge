@@ -4,6 +4,9 @@ import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
 const { createTranscriptRowModel } = loader.loadModule("src/pages/chat/transcript/rowModel.ts");
+const { createLiveTranscriptStore } = loader.loadModule(
+  "src/lib/chat/conversation/liveTranscriptStore.ts",
+);
 const { createEntranceRegistry, ENTRANCE_ANIMATION_WINDOW_MS } = loader.loadModule(
   "src/lib/transcript-virtual/entranceOnce.ts",
 );
@@ -40,7 +43,14 @@ function round(key, text) {
   };
 }
 
-const idleLive = { isSending: false, draftAssistantText: "", toolStatus: null, liveRounds: [] };
+const idleLive = {
+  isSending: false,
+  draftAssistantText: "",
+  toolStatus: null,
+  liveRounds: [],
+  retryAttempts: [],
+  isSettled: false,
+};
 
 test("settling a live turn keys the committed twin with the live row key", () => {
   const model = createTranscriptRowModel();
@@ -215,6 +225,38 @@ test("a twin that lands while still sending is re-keyed onto the live row at set
   const settled = model.build(midRun, idleLive);
   assert.equal(settled.rows.length, 2);
   assert.equal(settled.rows[1].key, liveKey);
+});
+
+test("terminal transcript settlement removes the empty live tail before sending state clears", () => {
+  const model = createTranscriptRowModel();
+  const store = createLiveTranscriptStore();
+  const history = [userItem("u1")];
+
+  store.reset();
+  store.updateLiveRounds(() => [
+    { ...round("r1", "full reply"), runningToolCallIds: [], thinkingOpen: false },
+  ]);
+  const streaming = model.build(history, { ...store.getSnapshot(), isSending: true });
+  const liveKey = streaming.rows[1].key;
+
+  store.settle();
+  const committed = [userItem("u1"), assistantItem("a1", [round("r1", "full reply")])];
+  const finalizing = model.build(committed, { ...store.getSnapshot(), isSending: true });
+
+  assert.equal(finalizing.rows.length, 2, "no empty assistant is appended during persistence");
+  assert.equal(finalizing.liveStartIndex, -1);
+  assert.equal(finalizing.rows[1].key, liveKey, "the committed twin settles without remounting");
+  assert.equal(finalizing.rows[1].live, false);
+
+  const released = model.build(committed, { ...store.getSnapshot(), isSending: false });
+  assert.equal(released.rows.length, 2);
+  assert.equal(released.rows[1].key, liveKey);
+
+  store.reset();
+  const nextPending = model.build(committed, { ...store.getSnapshot(), isSending: true });
+  assert.equal(nextPending.rows.length, 3, "the next turn still renders before its first token");
+  assert.equal(nextPending.liveStartIndex, 2);
+  assert.equal(nextPending.rows[2].live, true);
 });
 
 test("live range extractor unions the live tail with the visible window", () => {

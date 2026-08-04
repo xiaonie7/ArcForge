@@ -262,6 +262,7 @@ export type RunAgentConversationTurnParams = {
   compaction: CompactionController;
   cancellation: TurnCancellation;
   resetLiveTranscript: (store: LiveTranscriptStore) => void;
+  settleLiveTranscript: (store: LiveTranscriptStore) => void;
   batchLiveRoundsUpdate: (
     updater: (prev: LiveRound[]) => LiveRound[],
     store: LiveTranscriptStore,
@@ -327,6 +328,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     compaction,
     cancellation,
     resetLiveTranscript,
+    settleLiveTranscript,
     batchLiveRoundsUpdate,
     updateToolStatus,
     updateRetryAttempts,
@@ -1158,7 +1160,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     );
   }
   hookLifecycle.endAgent();
-  resetLiveTranscript(transcriptStore);
+  settleLiveTranscript(transcriptStore);
   updateConversationRuntimeEntry(conversationId, (prev) => ({
     ...prev,
     state: completedState,
