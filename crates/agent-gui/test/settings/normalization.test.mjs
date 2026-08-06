@@ -70,6 +70,35 @@ test("codex provider normalization strips route suffixes and keeps only configur
   assert.equal(provider.models[1].maxOutputToken, 4_096);
 });
 
+test("MiMo relay models inherit Xiaomi limits and migrate legacy Codex defaults", () => {
+  assert.deepEqual(settings.getProviderModelDefaults("codex", "mimo-v2.5-pro"), {
+    contextWindow: 1_048_576,
+    maxOutputToken: 131_072,
+  });
+
+  const migrated = settings.normalizeProviderModelConfig(
+    {
+      id: "mimo-v2.5-pro",
+      contextWindow: 258_000,
+      maxOutputToken: 142_000,
+    },
+    "codex",
+  );
+  assert.equal(migrated.contextWindow, 1_048_576);
+  assert.equal(migrated.maxOutputToken, 131_072);
+
+  const explicit = settings.normalizeProviderModelConfig(
+    {
+      id: "mimo-v2.5-pro",
+      contextWindow: 200_000,
+      maxOutputToken: 65_536,
+    },
+    "codex",
+  );
+  assert.equal(explicit.contextWindow, 200_000);
+  assert.equal(explicit.maxOutputToken, 65_536);
+});
+
 test("claude provider normalization defaults routing, caching, and model limits", () => {
   const provider = settings.normalizeCustomProvider({
     id: "claude-1",

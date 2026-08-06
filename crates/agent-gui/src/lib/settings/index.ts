@@ -9,6 +9,7 @@ import {
   resolveAnthropicKnownModelLimits,
   shouldSendAnthropicLongContextHeader,
 } from "../providers/anthropicModels";
+import { findCodexBuiltinModel } from "../providers/codexModelCatalog";
 import { getAvailableThinkingLevelsForModel } from "../providers/runtime/modelFactory";
 import { createUuid } from "../shared/id";
 import { mergeAlwaysEnabledSkillNames } from "../skills/builtin";
@@ -1060,12 +1061,6 @@ export function normalizeWecomSettings(input: unknown): WecomSettings {
   };
 }
 
-function toKnownProvider(providerId: ProviderId): BuiltinProvider {
-  if (providerId === "codex") return "openai";
-  if (providerId === "gemini") return "google";
-  return "anthropic";
-}
-
 function getKnownModelLimits(
   providerId: ProviderId,
   modelId: string | undefined,
@@ -1075,12 +1070,15 @@ function getKnownModelLimits(
   if (!trimmedId) return undefined;
   // Anthropic 走规范化目录回查（装饰 id/[1m] 后缀也能继承默认值），并对旧世代
   // 钳出退役后的有效窗口；contextWindow > 200K 即请求侧启用 1M beta 的开关。
-  if (toKnownProvider(providerId) === "anthropic") {
+  if (providerId === "claude_code") {
     return resolveAnthropicKnownModelLimits(trimmedId, baseUrl);
   }
-  const known = getBuiltinModels(toKnownProvider(providerId)).find(
-    (model) => model.id === trimmedId,
-  );
+  const known =
+    providerId === "codex"
+      ? findCodexBuiltinModel(trimmedId)
+      : getBuiltinModels("google" satisfies BuiltinProvider).find(
+          (model) => model.id === trimmedId,
+        );
   if (!known) return undefined;
   return { contextWindow: known.contextWindow, maxOutputToken: known.maxTokens };
 }
@@ -1178,15 +1176,32 @@ export function normalizeProviderModelConfig(
         : "";
   if (!id) return null;
 
+  const knownLimits = getKnownModelLimits(providerId, id);
   const defaults = getProviderModelDefaults(providerId, id);
   const cost = normalizeProviderModelCost(obj.cost);
+  let contextWindow = normalizePositiveInteger(obj.contextWindow, defaults.contextWindow);
+  let maxOutputToken = normalizePositiveInteger(
+    obj.maxOutputToken ?? obj.maxTokens,
+    defaults.maxOutputToken,
+  );
+
+  // Older versions assigned OpenAI's generic fallback limits to every model
+  // discovered behind a Codex-compatible relay. Once a vendor catalog becomes
+  // available, migrate only those exact legacy sentinel values so explicit
+  // user overrides remain untouched.
+  if (providerId === "codex" && knownLimits) {
+    if (contextWindow === DEFAULT_CODEX_CONTEXT_WINDOW) {
+      contextWindow = knownLimits.contextWindow;
+    }
+    if (maxOutputToken === DEFAULT_CODEX_MAX_OUTPUT_TOKEN) {
+      maxOutputToken = knownLimits.maxOutputToken;
+    }
+  }
+
   return {
     id,
-    contextWindow: normalizePositiveInteger(obj.contextWindow, defaults.contextWindow),
-    maxOutputToken: normalizePositiveInteger(
-      obj.maxOutputToken ?? obj.maxTokens,
-      defaults.maxOutputToken,
-    ),
+    contextWindow,
+    maxOutputToken,
     ...(cost !== undefined ? { cost } : {}),
   };
 }

@@ -91,7 +91,7 @@ const finalizePayloadMiddlewares = composePayloadMiddlewares([
       model: params.model,
       context: params.context,
     }),
-  (options, params) => attachCodexResponsesStorage(params.providerId, options),
+  (options, params) => attachCodexResponsesStorage(params.providerId, params.baseUrl, options),
   (options, params) => attachCodexPromptCacheKey(params.providerId, options),
   (options, params) =>
     attachOpenAICompletionsFinishReasonCompatibility(options, {

@@ -1,4 +1,5 @@
 import type { ProviderId } from "../../settings";
+import { isXiaomiMimoModelId } from "../codexModelCatalog";
 import { isRecord, normalizeSessionId } from "./common";
 import type { StreamOptionsEx } from "./types";
 
@@ -37,6 +38,11 @@ export function attachCodexPromptCacheKey(
         if (overridden !== undefined) {
           nextPayload = overridden;
         }
+      }
+
+      if (isXiaomiMimoModelId(model.id) && isRecord(nextPayload)) {
+        const { prompt_cache_key: _unsupportedPromptCacheKey, ...mimoPayload } = nextPayload;
+        return mimoPayload;
       }
 
       if (

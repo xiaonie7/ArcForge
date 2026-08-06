@@ -4,9 +4,11 @@ import type { StreamOptionsEx } from "./types";
 
 export function attachCodexResponsesStorage(
   providerId: ProviderId,
+  baseUrl: string,
   options: StreamOptionsEx,
 ): StreamOptionsEx {
   const previousOnPayload = options.onPayload;
+  const shouldEnableStorage = isOfficialOpenAIBaseUrl(baseUrl);
 
   if (providerId !== "codex") {
     return options;
@@ -24,7 +26,7 @@ export function attachCodexResponsesStorage(
         }
       }
 
-      if (model.api === "openai-responses" && isRecord(nextPayload)) {
+      if (shouldEnableStorage && model.api === "openai-responses" && isRecord(nextPayload)) {
         return {
           ...nextPayload,
           store: true,
@@ -34,4 +36,12 @@ export function attachCodexResponsesStorage(
       return nextPayload;
     },
   };
+}
+
+function isOfficialOpenAIBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() === "api.openai.com";
+  } catch {
+    return false;
+  }
 }

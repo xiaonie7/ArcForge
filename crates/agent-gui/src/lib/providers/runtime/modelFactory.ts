@@ -14,6 +14,7 @@ import {
   resolveAnthropicContextWindow,
   resolveAnthropicWireModelId,
 } from "../anthropicModels";
+import { findCodexBuiltinModel, isXiaomiMimoModelId } from "../codexModelCatalog";
 import {
   applyDeepSeekModelDefaults,
   isDeepSeekCodexTarget,
@@ -196,6 +197,7 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   if (isOfficialOpenAIBaseUrl(compatBaseUrl)) return undefined;
 
   const normalizedModelId = params.modelId.trim().toLowerCase();
+  const isXiaomiMimo = isXiaomiMimoModelId(normalizedModelId);
   const isZai = compatBaseUrl.includes("api.z.ai");
   const isXai = compatBaseUrl.includes("api.x.ai");
   const isOpenRouter = compatBaseUrl.includes("openrouter.ai");
@@ -230,8 +232,13 @@ function resolveCodexOpenAICompletionsOverrides(params: {
     supportsDeveloperRole: false,
   };
 
-  if (isXai || isZai) {
+  if (isXai || isZai || isXiaomiMimo) {
     compat.supportsReasoningEffort = false;
+  }
+  if (isXiaomiMimo) {
+    compat.supportsUsageInStreaming = false;
+    compat.thinkingFormat = "deepseek";
+    compat.requiresReasoningContentOnAssistantMessages = true;
   }
   if (isChutes) {
     compat.maxTokensField = "max_tokens";
@@ -326,21 +333,36 @@ export function createModelFromConfig(
             upstreamBaseUrl,
           })
         : undefined;
-    const known = resolveKnownModel("openai", modelId, normalizedBaseUrl);
+    const completionsOverrides =
+      api === "openai-completions"
+        ? resolveCodexOpenAICompletionsOverrides({
+            baseUrl: normalizedBaseUrl,
+            upstreamBaseUrl,
+            modelId,
+          })
+        : undefined;
+    const catalogModel = findCodexBuiltinModel(modelId, api);
+    const known = catalogModel
+      ? ({ ...catalogModel, provider: "openai", baseUrl: normalizedBaseUrl } as Model<CodexApi>)
+      : undefined;
     if (known && known.api === api) {
+      const compatOverrides = responsesCompat ?? completionsOverrides?.compat;
+      const compat =
+        known.compat || compatOverrides
+          ? {
+              ...(known.compat ?? {}),
+              ...(compatOverrides ?? {}),
+            }
+          : undefined;
       return applyDeepSeekModelDefaults(
         {
           ...known,
           contextWindow,
           maxTokens,
           ...(configuredCost ? { cost: configuredCost } : {}),
-          ...(responsesCompat
-            ? {
-                compat: {
-                  ...(known.compat ?? {}),
-                  ...responsesCompat,
-                },
-              }
+          ...(compat ? { compat } : {}),
+          ...(completionsOverrides?.thinkingLevelMap
+            ? { thinkingLevelMap: completionsOverrides.thinkingLevelMap }
             : {}),
         },
         {
@@ -370,15 +392,10 @@ export function createModelFromConfig(
     if (api === "openai-responses" && responsesCompat) {
       custom.compat = responsesCompat;
     } else if (api === "openai-completions") {
-      const overrides = resolveCodexOpenAICompletionsOverrides({
-        baseUrl: normalizedBaseUrl,
-        upstreamBaseUrl,
-        modelId,
-      });
-      if (overrides) {
-        custom.compat = overrides.compat;
-        if (overrides.thinkingLevelMap) {
-          custom.thinkingLevelMap = overrides.thinkingLevelMap;
+      if (completionsOverrides) {
+        custom.compat = completionsOverrides.compat;
+        if (completionsOverrides.thinkingLevelMap) {
+          custom.thinkingLevelMap = completionsOverrides.thinkingLevelMap;
         }
       }
     }

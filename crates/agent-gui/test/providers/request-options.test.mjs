@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { stream as streamOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
@@ -24,6 +25,33 @@ function createMockAssistantStream() {
       };
     },
   };
+}
+
+async function captureOpenAICompletionsPayload(model, context, options) {
+  let captured;
+  const previousOnPayload = options.onPayload;
+  const source = streamOpenAICompletions(model, context, {
+    ...options,
+    apiKey: "unused-test-key",
+    onPayload: async (payload, payloadModel) => {
+      captured = previousOnPayload
+        ? ((await previousOnPayload(payload, payloadModel)) ?? payload)
+        : payload;
+      throw new Error("ARC_FORGE_PAYLOAD_CAPTURE_COMPLETE");
+    },
+  });
+
+  try {
+    for await (const _event of source) {
+      // The payload hook aborts before fetch.
+    }
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("PAYLOAD_CAPTURE_COMPLETE")) {
+      throw error;
+    }
+  }
+  assert.ok(captured, "expected the OpenAI payload hook to run");
+  return captured;
 }
 
 function createDeepSeekAnthropicModel(id = "deepseek-v4-flash") {
@@ -781,7 +809,7 @@ test("payload middleware composer preserves previous-hook-first order", async ()
   assert.deepEqual(payload.trace, ["base", "first", "second"]);
 });
 
-test("codex responses payloads always opt into upstream storage after previous payload hooks", async () => {
+test("official OpenAI responses payloads opt into upstream storage after previous payload hooks", async () => {
   const options = providers.finalizeProviderStreamOptions({
     providerId: "codex",
     baseUrl: "https://api.openai.com/v1",
@@ -799,6 +827,136 @@ test("codex responses payloads always opt into upstream storage after previous p
     input: "hello",
     previousHook: true,
     store: true,
+  });
+});
+
+test("MiMo models behind OpenAI-compatible relays inherit Xiaomi wire metadata", () => {
+  const model = providers.createModelFromConfig(
+    "codex",
+    "mimo-v2.5-pro",
+    "http://192.168.12.212:8979",
+    "openai-completions",
+  );
+
+  assert.equal(model.api, "openai-completions");
+  assert.equal(model.provider, "openai");
+  assert.equal(model.contextWindow, 1_048_576);
+  assert.equal(model.maxTokens, 131_072);
+  assert.deepEqual(model.input, ["text"]);
+  assert.equal(model.compat.supportsStore, false);
+  assert.equal(model.compat.supportsDeveloperRole, false);
+  assert.equal(model.compat.supportsUsageInStreaming, false);
+  assert.equal(model.compat.supportsReasoningEffort, false);
+  assert.equal(model.compat.thinkingFormat, "deepseek");
+  assert.equal(model.compat.requiresReasoningContentOnAssistantMessages, true);
+});
+
+test("MiMo relay payload stays within limits and uses its native thinking switch", async () => {
+  const baseUrl = "http://192.168.12.212:8979";
+  const model = providers.createModelFromConfig(
+    "codex",
+    "mimo-v2.5-pro",
+    baseUrl,
+    "openai-completions",
+  );
+  const finalized = providers.finalizeProviderStreamOptions({
+    providerId: "codex",
+    baseUrl,
+    model,
+    options: {
+      cacheRetention: "short",
+      sessionId: "conversation-123",
+    },
+  });
+  const context = {
+    messages: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "你好" }],
+        timestamp: 1,
+      },
+    ],
+  };
+
+  const disabled = await captureOpenAICompletionsPayload(model, context, {
+    ...finalized,
+    maxTokens: model.maxTokens,
+  });
+  assert.equal(disabled.max_completion_tokens, 131_072);
+  assert.deepEqual(disabled.thinking, { type: "disabled" });
+  assert.equal(disabled.reasoning_effort, undefined);
+  assert.equal(disabled.stream_options, undefined);
+  assert.equal(disabled.prompt_cache_key, undefined);
+  assert.equal(disabled.store, undefined);
+
+  const enabled = await captureOpenAICompletionsPayload(model, context, {
+    ...finalized,
+    maxTokens: model.maxTokens,
+    reasoningEffort: "high",
+  });
+  assert.deepEqual(enabled.thinking, { type: "enabled" });
+  assert.equal(enabled.reasoning_effort, undefined);
+
+  const continued = await captureOpenAICompletionsPayload(
+    model,
+    {
+      messages: [
+        context.messages[0],
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "Need to inspect the file.",
+              thinkingSignature: "reasoning_content",
+            },
+            { type: "toolCall", id: "call-1", name: "Read", arguments: { path: "a.ts" } },
+          ],
+          api: "openai-completions",
+          provider: "openai",
+          model: "mimo-v2.5-pro",
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+          stopReason: "toolUse",
+          timestamp: 2,
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call-1",
+          toolName: "Read",
+          content: [{ type: "text", text: "file contents" }],
+          isError: false,
+          timestamp: 3,
+        },
+        { role: "user", content: [{ type: "text", text: "继续" }], timestamp: 4 },
+      ],
+    },
+    {
+      ...finalized,
+      maxTokens: model.maxTokens,
+      reasoningEffort: "high",
+    },
+  );
+  assert.equal(continued.messages[1].reasoning_content, "Need to inspect the file.");
+});
+
+test("third-party OpenAI-compatible responses payloads preserve store false", async () => {
+  const options = providers.finalizeProviderStreamOptions({
+    providerId: "codex",
+    baseUrl: "https://new-api.example.com/v1",
+    options: {
+      onPayload: async (payload) => ({ ...payload, previousHook: true }),
+    },
+  });
+
+  const nextPayload = await options.onPayload(
+    { input: "hello", store: false },
+    { api: "openai-responses", provider: "openai", id: "third-party-model" },
+  );
+
+  assert.deepEqual(nextPayload, {
+    input: "hello",
+    previousHook: true,
+    store: false,
   });
 });
 
