@@ -61,6 +61,25 @@ test("updater errors retain actionable messages", () => {
   assert.equal(formatUpdaterError(null), "Unknown updater error");
 });
 
+test("desktop updater prefers Gitee and keeps GitHub as a fallback", () => {
+  const config = JSON.parse(
+    readFileSync(path.join(guiRoot, "src-tauri", "tauri.conf.json"), "utf8"),
+  );
+  const manifest = JSON.parse(
+    readFileSync(path.join(repoRoot, "updater", "latest.json"), "utf8"),
+  );
+
+  assert.deepEqual(config.plugins.updater.endpoints, [
+    "https://gitee.com/nielixiaoxiao/arc-forge/raw/master/updater/latest.json",
+    "https://github.com/xiaonie7/ArcForge/releases/latest/download/latest.json",
+  ]);
+  for (const platform of Object.values(manifest.platforms)) {
+    const url = new URL(platform.url);
+    assert.equal(url.hostname, "gitee.com");
+    assert.equal(url.pathname.startsWith("/nielixiaoxiao/arc-forge/releases/download/"), true);
+  }
+});
+
 test("Tauri updater and process packages use matching JS and Rust minor versions", () => {
   const packageJson = JSON.parse(readFileSync(path.join(guiRoot, "package.json"), "utf8"));
   const plugins = [

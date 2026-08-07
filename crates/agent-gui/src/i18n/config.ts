@@ -1775,6 +1775,8 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.wecomConnectorLog": "Connector 日志",
     "settings.wecomRuntimeLogsLoading": "正在读取日志…",
     "settings.wecomRuntimeLogsEmpty": "暂无日志",
+    "settings.wecomCopyLogs": "复制日志",
+    "settings.wecomLogsCopied": "已复制",
     "settings.wecomSendMessage": "发送消息",
     "settings.wecomSendMessageUnavailable": "Gateway 与 Connector 均运行后才能发送",
     "settings.wecomSendPanelTitle": "主动发送消息",
@@ -3987,6 +3989,8 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.wecomConnectorLog": "Connector log",
     "settings.wecomRuntimeLogsLoading": "Loading logs…",
     "settings.wecomRuntimeLogsEmpty": "No logs yet",
+    "settings.wecomCopyLogs": "Copy logs",
+    "settings.wecomLogsCopied": "Copied",
     "settings.wecomSendMessage": "Send message",
     "settings.wecomSendMessageUnavailable":
       "Sending requires both the Gateway and Connector to be running",

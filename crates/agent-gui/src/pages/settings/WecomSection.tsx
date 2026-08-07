@@ -6,6 +6,7 @@ import {
   Bot,
   Check,
   Cloud,
+  Copy,
   Eye,
   EyeOff,
   FileText,
@@ -200,6 +201,7 @@ export function WecomSection(props: WecomSectionProps) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [runtimeLogs, setRuntimeLogs] = useState<WecomRuntimeLogs | null>(null);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [copiedLogKey, setCopiedLogKey] = useState<string | null>(null);
   const [sendPanelOpen, setSendPanelOpen] = useState(false);
   const [sendChatId, setSendChatId] = useState("");
   const [sendContent, setSendContent] = useState("");
@@ -348,6 +350,20 @@ export function WecomSection(props: WecomSectionProps) {
       return next;
     });
   }, [loadRuntimeLogs]);
+
+  const copyRuntimeLogs = useCallback(async (key: string, lines: string[]) => {
+    const text = lines.join("\n").trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedLogKey(key);
+      window.setTimeout(() => {
+        setCopiedLogKey((current) => (current === key ? null : current));
+      }, 1500);
+    } catch (error) {
+      setRuntimeActionError(error instanceof Error ? error.message : String(error));
+    }
+  }, []);
 
   const sendRuntimeMessage = useCallback(async () => {
     const chatId = sendChatId.trim();
@@ -783,7 +799,33 @@ export function WecomSection(props: WecomSectionProps) {
                   },
                 ].map((log) => (
                   <div key={log.key} className="min-w-0 space-y-1.5">
-                    <div className="text-[11px] font-medium text-muted-foreground">{log.label}</div>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] font-medium text-muted-foreground">
+                        {log.label}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={log.lines.length === 0}
+                        title={
+                          copiedLogKey === log.key
+                            ? t("settings.wecomLogsCopied")
+                            : t("settings.wecomCopyLogs")
+                        }
+                        aria-label={
+                          copiedLogKey === log.key
+                            ? t("settings.wecomLogsCopied")
+                            : t("settings.wecomCopyLogs")
+                        }
+                        onClick={() => void copyRuntimeLogs(log.key, log.lines)}
+                        className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+                      >
+                        {copiedLogKey === log.key ? (
+                          <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
                     <pre className="h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-muted/30 p-3 font-mono text-[11px] leading-5 text-muted-foreground">
                       {logsLoading && !runtimeLogs
                         ? t("settings.wecomRuntimeLogsLoading")

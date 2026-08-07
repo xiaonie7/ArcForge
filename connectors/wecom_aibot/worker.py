@@ -10,6 +10,7 @@ import inspect
 import json
 import logging
 import mimetypes
+import os
 import re
 import sys
 import threading
@@ -38,6 +39,10 @@ _CONTROL_MAX_IN_FLIGHT = 16
 _MAX_REQUEST_ID_BYTES = 128
 _MAX_CHAT_ID_CHARACTERS = 256
 _AUTHENTICATION_TIMEOUT_SECONDS = 30.0
+_WECOM_REPLY_RETRY_TIMEOUT_SECONDS = 5 * 60.0
+_WECOM_REPLY_RETRY_DELAY_SECONDS = 0.25
+_WECOM_RECOVERY_POLL_SECONDS = 5.0
+_WECOM_DISCONNECT_TIMEOUT_SECONDS = 5.0
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]+$")
 _MEDIA_UPLOAD_INIT = "aibot_upload_media_init"
 _MEDIA_UPLOAD_CHUNK = "aibot_upload_media_chunk"
@@ -233,44 +238,141 @@ async def _send_proactive_reply_chunks(
     client: Any,
     frame: dict[str, Any],
     chunks: list[str],
+    *,
+    authenticated: asyncio.Event | None = None,
+    deadline: float | None = None,
 ) -> None:
     target_id = _reply_target_id(frame)
     if not target_id:
         raise RuntimeError("WeCom proactive reply target is unavailable")
-    for chunk in chunks:
-        acknowledgement = await client.send_message(
-            target_id,
-            {"msgtype": "markdown", "markdown": {"content": chunk}},
-        )
-        _ensure_wecom_acknowledged(acknowledgement)
+    next_chunk = 0
+    while next_chunk < len(chunks):
+        if authenticated is not None:
+            remaining = (
+                max(0.0, deadline - time.monotonic())
+                if deadline is not None
+                else _WECOM_REPLY_RETRY_TIMEOUT_SECONDS
+            )
+            if not await _wait_for_wecom_authentication(
+                authenticated,
+                timeout=remaining,
+            ):
+                raise TimeoutError(
+                    "WeCom authentication did not recover before proactive reply"
+                )
+        try:
+            acknowledgement = await client.send_message(
+                target_id,
+                {
+                    "msgtype": "markdown",
+                    "markdown": {"content": chunks[next_chunk]},
+                },
+            )
+            _ensure_wecom_acknowledged(acknowledgement)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            if (
+                authenticated is not None
+                and _wecom_transport_unavailable(client, authenticated)
+                and (deadline is None or time.monotonic() < deadline)
+            ):
+                await asyncio.sleep(_WECOM_REPLY_RETRY_DELAY_SECONDS)
+                continue
+            raise
+        next_chunk += 1
+
+
+async def _wait_for_wecom_authentication(
+    authenticated: asyncio.Event,
+    *,
+    timeout: float = _WECOM_REPLY_RETRY_TIMEOUT_SECONDS,
+) -> bool:
+    """Wait for the SDK to finish a transient reconnect before sending."""
+
+    if authenticated.is_set():
+        return True
+    try:
+        await asyncio.wait_for(authenticated.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return False
+    return True
+
+
+def _wecom_transport_unavailable(client: Any, authenticated: asyncio.Event | None) -> bool:
+    if authenticated is not None and not authenticated.is_set():
+        return True
+    connected = getattr(client, "is_connected", None)
+    if isinstance(connected, bool):
+        return not connected
+    return False
 
 
 async def _reply_final(
-    client: Any, frame: dict[str, Any], stream_id: str, text: str
+    client: Any,
+    frame: dict[str, Any],
+    stream_id: str,
+    text: str,
+    *,
+    authenticated: asyncio.Event | None = None,
 ) -> None:
     chunks = _split_wecom_reply(text or "(empty response)")
-    try:
-        acknowledgement = await client.reply_stream(frame, stream_id, chunks[0], True)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        if not _reply_context_expired(exc):
+    deadline = time.monotonic() + _WECOM_REPLY_RETRY_TIMEOUT_SECONDS
+    while True:
+        if authenticated is not None and not await _wait_for_wecom_authentication(
+            authenticated,
+            timeout=max(0.0, deadline - time.monotonic()),
+        ):
+            raise TimeoutError("WeCom authentication did not recover before final reply")
+
+        try:
+            acknowledgement = await client.reply_stream(frame, stream_id, chunks[0], True)
+        except asyncio.CancelledError:
             raise
-        await _send_proactive_reply_chunks(client, frame, chunks)
-        logger.info("WeCom final reply used proactive fallback")
-        return
+        except Exception as exc:
+            if _reply_context_expired(exc):
+                await _send_proactive_reply_chunks(
+                    client,
+                    frame,
+                    chunks,
+                    authenticated=authenticated,
+                    deadline=deadline,
+                )
+                logger.info("WeCom final reply used proactive fallback")
+                return
+            if (
+                authenticated is not None
+                and _wecom_transport_unavailable(client, authenticated)
+                and time.monotonic() < deadline
+            ):
+                await asyncio.sleep(_WECOM_REPLY_RETRY_DELAY_SECONDS)
+                continue
+            raise
 
-    error_code = _wecom_error_code(acknowledgement)
-    if error_code in _WECOM_REPLY_CONTEXT_ERROR_CODES:
-        await _send_proactive_reply_chunks(client, frame, chunks)
-        logger.info("WeCom final reply used proactive fallback")
-        return
-    if error_code not in (None, 0):
-        raise RuntimeError("WeCom rejected the final stream reply")
-    if len(chunks) == 1:
-        return
+        error_code = _wecom_error_code(acknowledgement)
+        if error_code in _WECOM_REPLY_CONTEXT_ERROR_CODES:
+            await _send_proactive_reply_chunks(
+                client,
+                frame,
+                chunks,
+                authenticated=authenticated,
+                deadline=deadline,
+            )
+            logger.info("WeCom final reply used proactive fallback")
+            return
+        if error_code not in (None, 0):
+            raise RuntimeError("WeCom rejected the final stream reply")
+        if len(chunks) == 1:
+            return
 
-    await _send_proactive_reply_chunks(client, frame, chunks[1:])
+        await _send_proactive_reply_chunks(
+            client,
+            frame,
+            chunks[1:],
+            authenticated=authenticated,
+            deadline=deadline,
+        )
+        return
 
 
 async def _maintain_reply_stream(
@@ -638,30 +740,41 @@ async def _handle_message(
     interactions: InteractionCoordinator | None = None,
     *,
     media_kind: str = "",
+    authenticated: asyncio.Event | None = None,
 ) -> None:
     body = _body(frame)
     text = _text(frame)
+
+    async def reply_immediately(answer: str, stream_id: str = "") -> None:
+        await _reply_final(
+            wecom,
+            frame,
+            stream_id or _stream_id(),
+            answer,
+            authenticated=authenticated,
+        )
+
     if not text and media_kind not in {"file", "image"}:
         return
     if len(text.encode("utf-8")) > config.max_text_bytes:
-        await _reply_final(wecom, frame, _stream_id(), "消息过长，请分段发送。")
+        await reply_immediately("消息过长，请分段发送。")
         return
     chat_id, user_id, chat_type = _routing(body)
     if not user_id:
-        await _reply_final(wecom, frame, _stream_id(), "无法识别企业微信用户身份。")
+        await reply_immediately("无法识别企业微信用户身份。")
         return
     if chat_type not in {"single", "group"}:
-        await _reply_final(wecom, frame, _stream_id(), "无法识别企业微信聊天类型。")
+        await reply_immediately("无法识别企业微信聊天类型。")
         return
     if chat_type == "group" and not config.allow_group_messages:
-        await _reply_final(wecom, frame, _stream_id(), "当前桌面端未开启群聊消息。")
+        await reply_immediately("当前桌面端未开启群聊消息。")
         return
     if chat_type == "group" and not chat_id:
-        await _reply_final(wecom, frame, _stream_id(), "无法识别企业微信群聊。")
+        await reply_immediately("无法识别企业微信群聊。")
         return
     external_id = _external_message_id(frame)
     if not external_id:
-        await _reply_final(wecom, frame, _stream_id(), "无法识别消息编号，请稍后重试。")
+        await reply_immediately("无法识别消息编号，请稍后重试。")
         return
     session_key = sessions.key(
         chat_type=chat_type,
@@ -671,7 +784,7 @@ async def _handle_message(
     claimed, existing = dedupe.claim(session_key, external_id)
     if not claimed:
         if existing and existing.completed:
-            await _reply_final(wecom, frame, _stream_id(), existing.text)
+            await reply_immediately(existing.text)
         return
 
     if interactions is not None and not media_kind:
@@ -687,7 +800,7 @@ async def _handle_message(
                 text=interaction_reply,
                 status="completed",
             )
-            await _reply_final(wecom, frame, _stream_id(), interaction_reply)
+            await reply_immediately(interaction_reply)
             return
 
     command = parse_command(text) if not media_kind else ""
@@ -701,7 +814,7 @@ async def _handle_message(
             text=_HELP_TEXT,
             status="completed",
         )
-        await _reply_final(wecom, frame, stream_id, _HELP_TEXT)
+        await reply_immediately(_HELP_TEXT, stream_id)
         return
 
     # Acknowledge before waiting behind a previous turn so WeCom does not time
@@ -757,7 +870,13 @@ async def _handle_message(
                     "WeCom input resolution update did not finish before final reply"
                 )
         async with stream_send_lock:
-            await _reply_final(wecom, frame, stream_id, answer)
+            await _reply_final(
+                wecom,
+                frame,
+                stream_id,
+                answer,
+                authenticated=authenticated,
+            )
 
     inbound_files: list[ChannelInboundFile] = []
     if media_kind:
@@ -907,6 +1026,7 @@ async def _handle_text(
     frame: dict[str, Any],
     sequencer: SessionSequencer | None = None,
     interactions: InteractionCoordinator | None = None,
+    authenticated: asyncio.Event | None = None,
 ) -> None:
     await _handle_message(
         wecom,
@@ -917,6 +1037,7 @@ async def _handle_text(
         frame,
         sequencer,
         interactions,
+        authenticated=authenticated,
     )
 
 
@@ -930,6 +1051,7 @@ async def _handle_media(
     media_kind: str,
     sequencer: SessionSequencer | None = None,
     interactions: InteractionCoordinator | None = None,
+    authenticated: asyncio.Event | None = None,
 ) -> None:
     await _handle_message(
         wecom,
@@ -941,6 +1063,7 @@ async def _handle_media(
         sequencer,
         interactions,
         media_kind=media_kind,
+        authenticated=authenticated,
     )
 
 
@@ -952,6 +1075,7 @@ def register_handlers(
     sessions: SessionStore,
     sequencer: SessionSequencer,
     interactions: InteractionCoordinator | None = None,
+    authenticated: asyncio.Event | None = None,
 ) -> None:
     interactions = interactions or InteractionCoordinator()
 
@@ -967,6 +1091,7 @@ def register_handlers(
                 frame,
                 sequencer,
                 interactions,
+                authenticated,
             )
         )
 
@@ -983,6 +1108,7 @@ def register_handlers(
                 "file",
                 sequencer,
                 interactions,
+                authenticated,
             )
         )
 
@@ -999,6 +1125,7 @@ def register_handlers(
                 "image",
                 sequencer,
                 interactions,
+                authenticated,
             )
         )
 
@@ -1028,6 +1155,9 @@ def register_handlers(
 class _WecomConnectionState:
     authenticated: asyncio.Event = field(default_factory=asyncio.Event)
     startup_failed: asyncio.Event = field(default_factory=asyncio.Event)
+    recovery_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    ever_authenticated: bool = False
+    sdk_reconnecting: bool = False
 
 
 class _RedactingSdkLogger:
@@ -1051,25 +1181,45 @@ def _register_connection_handlers(client: Any, state: _WecomConnectionState) -> 
     def on_connected() -> None:
         # A later socket connection may recover from an earlier transport error.
         state.authenticated.clear()
-        state.startup_failed.clear()
+        state.sdk_reconnecting = False
+        if not state.ever_authenticated:
+            state.startup_failed.clear()
 
     @client.on("authenticated")
     def on_authenticated() -> None:
         state.startup_failed.clear()
+        state.recovery_requested.clear()
+        state.ever_authenticated = True
+        state.sdk_reconnecting = False
         state.authenticated.set()
 
     @client.on("disconnected")
     def on_disconnected(_reason: Any = None) -> None:
         state.authenticated.clear()
-        state.startup_failed.set()
+        state.sdk_reconnecting = True
+        if not state.ever_authenticated:
+            state.startup_failed.set()
         logger.warning("WeCom connection disconnected")
 
     @client.on("error")
     def on_error(_error: Any) -> None:
         # Do not log the SDK exception: it can contain remote response details.
         state.authenticated.clear()
-        state.startup_failed.set()
+        state.sdk_reconnecting = False
+        if not state.ever_authenticated:
+            state.startup_failed.set()
+        else:
+            # Connection creation errors are followed immediately by the SDK's
+            # reconnecting event. Authentication and receive-loop errors are
+            # not, so the recovery supervisor restarts this same client.
+            state.recovery_requested.set()
         logger.warning("WeCom connection error")
+
+    @client.on("reconnecting")
+    def on_reconnecting(_attempt: Any = None) -> None:
+        state.authenticated.clear()
+        state.sdk_reconnecting = True
+        logger.info("WeCom connection reconnecting")
 
 
 async def _wait_for_initial_authentication(
@@ -1225,7 +1375,47 @@ def _start_stdin_reader(
             return False
         return True
 
+    def decode_line(raw_line: bytes) -> str:
+        try:
+            return raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            return "__invalid_utf8__\n"
+
+    def read_file_descriptor(file_descriptor: int) -> None:
+        pending = bytearray()
+        while True:
+            try:
+                chunk = os.read(file_descriptor, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                if pending and not enqueue(decode_line(bytes(pending))):
+                    return
+                enqueue(None)
+                return
+
+            pending.extend(chunk)
+            while True:
+                newline = pending.find(b"\n")
+                if newline < 0:
+                    break
+                raw_line = bytes(pending[: newline + 1])
+                del pending[: newline + 1]
+                if not enqueue(decode_line(raw_line)):
+                    return
+
     def read_lines() -> None:
+        try:
+            file_descriptor = stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            file_descriptor = None
+        if isinstance(file_descriptor, int) and file_descriptor >= 0:
+            # Read the parent-child control pipe without touching the buffered
+            # sys.stdin lock. A daemon blocked in BufferedReader.readline()
+            # can otherwise crash CPython during interpreter finalization.
+            read_file_descriptor(file_descriptor)
+            return
+
         while True:
             try:
                 raw_line = stream.readline()
@@ -1235,10 +1425,7 @@ def _start_stdin_reader(
                 enqueue(None)
                 return
             if isinstance(raw_line, bytes):
-                try:
-                    line = raw_line.decode("utf-8")
-                except UnicodeDecodeError:
-                    line = "__invalid_utf8__\n"
+                line = decode_line(raw_line)
             elif isinstance(raw_line, str):
                 line = raw_line
             else:
@@ -1307,6 +1494,93 @@ async def _wait_backoff(stop: asyncio.Event, seconds: float) -> None:
         return
 
 
+async def _disconnect_wecom(client: Any) -> None:
+    """Drain the SDK's fire-and-forget disconnect before reconnecting or exiting."""
+
+    result = client.disconnect()
+    if inspect.isawaitable(result):
+        await result
+
+    manager = getattr(client, "_ws_manager", None)
+    deadline = time.monotonic() + _WECOM_DISCONNECT_TIMEOUT_SECONDS
+    while manager is not None:
+        receive_task = getattr(manager, "_receive_task", None)
+        socket = getattr(manager, "_ws", None)
+        if socket is None and (
+            receive_task is None or getattr(receive_task, "done", lambda: True)()
+        ):
+            return
+        if time.monotonic() >= deadline:
+            raise TimeoutError("WeCom SDK disconnect timed out")
+        await asyncio.sleep(0.05)
+
+    # Test doubles and future SDKs may not expose the current manager fields.
+    # Yield once so a synchronous disconnect can schedule its cleanup task.
+    await asyncio.sleep(0)
+
+
+async def _maintain_wecom_recovery(
+    client: Any,
+    state: _WecomConnectionState,
+    stop: asyncio.Event,
+) -> None:
+    """Recover SDK errors that do not enter the SDK's reconnect loop."""
+
+    backoff = 1.0
+    while not stop.is_set():
+        requested = False
+        try:
+            await asyncio.wait_for(
+                state.recovery_requested.wait(),
+                timeout=_WECOM_RECOVERY_POLL_SECONDS,
+            )
+            requested = True
+        except asyncio.TimeoutError:
+            connected = getattr(client, "is_connected", None)
+            requested = (
+                state.ever_authenticated
+                and state.authenticated.is_set()
+                and isinstance(connected, bool)
+                and not connected
+            )
+
+        if stop.is_set():
+            return
+        if not requested:
+            continue
+
+        state.recovery_requested.clear()
+        if state.sdk_reconnecting:
+            # A connect failure emits error immediately before reconnecting;
+            # leave that path to the SDK so its backoff is not reset.
+            continue
+
+        state.authenticated.clear()
+        try:
+            logger.warning("WeCom connection requires local recovery")
+            await _disconnect_wecom(client)
+            if stop.is_set():
+                return
+            await client.connect()
+            await asyncio.wait_for(
+                state.authenticated.wait(),
+                timeout=_AUTHENTICATION_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("WeCom local recovery failed")
+            if state.sdk_reconnecting:
+                backoff = 1.0
+                continue
+            await _wait_backoff(stop, backoff)
+            backoff = min(backoff * 2, 30.0)
+            if not stop.is_set():
+                state.recovery_requested.set()
+        else:
+            backoff = 1.0
+
+
 async def _maintain_channel(
     channel: ChannelClient,
     ready: asyncio.Event,
@@ -1349,12 +1623,21 @@ async def run(config: ConnectorConfig | None = None) -> None:
             logger=_RedactingSdkLogger(),
         )
     )
-    register_handlers(wecom, channel, config, dedupe, sessions, sequencer)
     connection_state = _WecomConnectionState()
     _register_connection_handlers(wecom, connection_state)
+    register_handlers(
+        wecom,
+        channel,
+        config,
+        dedupe,
+        sessions,
+        sequencer,
+        authenticated=connection_state.authenticated,
+    )
     stop = asyncio.Event()
     channel_ready = asyncio.Event()
     control_task: asyncio.Task[None] | None = None
+    recovery_task: asyncio.Task[None] | None = None
     channel_task = asyncio.create_task(
         _maintain_channel(channel, channel_ready, stop),
         name="arcforge-channel-supervisor",
@@ -1363,6 +1646,10 @@ async def run(config: ConnectorConfig | None = None) -> None:
         await channel_ready.wait()
         await wecom.connect()
         await _wait_for_initial_authentication(connection_state)
+        recovery_task = asyncio.create_task(
+            _maintain_wecom_recovery(wecom, connection_state, stop),
+            name="arcforge-wecom-recovery",
+        )
         control_task = asyncio.create_task(
             _serve_control_requests(
                 wecom,
@@ -1372,19 +1659,25 @@ async def run(config: ConnectorConfig | None = None) -> None:
             name="arcforge-wecom-control",
         )
         print(CONNECTOR_READY_MARKER, flush=True)
-        await connection_state.startup_failed.wait()
-        raise RuntimeError("WeCom connection lost after authentication")
+        # The SDK owns transient WeCom reconnects. Keep this process and its
+        # in-flight Gateway turns alive so their final replies can be delivered
+        # after authentication recovers.
+        await asyncio.Event().wait()
     finally:
         stop.set()
         if control_task is not None:
             control_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await control_task
+        if recovery_task is not None:
+            recovery_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await recovery_task
         channel_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await channel_task
         await channel.close()
-        wecom.disconnect()
+        await _disconnect_wecom(wecom)
 
 
 def main() -> None:

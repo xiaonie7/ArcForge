@@ -1,0 +1,19 @@
+{
+  "version": "0.1.8",
+  "notes": "Windows x64 desktop release for ArcForge.\n\nThe NSIS installer and its signed updater artifact are included in the release assets.",
+  "pub_date": "2026-08-06T01:28:11.883Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTQVAwRWFKUEFPZzFFUndzN2I3dzV2Z1FTMkZpZk9RYVV1Sk1sUHMxNWZYaGplTGZBWWhGSm82L09zSDJFVFRjL0FhNkJ2VFNmYjFvN3dLaXRjcDB4WDJsQTlRVXY4eWdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1OTc5NjgyCWZpbGU6QXJjRm9yZ2VfMC4xLjhfeDY0LXNldHVwLmV4ZQovVi9IVFd6dlpNZUtBYWh4TStOTnpEdzNueUpuSGhoUWZ3UHVEdG1qdjVDNjJ6RmVlTjRlWkdkZnJKMHEwSjhWTjFiSnNkZ2F2SUJ5UkFYUTEwTXBBdz09Cg==",
+      "url": "https://gitee.com/nielixiaoxiao/arc-forge/releases/download/v0.1.8/ArcForge_0.1.8_x64-setup.exe"
+    },
+    "windows-x86_64-nsis": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTQVAwRWFKUEFPZzFFUndzN2I3dzV2Z1FTMkZpZk9RYVV1Sk1sUHMxNWZYaGplTGZBWWhGSm82L09zSDJFVFRjL0FhNkJ2VFNmYjFvN3dLaXRjcDB4WDJsQTlRVXY4eWdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1OTc5NjgyCWZpbGU6QXJjRm9yZ2VfMC4xLjhfeDY0LXNldHVwLmV4ZQovVi9IVFd6dlpNZUtBYWh4TStOTnpEdzNueUpuSGhoUWZ3UHVEdG1qdjVDNjJ6RmVlTjRlWkdkZnJKMHEwSjhWTjFiSnNkZ2F2SUJ5UkFYUTEwTXBBdz09Cg==",
+      "url": "https://gitee.com/nielixiaoxiao/arc-forge/releases/download/v0.1.8/ArcForge_0.1.8_x64-setup.exe"
+    },
+    "windows-x86_64-msi": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTQVAwRWFKUEFPZzhqOFhORUQ1aERnU2dWcnNQU1pHM1VJUHFsa2xHQUcxOEFka3R3Q083T0YwMjl4c3gra1RNMFdkL0tDNTlBczVaM1JhMzMwVEpNTFhuUFU1VnRKbHdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg1OTc5NjgyCWZpbGU6QXJjRm9yZ2VfMC4xLjhfeDY0X2VuLVVTLm1zaQpQYU83b2pnbVJPSzhxRzR5NUdZdGMzNjR1bVJVZU5ib2tOWDEzYUxXc3ZXaENTR280MW5mSzNob0tpc2ROMW1xYStMWW4rSlB0aS9MRldodU5HVkZDZz09Cg==",
+      "url": "https://gitee.com/nielixiaoxiao/arc-forge/releases/download/v0.1.8/ArcForge_0.1.8_x64_en-US.msi"
+    }
+  }
+}
