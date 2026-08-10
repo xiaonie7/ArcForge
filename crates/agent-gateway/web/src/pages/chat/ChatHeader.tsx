@@ -11,6 +11,7 @@ import {
   PanelLeft,
   Search,
   Settings,
+  Sparkles,
   Sun,
 } from "../../components/icons";
 
@@ -34,6 +35,9 @@ function ProviderBrandIcon({ type, className }: { type: ProviderId; className?: 
   const cls = cn("h-4 w-4 shrink-0", className);
   if (type === "claude_code") return <ClaudeIcon className={cls} />;
   if (type === "gemini") return <GeminiIcon className={cls} />;
+  if (type === "zhipu") {
+    return <Sparkles className={cn(cls, "text-sky-600 dark:text-sky-400")} />;
+  }
   return <OpenaiChatgptIcon className={cn(cls, "fill-current dark:text-white")} />;
 }
 

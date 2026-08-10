@@ -27,7 +27,9 @@ export function buildGeminiAuthHeaders(apiKey: string): Record<string, string> {
 }
 
 function buildProviderAuthHeaders(providerId: ProviderId, apiKey: string): Record<string, string> {
-  return providerId === "gemini" ? buildGeminiAuthHeaders(apiKey) : buildDualAuthHeaders(apiKey);
+  if (providerId === "gemini") return buildGeminiAuthHeaders(apiKey);
+  if (providerId === "zhipu") return { Authorization: `Bearer ${apiKey}` };
+  return buildDualAuthHeaders(apiKey);
 }
 
 export function buildProviderRequestHeaders(

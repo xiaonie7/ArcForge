@@ -57,6 +57,24 @@ func TestNormalizeChatSelectedModelAcceptsGemini(t *testing.T) {
 	}
 }
 
+func TestNormalizeChatSelectedModelAcceptsZhipu(t *testing.T) {
+	t.Parallel()
+
+	got, err := NormalizeChatSelectedModel(&ChatSelectedModelBody{
+		CustomProviderID: " zhipu-provider ",
+		Model:            " glm-5.2 ",
+		ProviderType:     " zhipu ",
+	})
+	if err != nil {
+		t.Fatalf("NormalizeChatSelectedModel() error = %v", err)
+	}
+	if got.CustomProviderID != "zhipu-provider" ||
+		got.Model != "glm-5.2" ||
+		got.ProviderType != "zhipu" {
+		t.Fatalf("NormalizeChatSelectedModel() = %#v", got)
+	}
+}
+
 func TestNormalizeChatRuntimeControlsDefaultsAndTrims(t *testing.T) {
 	t.Parallel()
 

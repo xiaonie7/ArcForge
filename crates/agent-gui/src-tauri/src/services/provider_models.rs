@@ -151,7 +151,7 @@ async fn read_limited_response(response: reqwest::Response) -> Result<Vec<u8>, S
 }
 
 fn normalize_provider_base_url(provider_type: &str, raw: &str) -> Result<Url, String> {
-    if !matches!(provider_type, "claude_code" | "codex" | "gemini") {
+    if !matches!(provider_type, "claude_code" | "codex" | "gemini" | "zhipu") {
         return Err("不支持的供应商类型".to_string());
     }
     let mut url = Url::parse(raw.trim()).map_err(|_| "Base URL 必须是绝对 URL".to_string())?;
@@ -167,7 +167,7 @@ fn normalize_provider_base_url(provider_type: &str, raw: &str) -> Result<Url, St
     }
 
     let mut path = url.path().trim_end_matches('/').to_string();
-    if provider_type == "codex" {
+    if matches!(provider_type, "codex" | "zhipu") {
         let lower = path.to_ascii_lowercase();
         if let Some(suffix) = CODEX_MODELS_SUFFIXES
             .iter()
@@ -200,12 +200,12 @@ fn build_provider_models_url(provider_type: &str, base_url: &Url, official: bool
     let next_path = if provider_type == "gemini" {
         if path.to_ascii_lowercase().ends_with("/models") {
             path.to_string()
-        } else if is_gemini_version_path(path) {
+        } else if is_api_version_path(path) {
             format!("{path}/models")
         } else {
             format!("{path}/{}/models", if official { "v1beta" } else { "v1" })
         }
-    } else if path.ends_with("/v1") {
+    } else if is_api_version_path(path) {
         format!("{path}/models")
     } else {
         format!("{path}/v1/models")
@@ -214,7 +214,7 @@ fn build_provider_models_url(provider_type: &str, base_url: &Url, official: bool
     url
 }
 
-fn is_gemini_version_path(path: &str) -> bool {
+fn is_api_version_path(path: &str) -> bool {
     let Some(segment) = path.trim_end_matches('/').rsplit('/').next() else {
         return false;
     };
@@ -267,6 +267,9 @@ fn build_provider_models_headers(
             if !official {
                 headers.push(("authorization", format!("Bearer {api_key}")));
             }
+        }
+        "zhipu" => {
+            headers.push(("authorization", format!("Bearer {api_key}")));
         }
         _ => {
             headers.push(("authorization", format!("Bearer {api_key}")));
@@ -357,6 +360,18 @@ mod tests {
         )
         .expect("codex attempts");
         assert_eq!(codex[0].url.as_str(), "https://relay.example.com/v1/models");
+
+        let zhipu = build_provider_models_attempts(
+            "zhipu",
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            "key",
+        )
+        .expect("zhipu attempts");
+        assert_eq!(zhipu.len(), 1);
+        assert_eq!(
+            zhipu[0].url.as_str(),
+            "https://open.bigmodel.cn/api/paas/v4/models"
+        );
     }
 
     #[test]
@@ -375,7 +390,7 @@ mod tests {
 
     #[test]
     fn provider_model_headers_exclude_inference_identity() {
-        for provider_type in ["claude_code", "codex", "gemini"] {
+        for provider_type in ["claude_code", "codex", "gemini", "zhipu"] {
             for official in [false, true] {
                 let headers = build_provider_models_headers(provider_type, "key", official);
                 let names = headers

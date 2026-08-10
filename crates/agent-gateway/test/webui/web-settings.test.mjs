@@ -7,6 +7,7 @@ const webSettings = loader.loadModule("src/lib/webSettings.ts");
 const settings = loader.loadModule("@/lib/settings/index.ts");
 const settingsSync = loader.loadModule("@/lib/settings/sync.ts");
 const chatHelpers = loader.loadModule("@/lib/chat/chatPageHelpers.ts");
+const providerUtils = loader.loadModule("@/pages/settings/providerUtils.ts");
 const RIGHT_DOCK_TAB_IDS = settings.RIGHT_DOCK_SINGLETON_TAB_IDS;
 
 test("custom provider normalization defaults and filters ordered custom headers", () => {
@@ -26,6 +27,63 @@ test("custom provider normalization defaults and filters ordered custom headers"
     { key: "X-Request-ID", value: " request-123 " },
     { key: "anthropic-beta", value: "feature-flag" },
   ]);
+});
+
+test("zhipu provider normalization keeps the v4 Chat Completions contract", () => {
+  const provider = settings.normalizeCustomProvider({
+    id: "zhipu-main",
+    name: "智谱 GLM",
+    type: "zhipu",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    models: ["glm-5.2"],
+    activeModels: ["glm-5.2"],
+    requestFormat: "openai-responses",
+    promptCachingEnabled: true,
+    nativeWebSearchEnabled: true,
+  });
+
+  assert.equal(provider.type, "zhipu");
+  assert.equal(provider.baseUrl, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(provider.requestFormat, "openai-completions");
+  assert.equal(provider.promptCachingEnabled, false);
+  assert.equal(provider.nativeWebSearchEnabled, false);
+  assert.deepEqual(provider.models, [
+    { id: "glm-5.2", contextWindow: 1_000_000, maxOutputToken: 131_072 },
+  ]);
+});
+
+test("zhipu model-list helpers preserve v4 and use Bearer-only auth", () => {
+  for (const kind of ["default", "official"]) {
+    assert.equal(
+      providerUtils.buildProviderModelsUrl(
+        "zhipu",
+        "https://open.bigmodel.cn/api/paas/v4",
+        kind,
+      ),
+      "https://open.bigmodel.cn/api/paas/v4/models",
+    );
+  }
+
+  assert.deepEqual(
+    providerUtils.buildProviderModelsAttempts(
+      "zhipu",
+      "https://open.bigmodel.cn/api/paas/v4",
+      "key",
+    ),
+    [
+      {
+        kind: "default",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer key",
+        },
+      },
+    ],
+  );
+  assert.deepEqual(
+    providerUtils.normalizeFetchedModels([{ id: "glm-5.2" }], "zhipu"),
+    [{ id: "glm-5.2", contextWindow: 1_000_000, maxOutputToken: 131_072 }],
+  );
 });
 
 test("gateway model picker keeps same-name provider instances in separate groups", () => {
@@ -207,6 +265,7 @@ test("web chat runtime controls default and follow model-aware reasoning support
       codex_openai_responses: "high",
       codex_openai_completions: "high",
       gemini: "high",
+      zhipu: "high",
     },
   });
 
@@ -247,6 +306,14 @@ test("web chat runtime controls default and follow model-aware reasoning support
       modelId: "gemini-2.5-pro",
     }),
     ["minimal", "low", "medium", "high"],
+  );
+  assert.equal(settings.getChatRuntimeReasoningProviderKey({ providerId: "zhipu" }), "zhipu");
+  assert.deepEqual(
+    settings.getChatRuntimeReasoningLevelsForProvider({
+      providerId: "zhipu",
+      modelId: "glm-5.2",
+    }),
+    ["low", "medium", "high", "max"],
   );
   // 目录之外的自定义模型（deepseek/glm 等）按可推理处理，与桌面端一致：
   // 标准四档；deepseek 走 codex 时镜像桌面端适配层的 xhigh 档。
@@ -339,6 +406,7 @@ test("web chat runtime controls default and follow model-aware reasoning support
         codex_openai_responses: "xhigh",
         codex_openai_completions: "xhigh",
         gemini: "high",
+        zhipu: "xhigh",
       },
     },
   );
@@ -363,6 +431,7 @@ test("web chat runtime controls default and follow model-aware reasoning support
         codex_openai_responses: "xhigh",
         codex_openai_completions: "xhigh",
         gemini: "xhigh",
+        zhipu: "xhigh",
       },
     },
   );
@@ -382,6 +451,7 @@ test("web chat runtime controls default and follow model-aware reasoning support
         codex_openai_responses: "xhigh",
         codex_openai_completions: "high",
         gemini: "high",
+        zhipu: "high",
       },
     },
   );
@@ -509,6 +579,7 @@ test("gateway settings sync keeps remote connection local and syncs web terminal
         codex_openai_responses: "minimal",
         codex_openai_completions: "high",
         gemini: "xhigh",
+        zhipu: "high",
       },
     },
     selectedModel: null,

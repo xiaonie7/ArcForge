@@ -20,13 +20,13 @@ export { isGatewayWebuiRuntime };
 function normalizeModelBaseUrl(type: ProviderId, baseUrl: string) {
   let normalizedUrl = normalizeBaseUrl(baseUrl);
 
-  if (type !== "codex" && type !== "gemini") {
+  if (type !== "codex" && type !== "zhipu" && type !== "gemini") {
     return normalizedUrl;
   }
 
   const lower = normalizedUrl.toLowerCase();
 
-  if (type === "codex") {
+  if (type === "codex" || type === "zhipu") {
     for (const suffix of CODEX_MODELS_SUFFIXES) {
       if (lower.endsWith(suffix)) {
         normalizedUrl = normalizedUrl.slice(0, -suffix.length);
@@ -80,7 +80,11 @@ export function buildProviderModelsUrl(
     return buildGeminiModelsUrl(baseUrl, kind === "official" ? "v1beta" : "v1");
   }
 
-  return baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+  const normalizedUrl = normalizeBaseUrl(baseUrl);
+  if (normalizedUrl.toLowerCase().endsWith("/models")) return normalizedUrl;
+  return /\/v\d+(?:beta)?$/i.test(normalizedUrl)
+    ? `${normalizedUrl}/models`
+    : `${normalizedUrl}/v1/models`;
 }
 
 function buildDefaultModelsHeaders(type: ProviderId, apiKey: string): Record<string, string> {
@@ -92,6 +96,7 @@ function buildDefaultModelsHeaders(type: ProviderId, apiKey: string): Record<str
     headers["x-goog-api-key"] = apiKey;
     return headers;
   }
+  if (type === "zhipu") return headers;
   headers["x-api-key"] = apiKey;
   if (type === "claude_code") {
     headers["anthropic-version"] = ANTHROPIC_API_VERSION;

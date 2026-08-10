@@ -18,7 +18,7 @@ import { normalizeApiKey, normalizeBaseUrl, normalizeModels } from "./normalize"
 
 export type { SystemToolId } from "../tools/systemToolOptions";
 
-export type ProviderId = "codex" | "claude_code" | "gemini";
+export type ProviderId = "codex" | "claude_code" | "gemini" | "zhipu";
 
 export type ExecutionMode = "text" | "tools" | "agent-dev";
 
@@ -212,7 +212,8 @@ export type ChatRuntimeReasoningProviderKey =
   | "claude_code"
   | "codex_openai_responses"
   | "codex_openai_completions"
-  | "gemini";
+  | "gemini"
+  | "zhipu";
 
 export type AgentPromptTemplate = {
   id: string;
@@ -356,6 +357,8 @@ const DEFAULT_CODEX_CONTEXT_WINDOW = 258_000;
 const DEFAULT_CODEX_MAX_OUTPUT_TOKEN = 142_000;
 const DEFAULT_GEMINI_CONTEXT_WINDOW = 1_048_576;
 const DEFAULT_GEMINI_MAX_OUTPUT_TOKEN = 65_536;
+const DEFAULT_ZHIPU_CONTEXT_WINDOW = 200_000;
+const DEFAULT_ZHIPU_MAX_OUTPUT_TOKEN = 131_072;
 export const DEFAULT_CHAT_RUNTIME_CONTROLS: ChatRuntimeControls = {
   thinkingEnabled: true,
   nativeWebSearchEnabled: true,
@@ -365,6 +368,7 @@ export const DEFAULT_CHAT_RUNTIME_CONTROLS: ChatRuntimeControls = {
     codex_openai_responses: "high",
     codex_openai_completions: "high",
     gemini: "high",
+    zhipu: "high",
   },
 };
 
@@ -452,6 +456,21 @@ export function getBuiltinCustomProviders(): CustomProvider[] {
       reasoning: "off",
       promptCachingEnabled: false,
       nativeWebSearchEnabled: true,
+      useSystemProxy: false,
+    },
+    {
+      id: "builtin-zhipu",
+      name: "智谱 GLM",
+      type: "zhipu",
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      apiKey: "",
+      customHeaders: [],
+      models: [],
+      activeModels: [],
+      requestFormat: "openai-completions",
+      reasoning: "off",
+      promptCachingEnabled: false,
+      nativeWebSearchEnabled: false,
       useSystemProxy: false,
     },
   ];
@@ -791,6 +810,7 @@ const CHAT_RUNTIME_REASONING_PROVIDER_KEYS: ChatRuntimeReasoningProviderKey[] = 
   "codex_openai_responses",
   "codex_openai_completions",
   "gemini",
+  "zhipu",
 ];
 
 export function getChatRuntimeReasoningProviderKey(params: {
@@ -802,6 +822,9 @@ export function getChatRuntimeReasoningProviderKey(params: {
   }
   if (params.providerId === "gemini") {
     return "gemini";
+  }
+  if (params.providerId === "zhipu") {
+    return "zhipu";
   }
   if (params.providerId === "codex" && params.requestFormat === "openai-completions") {
     return "codex_openai_completions";
@@ -1068,6 +1091,14 @@ function getKnownModelLimits(
 ): Pick<ProviderModelConfig, "contextWindow" | "maxOutputToken"> | undefined {
   const trimmedId = modelId?.trim();
   if (!trimmedId) return undefined;
+  if (providerId === "zhipu") {
+    const known = getBuiltinModels("zai-coding-cn" satisfies BuiltinProvider).find(
+      (model) => model.id === trimmedId,
+    );
+    return known
+      ? { contextWindow: known.contextWindow, maxOutputToken: known.maxTokens }
+      : undefined;
+  }
   // Anthropic 走规范化目录回查（装饰 id/[1m] 后缀也能继承默认值），并对旧世代
   // 钳出退役后的有效窗口；contextWindow > 200K 即请求侧启用 1M beta 的开关。
   if (providerId === "claude_code") {
@@ -1102,6 +1133,13 @@ export function getProviderModelDefaults(
     return {
       contextWindow: DEFAULT_GEMINI_CONTEXT_WINDOW,
       maxOutputToken: DEFAULT_GEMINI_MAX_OUTPUT_TOKEN,
+    };
+  }
+
+  if (providerId === "zhipu") {
+    return {
+      contextWindow: DEFAULT_ZHIPU_CONTEXT_WINDOW,
+      maxOutputToken: DEFAULT_ZHIPU_MAX_OUTPUT_TOKEN,
     };
   }
 
@@ -1254,6 +1292,7 @@ function normalizeProviderId(input: unknown): ProviderId {
   switch (input) {
     case "codex":
     case "gemini":
+    case "zhipu":
       return input;
     default:
       return "claude_code";
@@ -1281,8 +1320,10 @@ function normalizeCustomHeaders(input: unknown): { key: string; value: string }[
 export function normalizeCustomProvider(input: unknown): CustomProvider {
   const obj = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
   const type = normalizeProviderId(obj.type);
-  const codexRouting =
-    type === "codex" ? normalizeCodexRouting(obj.baseUrl, obj.requestFormat) : undefined;
+  const openAIRouting =
+    type === "codex" || type === "zhipu"
+      ? normalizeCodexRouting(obj.baseUrl, obj.requestFormat)
+      : undefined;
   const models = normalizeProviderModelConfigs(obj.models, type);
   const validModelIds = new Set(models.map((model) => model.id));
   const apiKey = normalizeApiKey(typeof obj.apiKey === "string" ? obj.apiKey : "");
@@ -1292,8 +1333,8 @@ export function normalizeCustomProvider(input: unknown): CustomProvider {
     id,
     name: normalizeProviderName(id, obj.name),
     type,
-    baseUrl: codexRouting
-      ? codexRouting.baseUrl
+    baseUrl: openAIRouting
+      ? openAIRouting.baseUrl
       : normalizeBaseUrl(typeof obj.baseUrl === "string" ? obj.baseUrl : ""),
     apiKey,
     apiKeyConfigured: apiKey.length > 0 || obj.apiKeyConfigured === true,
@@ -1302,15 +1343,17 @@ export function normalizeCustomProvider(input: unknown): CustomProvider {
     activeModels: normalizeModels(normalizeStringArray(obj.activeModels)).filter((modelId) =>
       validModelIds.has(modelId),
     ),
-    requestFormat: codexRouting?.requestFormat,
+    requestFormat:
+      type === "zhipu" ? "openai-completions" : openAIRouting?.requestFormat,
     reasoning: normalizeReasoningLevel(obj.reasoning),
     // Anthropic/OpenAI 默认开启提示词缓存（OpenAI 侧体现为稳定的
     // prompt_cache_key 路由提示）；Gemini 的隐式缓存由服务端自动处理。
-    promptCachingEnabled: type === "gemini" ? false : obj.promptCachingEnabled !== false,
+    promptCachingEnabled:
+      type === "gemini" || type === "zhipu" ? false : obj.promptCachingEnabled !== false,
     ...(type === "claude_code" && obj.promptCacheRetention === "long"
       ? { promptCacheRetention: "long" as const }
       : {}),
-    nativeWebSearchEnabled: obj.nativeWebSearchEnabled !== false,
+    nativeWebSearchEnabled: type === "zhipu" ? false : obj.nativeWebSearchEnabled !== false,
     useSystemProxy: obj.useSystemProxy === true,
   };
 }

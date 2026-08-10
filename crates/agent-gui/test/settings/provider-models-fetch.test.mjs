@@ -75,6 +75,16 @@ test("buildProviderModelsUrl defaults to /v1/models and falls back to official e
     providerUtils.buildProviderModelsUrl("codex", "https://relay.example.com/v1", "default"),
     "https://relay.example.com/v1/models",
   );
+  for (const kind of ["default", "official"]) {
+    assert.equal(
+      providerUtils.buildProviderModelsUrl(
+        "zhipu",
+        "https://open.bigmodel.cn/api/paas/v4",
+        kind,
+      ),
+      "https://open.bigmodel.cn/api/paas/v4/models",
+    );
+  }
 });
 
 test("buildProviderModelsAttempts orders default before official with provider headers", () => {
@@ -115,6 +125,15 @@ test("buildProviderModelsAttempts orders default before official with provider h
   assert.equal(codex[1].headers["x-api-key"], undefined);
   assert.equal(codex[1].headers.Authorization, "Bearer test-key");
 
+  const zhipu = providerUtils.buildProviderModelsAttempts(
+    "zhipu",
+    "https://open.bigmodel.cn/api/paas/v4",
+    "test-key",
+  );
+  assert.equal(zhipu.length, 1);
+  assert.equal(zhipu[0].headers.Authorization, "Bearer test-key");
+  assert.equal(zhipu[0].headers["x-api-key"], undefined);
+
   const inferenceOnlyHeaders = [
     "x-app",
     "user-agent",
@@ -123,7 +142,7 @@ test("buildProviderModelsAttempts orders default before official with provider h
     "session_id",
     "conversation_id",
   ];
-  for (const attempt of [...gemini, ...claude, ...codex]) {
+  for (const attempt of [...gemini, ...claude, ...codex, ...zhipu]) {
     const headerNames = Object.keys(attempt.headers).map((name) => name.toLowerCase());
     assert.ok(!headerNames.some((name) => name.startsWith("x-stainless-")));
     for (const name of inferenceOnlyHeaders) assert.ok(!headerNames.includes(name), name);
@@ -210,6 +229,27 @@ test("fetchModelsFromApi returns the default /v1/models result without falling b
         models.map((model) => model.id),
         ["gpt-5"],
       );
+    },
+  );
+});
+
+test("fetchModelsFromApi preserves the Zhipu v4 route and GLM limits", async () => {
+  await withFetchStub(
+    () => jsonResponse(200, { data: [{ id: "glm-5.2" }] }),
+    async (calls) => {
+      const models = await providerUtils.fetchModelsFromApi(
+        "zhipu",
+        "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "test-key",
+      );
+
+      assert.equal(calls.length, 1);
+      assert.ok(calls[0].url.endsWith("/proxy/zhipu/api/paas/v4/models"));
+      assert.equal(calls[0].options.headers.Authorization, "Bearer test-key");
+      assert.equal(calls[0].options.headers["x-api-key"], undefined);
+      assert.deepEqual(models, [
+        { id: "glm-5.2", contextWindow: 1_000_000, maxOutputToken: 131_072 },
+      ]);
     },
   );
 });

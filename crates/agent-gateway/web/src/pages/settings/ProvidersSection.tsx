@@ -12,6 +12,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Sparkles,
   Settings,
   Trash2,
   Waypoints,
@@ -80,11 +81,12 @@ type ModelEditDraft = {
   costCacheRead: string;
   costCacheWrite: string;
 };
-const PROVIDER_TABS: ProviderId[] = ["claude_code", "codex", "gemini"];
+const PROVIDER_TABS: ProviderId[] = ["claude_code", "codex", "zhipu", "gemini"];
 const PROVIDER_LABELS: Record<ProviderId, string> = {
   claude_code: "Anthropic",
   codex: "OpenAI",
   gemini: "Gemini",
+  zhipu: "智谱 GLM",
 };
 
 function getProviderLabel(type: ProviderId) {
@@ -94,6 +96,9 @@ function getProviderLabel(type: ProviderId) {
 function ProviderBrandIcon({ type }: { type: ProviderId }) {
   if (type === "claude_code") return <ClaudeIcon height="1em" />;
   if (type === "gemini") return <GeminiIcon height="1em" />;
+  if (type === "zhipu") {
+    return <Sparkles className="h-[1em] w-[1em] text-sky-600 dark:text-sky-400" />;
+  }
   return <OpenaiChatgptIcon height="1em" className="fill-current dark:text-white" />;
 }
 
@@ -168,8 +173,13 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
   const initialApiKey = initialData?.apiKey ?? "";
   const initialUsesRedactedApiKey =
     isGatewayWebui && initialApiKey.trim() === "" && initialData?.apiKeyConfigured === true;
-  const [name, setName] = useState(initialData?.name ?? "");
-  const [baseUrl, setBaseUrl] = useState(initialData?.baseUrl ?? "");
+  const [name, setName] = useState(
+    initialData?.name ?? (providerType === "zhipu" ? "智谱 GLM" : ""),
+  );
+  const [baseUrl, setBaseUrl] = useState(
+    initialData?.baseUrl ??
+      (providerType === "zhipu" ? "https://open.bigmodel.cn/api/paas/v4" : ""),
+  );
   const [apiKey, setApiKey] = useState(
     initialUsesRedactedApiKey ? REDACTED_API_KEY_DISPLAY : initialApiKey,
   );
@@ -183,11 +193,14 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
     new Set(initialData?.activeModels ?? []),
   );
   const [requestFormat, setRequestFormat] = useState<CodexRequestFormat>(
-    initialData?.requestFormat ?? "openai-responses",
+    providerType === "zhipu"
+      ? "openai-completions"
+      : (initialData?.requestFormat ?? "openai-responses"),
   );
   const [useSystemProxy, setUseSystemProxy] = useState(initialData?.useSystemProxy ?? false);
+  const supportsPromptCaching = providerType === "claude_code" || providerType === "codex";
   const [promptCachingEnabled, setPromptCachingEnabled] = useState(
-    initialData?.promptCachingEnabled ?? providerType !== "gemini",
+    supportsPromptCaching && (initialData?.promptCachingEnabled ?? true),
   );
   const [promptCacheRetention, setPromptCacheRetention] = useState<"short" | "long">(
     initialData?.promptCacheRetention === "long" ? "long" : "short",
@@ -452,17 +465,23 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
       customHeaders,
       models,
       activeModels: Array.from(activeModels),
-      requestFormat: providerType === "codex" ? requestFormat : undefined,
+      requestFormat:
+        providerType === "codex"
+          ? requestFormat
+          : providerType === "zhipu"
+            ? "openai-completions"
+            : undefined,
       reasoning:
         providerType === "gemini" && initialData?.reasoning === "xhigh"
           ? "high"
           : (initialData?.reasoning ?? "off"),
-      promptCachingEnabled: providerType === "gemini" ? false : promptCachingEnabled,
+      promptCachingEnabled: supportsPromptCaching ? promptCachingEnabled : false,
       promptCacheRetention:
         providerType === "claude_code" && promptCachingEnabled && promptCacheRetention === "long"
           ? "long"
           : undefined,
-      nativeWebSearchEnabled: initialData?.nativeWebSearchEnabled ?? true,
+      nativeWebSearchEnabled:
+        providerType === "zhipu" ? false : (initialData?.nativeWebSearchEnabled ?? true),
       useSystemProxy,
     });
     requestClose();
@@ -670,6 +689,15 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                         ))}
                       </SelectContent>
                     </Select>
+                  </div>
+                ) : providerType === "zhipu" ? (
+                  <div className="mt-4 space-y-1.5">
+                    <Label>{t("settings.requestFormat")}</Label>
+                    <Input
+                      value={CODEX_REQUEST_FORMAT_LABELS["openai-completions"]}
+                      readOnly
+                      aria-readonly="true"
+                    />
                   </div>
                 ) : null}
 
@@ -965,7 +993,7 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                   />
                 </div>
 
-                {providerType !== "gemini" ? (
+                {supportsPromptCaching ? (
                   <div
                     className={cn(
                       "mt-3 rounded-xl border bg-card px-4 py-3 transition-colors",

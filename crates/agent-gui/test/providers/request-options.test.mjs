@@ -200,6 +200,9 @@ test("provider request helpers normalize auth, metadata, errors, and model value
   assert.deepEqual(providers.buildProviderRequestHeaders("gemini", "secret", "conversation-1"), {
     "x-goog-api-key": "secret",
   });
+  assert.deepEqual(providers.buildProviderRequestHeaders("zhipu", "secret", "conversation-1"), {
+    Authorization: "Bearer secret",
+  });
   const generatedCodexHeaders = providers.buildProviderRequestHeaders("codex", "secret");
   assert.match(generatedCodexHeaders.session_id, /^[0-9a-f-]{36}$/i);
   assert.equal(generatedCodexHeaders.conversation_id, generatedCodexHeaders.session_id);
@@ -224,6 +227,13 @@ test("provider request helpers normalize auth, metadata, errors, and model value
   );
   assert.equal(
     providers.providerSupportsNativeWebSearch("codex", "openai-completions"),
+    false,
+  );
+  assert.equal(
+    providers.providerSupportsNativeWebSearch("zhipu", "openai-completions", {
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+      modelId: "glm-5.2",
+    }),
     false,
   );
   assert.equal(
@@ -274,6 +284,11 @@ test("provider-specific custom header suggestions include standard model headers
   assert.ok(codexPresets.includes("session_id"));
   assert.ok(codexPresets.includes("conversation_id"));
   assert.ok(!codexPresets.includes("anthropic-version"));
+
+  const zhipuPresets = customHeaderHelpers.getCustomHeaderKeyPresets("zhipu");
+  assert.ok(zhipuPresets.includes("X-Request-ID"));
+  assert.ok(!zhipuPresets.includes("session_id"));
+  assert.ok(!zhipuPresets.includes("anthropic-version"));
 });
 
 test("local proxy preserves explicit user-agent and content-type values for the upstream hop", () => {
@@ -366,10 +381,46 @@ test("custom Codex models append v1 to bare and prefixed base URLs", () => {
     undefined,
     "https://api.openai.com",
   );
+  const versioned = providers.createModelFromConfig(
+    "codex",
+    "custom-chat-model",
+    "https://relay.example.com/api/v4",
+    "openai-completions",
+  );
 
   assert.equal(bare.baseUrl, "https://api.openai.com/v1");
   assert.equal(prefixed.baseUrl, "https://openrouter.ai/api/v1");
   assert.equal(proxied.baseUrl, "http://127.0.0.1:18080/proxy/codex/v1");
+  assert.equal(versioned.baseUrl, "https://relay.example.com/api/v4");
+});
+
+test("Zhipu GLM models preserve v4 and always use OpenAI Chat Completions", () => {
+  const model = providers.createModelFromConfig(
+    "zhipu",
+    "glm-5.2",
+    "https://open.bigmodel.cn/api/paas/v4",
+    "openai-responses",
+  );
+  const proxied = providers.createModelFromConfig(
+    "zhipu",
+    "glm-5.2",
+    "http://127.0.0.1:18080/proxy/zhipu/api/paas/v4",
+    "openai-responses",
+    undefined,
+    "https://open.bigmodel.cn/api/paas/v4",
+  );
+
+  for (const candidate of [model, proxied]) {
+    assert.equal(candidate.api, "openai-completions");
+    assert.equal(candidate.provider, "openai");
+    assert.equal(candidate.contextWindow, 1_000_000);
+    assert.equal(candidate.maxTokens, 131_072);
+    assert.equal(candidate.compat.thinkingFormat, "zai");
+    assert.equal(candidate.compat.zaiToolStream, true);
+    assert.equal(candidate.compat.supportsReasoningEffort, true);
+  }
+  assert.equal(model.baseUrl, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(proxied.baseUrl, "http://127.0.0.1:18080/proxy/zhipu/api/paas/v4");
 });
 
 test("custom Codex Chat Completions models keep text-only input metadata", () => {

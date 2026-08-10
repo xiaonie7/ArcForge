@@ -139,6 +139,26 @@ test("remote chat model selection accepts an exact enabled provider model", () =
   });
 });
 
+test("remote chat model selection accepts a Zhipu provider type", () => {
+  const app = appSettings(
+    [provider({ id: "zhipu-main", type: "zhipu", models: ["glm-5.2"] })],
+    { customProviderId: "zhipu-main", model: "glm-5.2" },
+  );
+
+  const resolved = modelSelection.resolveEffectiveChatModelSelection({
+    settings: app,
+    gatewaySelectedModel: {
+      customProviderId: "zhipu-main",
+      model: "glm-5.2",
+      providerType: "zhipu",
+    },
+  });
+
+  assert.equal(resolved.provider.id, "zhipu-main");
+  assert.equal(resolved.providerId, "zhipu");
+  assert.equal(resolved.provider.requestFormat, "openai-completions");
+});
+
 test("conversation selection wins over the global default", () => {
   const app = appSettings(
     [

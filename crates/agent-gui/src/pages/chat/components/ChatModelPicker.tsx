@@ -8,6 +8,7 @@ import {
   OpenaiChatgptIcon,
   Search,
   Sparkle,
+  Sparkles,
 } from "../../../components/icons";
 import { Button } from "../../../components/ui/button";
 import { useLocale } from "../../../i18n";
@@ -37,6 +38,9 @@ function ProviderBrandIcon({ type, className }: { type: ProviderId; className?: 
   const cls = cn("h-4 w-4 shrink-0", className);
   if (type === "claude_code") return <ClaudeIcon className={cls} />;
   if (type === "gemini") return <GeminiIcon className={cls} />;
+  if (type === "zhipu") {
+    return <Sparkles className={cn(cls, "text-sky-600 dark:text-sky-400")} />;
+  }
   return <OpenaiChatgptIcon className={cn(cls, "fill-current dark:text-white")} />;
 }
 

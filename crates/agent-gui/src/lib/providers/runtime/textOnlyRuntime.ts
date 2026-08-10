@@ -97,6 +97,7 @@ function buildTextOnlyStreamOptions(params: {
     reasoning:
       (params.providerId === "codex" &&
         (params.model.api === "openai-responses" || params.model.api === "openai-completions")) ||
+      (params.providerId === "zhipu" && params.model.api === "openai-completions") ||
       (params.providerId === "claude_code" && params.model.api === "anthropic-messages") ||
       (params.providerId === "gemini" && params.model.api === "google-generative-ai")
         ? toSimpleStreamReasoning(params.runtime.reasoning)

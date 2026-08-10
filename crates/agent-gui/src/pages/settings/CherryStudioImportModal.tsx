@@ -7,6 +7,7 @@ import {
   GeminiIcon,
   OpenaiChatgptIcon,
   RefreshCw,
+  Sparkles,
   Settings,
   X,
 } from "../../components/icons";
@@ -56,17 +57,21 @@ type CherryStudioImportModalProps = {
   onConfirm: (items: CherryProviderImportItem[]) => void;
 };
 
-const PROVIDER_ORDER: ProviderId[] = ["claude_code", "codex", "gemini"];
+const PROVIDER_ORDER: ProviderId[] = ["claude_code", "codex", "zhipu", "gemini"];
 
 const PROVIDER_LABELS: Record<ProviderId, string> = {
   claude_code: "Anthropic",
   codex: "OpenAI",
   gemini: "Gemini",
+  zhipu: "智谱 GLM",
 };
 
 function ProviderTypeIcon({ type }: { type: ProviderId }) {
   if (type === "claude_code") return <ClaudeIcon height="1em" />;
   if (type === "gemini") return <GeminiIcon height="1em" />;
+  if (type === "zhipu") {
+    return <Sparkles className="h-[1em] w-[1em] text-sky-600 dark:text-sky-400" />;
+  }
   return <OpenaiChatgptIcon height="1em" className="fill-current dark:text-white" />;
 }
 
@@ -77,6 +82,7 @@ function itemKey(item: CherryProviderImportItem) {
 function itemProtocolLabel(item: CherryProviderImportItem) {
   if (item.providerType === "claude_code") return "Anthropic Messages";
   if (item.providerType === "gemini") return "Gemini Generate Content";
+  if (item.providerType === "zhipu") return "Chat Completions";
   return item.requestFormat === "openai-responses" ? "Responses API" : "Chat Completions";
 }
 

@@ -897,7 +897,7 @@ export function attachOpenAICompletionsNativeAttachments<
   },
 ): TOptions {
   if (
-    params.providerId !== "codex" ||
+    !["codex", "zhipu"].includes(params.providerId) ||
     !params.context ||
     !isOpenAICompletionsModel(params.model) ||
     !params.workdir?.trim()

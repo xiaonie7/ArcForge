@@ -53,7 +53,7 @@ export function attachOpenAICompletionsFinishReasonCompatibility(
 ): StreamOptionsEx {
   if (
     options.recoverMissingFinishReason !== undefined ||
-    params.providerId !== "codex" ||
+    (params.providerId !== "codex" && params.providerId !== "zhipu") ||
     params.modelApi !== "openai-completions" ||
     isOfficialOpenAIBaseUrl(params.baseUrl)
   ) {

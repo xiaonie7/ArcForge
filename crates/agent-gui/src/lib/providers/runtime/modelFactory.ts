@@ -28,7 +28,7 @@ const CODEX_CHAT_COMPLETIONS_SUFFIX = "/chat/completions";
 type CodexApi = "openai-responses" | "openai-completions";
 
 function resolveKnownModel(
-  provider: "openai" | "anthropic" | "google",
+  provider: "openai" | "anthropic" | "google" | "zai-coding-cn",
   modelId: string,
   baseUrl: string,
 ): Model<any> | undefined {
@@ -116,7 +116,7 @@ function maybeAppendCodexApiVersion(baseUrl: string) {
   try {
     const url = new URL(baseUrl);
     const pathname = url.pathname.replace(/\/+$/, "");
-    if (!/\/v1$/i.test(pathname)) {
+    if (!/\/v\d+(?:beta)?$/i.test(pathname)) {
       url.pathname = `${pathname}/v1`;
     } else {
       url.pathname = pathname;
@@ -199,6 +199,7 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   const normalizedModelId = params.modelId.trim().toLowerCase();
   const isXiaomiMimo = isXiaomiMimoModelId(normalizedModelId);
   const isZai = compatBaseUrl.includes("api.z.ai");
+  const isZhipu = compatBaseUrl.includes("open.bigmodel.cn");
   const isXai = compatBaseUrl.includes("api.x.ai");
   const isOpenRouter = compatBaseUrl.includes("openrouter.ai");
   const isGroq = compatBaseUrl.includes("groq.com");
@@ -217,6 +218,7 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   const shouldUseCompatibleDefaults =
     isKnownNonOpenAIModel ||
     isZai ||
+    isZhipu ||
     isXai ||
     isOpenRouter ||
     isGroq ||
@@ -243,7 +245,7 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   if (isChutes) {
     compat.maxTokensField = "max_tokens";
   }
-  if (isZai) {
+  if (isZai || isZhipu) {
     compat.thinkingFormat = "zai";
   } else if (isOpenRouter) {
     compat.thinkingFormat = "openrouter";
@@ -317,7 +319,7 @@ export function createModelFromConfig(
   const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const customModelCost = configuredCost ?? zeroCost;
 
-  if (providerId === "codex") {
+  if (providerId === "codex" || providerId === "zhipu") {
     const { baseUrl: normalizedBaseUrl, preferredApi } = normalizeCodexBaseUrl(baseUrl);
     const isDeepSeekCodex = isDeepSeekCodexTarget({
       providerId,
@@ -325,7 +327,10 @@ export function createModelFromConfig(
       upstreamBaseUrl,
       modelId,
     });
-    const api = isDeepSeekCodex ? "openai-completions" : inferCodexApi(requestFormat, preferredApi);
+    const api =
+      providerId === "zhipu" || isDeepSeekCodex
+        ? "openai-completions"
+        : inferCodexApi(requestFormat, preferredApi);
     const responsesCompat =
       api === "openai-responses"
         ? resolveCodexOpenAIResponsesCompat({
@@ -341,7 +346,10 @@ export function createModelFromConfig(
             modelId,
           })
         : undefined;
-    const catalogModel = findCodexBuiltinModel(modelId, api);
+    const catalogModel =
+      providerId === "codex"
+        ? findCodexBuiltinModel(modelId, api)
+        : resolveKnownModel("zai-coding-cn", modelId, normalizedBaseUrl);
     const known = catalogModel
       ? ({ ...catalogModel, provider: "openai", baseUrl: normalizedBaseUrl } as Model<CodexApi>)
       : undefined;

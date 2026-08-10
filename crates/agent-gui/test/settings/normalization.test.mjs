@@ -212,6 +212,61 @@ test("gemini provider normalization keeps native routing and model limits", () =
   assert.equal(provider.models[0].maxOutputToken, 65_536);
 });
 
+test("zhipu provider normalization fixes routing and uses the GLM catalog", () => {
+  const provider = settings.normalizeCustomProvider({
+    id: "zhipu-main",
+    name: " 智谱 GLM ",
+    type: "zhipu",
+    baseUrl: " https://open.bigmodel.cn/api/paas/v4/chat/completions/ ",
+    apiKey: " key ",
+    models: ["glm-5.2"],
+    activeModels: ["glm-5.2"],
+    requestFormat: "openai-responses",
+    promptCachingEnabled: true,
+    nativeWebSearchEnabled: true,
+  });
+
+  assert.equal(provider.type, "zhipu");
+  assert.equal(provider.baseUrl, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(provider.requestFormat, "openai-completions");
+  assert.equal(provider.promptCachingEnabled, false);
+  assert.equal(provider.nativeWebSearchEnabled, false);
+  assert.deepEqual(provider.models[0], {
+    id: "glm-5.2",
+    contextWindow: 1_000_000,
+    maxOutputToken: 131_072,
+  });
+  assert.deepEqual(settings.getProviderModelDefaults("zhipu", "glm-5.2"), {
+    contextWindow: 1_000_000,
+    maxOutputToken: 131_072,
+  });
+  assert.equal(settings.getChatRuntimeReasoningProviderKey({ providerId: "zhipu" }), "zhipu");
+
+  const builtin = settings
+    .getDefaultSettings()
+    .customProviders.find((item) => item.id === "builtin-zhipu");
+  assert.ok(builtin);
+  assert.equal(builtin.name, "智谱 GLM");
+  assert.equal(builtin.type, "zhipu");
+  assert.equal(builtin.baseUrl, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(builtin.requestFormat, "openai-completions");
+  assert.equal(builtin.nativeWebSearchEnabled, false);
+
+  const roundTripped = settings.normalizeSettings(
+    JSON.parse(
+      JSON.stringify({
+        customProviders: [provider],
+        selectedModel: { customProviderId: provider.id, model: "glm-5.2" },
+      }),
+    ),
+  );
+  assert.equal(roundTripped.customProviders[0].type, "zhipu");
+  assert.deepEqual(roundTripped.selectedModel, {
+    customProviderId: "zhipu-main",
+    model: "glm-5.2",
+  });
+});
+
 test("settings normalization drops stale selected models and preserves valid selections", () => {
   const customProviders = [
     {
@@ -373,6 +428,7 @@ test("chat runtime controls default and follow provider model reasoning support"
       codex_openai_responses: "high",
       codex_openai_completions: "high",
       gemini: "high",
+      zhipu: "high",
     },
   });
 
@@ -499,6 +555,7 @@ test("chat runtime controls default and follow provider model reasoning support"
         codex_openai_responses: "xhigh",
         codex_openai_completions: "xhigh",
         gemini: "high",
+        zhipu: "xhigh",
       },
     },
   );
@@ -530,6 +587,7 @@ test("chat runtime controls default and follow provider model reasoning support"
         // gemini 未在 reasoningByProvider 输入里显式给出，也未参与本次调用
         // 的当前 provider key，因此只继承顶层 reasoning 原值，不做钳制。
         gemini: "xhigh",
+        zhipu: "xhigh",
       },
     },
   );
@@ -554,6 +612,7 @@ test("chat runtime controls default and follow provider model reasoning support"
         codex_openai_responses: "xhigh",
         codex_openai_completions: "high",
         gemini: "high",
+        zhipu: "high",
       },
     },
   );
@@ -610,6 +669,7 @@ test("chat runtime controls default and follow provider model reasoning support"
       codex_openai_responses: "high",
       codex_openai_completions: "high",
       gemini: "high",
+      zhipu: "high",
     },
   });
 });
