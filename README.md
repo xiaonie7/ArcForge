@@ -1,3 +1,7 @@
+<p align="right">
+  <a href="README.en.md">English</a> · 简体中文
+</p>
+
 <p align="center">
   <img src=".tmp/arcforge-brand/lockup.png" width="820" alt="ArcForge — Local-first desktop Work Agent for Windows professionals" />
 </p>
