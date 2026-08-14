@@ -327,13 +327,10 @@ export function PlaybookModal(props: PlaybookModalProps) {
         description: description.trim(),
         prompt: prompt.trim(),
         selectedModel: parsedModel,
-        reasoning:
-          mode === "edit" && !reasoningTouched ? initialData?.reasoning : reasoning,
+        reasoning: mode === "edit" && !reasoningTouched ? initialData?.reasoning : reasoning,
         workdir: mode === "edit" && !workdirTouched ? initialData?.workdir : workdir.trim(),
         selectedSkills:
-          mode === "edit" && !selectedSkillsTouched
-            ? initialData?.selectedSkills
-            : selectedSkills,
+          mode === "edit" && !selectedSkillsTouched ? initialData?.selectedSkills : selectedSkills,
         selectedSystemTools:
           mode === "edit" && !selectedSystemToolsTouched
             ? initialData?.selectedSystemTools
