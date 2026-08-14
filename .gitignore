@@ -1,6 +1,9 @@
 .idea/
 grok-build/
-/docs/
+/docs/*
+!/docs/features/
+/docs/features/*
+!/docs/features/playbooks-and-delivery.md
 
 # Build outputs
 target/

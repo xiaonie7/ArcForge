@@ -4,15 +4,16 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{Map, Value};
 
 use super::types::{
-    CronRunRecord, CronSnapshot, CronTask, HookDef, HooksSnapshot, HttpRequestSpec, RunState,
-    SelectedModelRef, DEFAULT_CRON_TIMEOUT_SECONDS,
+    CronRunRecord, CronSnapshot, CronTask, DeliveryConfig, DeliveryStatus, HookDef, HooksSnapshot,
+    HttpRequestSpec, Playbook, PlaybooksSnapshot, RunState, SelectedModelRef,
+    DEFAULT_CRON_TIMEOUT_SECONDS,
 };
 
 pub const RUN_RETENTION_PER_TASK: u32 = 200;
 pub const RUN_RETENTION_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 pub const MAX_RUN_OUTPUT_CHARS: usize = 50_000;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 pub fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,6 +76,15 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), String> {
             sort_index INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS automation_playbooks (
+            playbook_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            config_json TEXT NOT NULL,
+            sort_index INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS automation_cron_runs (
             execution_id TEXT PRIMARY KEY,
             task_id TEXT NOT NULL,
@@ -86,7 +96,9 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), String> {
             exit_code INTEGER,
             output TEXT NOT NULL DEFAULT '',
             lease_expires_at INTEGER,
-            request_json TEXT
+            request_json TEXT,
+            delivery_status TEXT,
+            delivery_error TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_automation_cron_runs_task
             ON automation_cron_runs (task_id, started_at DESC);
@@ -95,7 +107,32 @@ pub fn ensure_schema(conn: &Connection) -> Result<(), String> {
         ",
     )
     .map_err(|e| format!("初始化 automation 表失败：{e}"))?;
+    ensure_column(conn, "automation_cron_runs", "delivery_status", "TEXT")?;
+    ensure_column(conn, "automation_cron_runs", "delivery_error", "TEXT")?;
     Ok(())
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("read {table} schema failed: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| format!("read {table} columns failed: {e}"))?;
+    for row in rows {
+        if row.map_err(|e| format!("read {table} column failed: {e}"))? == column {
+            return Ok(());
+        }
+    }
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))
+    .map_err(|e| format!("add {table}.{column} failed: {e}"))
 }
 
 fn meta_read_i64(conn: &Connection, key: &str) -> Result<Option<i64>, String> {
@@ -135,11 +172,12 @@ pub fn bump_revision(conn: &Connection, key: &str) -> Result<u64, String> {
 
 pub const CRON_REVISION_KEY: &str = "cron_revision";
 pub const HOOKS_REVISION_KEY: &str = "hooks_revision";
+pub const PLAYBOOKS_REVISION_KEY: &str = "playbooks_revision";
 
 /// Creates the automation tables and stamps the schema version. Idempotent.
 pub fn initialize(conn: &Connection) -> Result<(), String> {
     ensure_schema(conn)?;
-    if meta_read_i64(conn, "schema_version")?.is_none() {
+    if meta_read_i64(conn, "schema_version")?.unwrap_or(0) < SCHEMA_VERSION {
         meta_write_i64(conn, "schema_version", SCHEMA_VERSION)?;
     }
     Ok(())
@@ -172,6 +210,34 @@ fn task_config_json(task: &CronTask) -> Result<String, String> {
     }
     if let Some(workdir) = &task.workdir {
         config.insert("workdir".to_string(), Value::String(workdir.clone()));
+    }
+    if let Some(selected_skills) = &task.selected_skills {
+        config.insert(
+            "selectedSkills".to_string(),
+            serde_json::to_value(selected_skills)
+                .map_err(|e| format!("serialize cron selectedSkills failed: {e}"))?,
+        );
+    }
+    if let Some(selected_system_tools) = &task.selected_system_tools {
+        config.insert(
+            "selectedSystemTools".to_string(),
+            serde_json::to_value(selected_system_tools)
+                .map_err(|e| format!("serialize cron selectedSystemTools failed: {e}"))?,
+        );
+    }
+    if let Some(mcp_server_ids) = &task.mcp_server_ids {
+        config.insert(
+            "mcpServerIds".to_string(),
+            serde_json::to_value(mcp_server_ids)
+                .map_err(|e| format!("serialize cron mcpServerIds failed: {e}"))?,
+        );
+    }
+    if let Some(delivery) = &task.delivery {
+        config.insert(
+            "delivery".to_string(),
+            serde_json::to_value(delivery)
+                .map_err(|e| format!("serialize cron delivery failed: {e}"))?,
+        );
     }
     config.insert(
         "timeoutSeconds".to_string(),
@@ -287,6 +353,91 @@ pub fn update_hook_row(conn: &Connection, hook: &HookDef) -> Result<usize, Strin
     .map_err(|e| format!("更新 automation_hooks 失败：{e}"))
 }
 
+fn playbook_config_json(playbook: &Playbook) -> Result<String, String> {
+    let mut config = Map::new();
+    config.insert("prompt".to_string(), Value::String(playbook.prompt.clone()));
+    config.insert(
+        "selectedModel".to_string(),
+        serde_json::to_value(&playbook.selected_model)
+            .map_err(|e| format!("serialize playbook selectedModel failed: {e}"))?,
+    );
+    if let Some(reasoning) = &playbook.reasoning {
+        config.insert("reasoning".to_string(), Value::String(reasoning.clone()));
+    }
+    if let Some(workdir) = &playbook.workdir {
+        config.insert("workdir".to_string(), Value::String(workdir.clone()));
+    }
+    if let Some(selected_skills) = &playbook.selected_skills {
+        config.insert(
+            "selectedSkills".to_string(),
+            serde_json::to_value(selected_skills)
+                .map_err(|e| format!("serialize playbook selectedSkills failed: {e}"))?,
+        );
+    }
+    if let Some(selected_system_tools) = &playbook.selected_system_tools {
+        config.insert(
+            "selectedSystemTools".to_string(),
+            serde_json::to_value(selected_system_tools)
+                .map_err(|e| format!("serialize playbook selectedSystemTools failed: {e}"))?,
+        );
+    }
+    if let Some(mcp_server_ids) = &playbook.mcp_server_ids {
+        config.insert(
+            "mcpServerIds".to_string(),
+            serde_json::to_value(mcp_server_ids)
+                .map_err(|e| format!("serialize playbook mcpServerIds failed: {e}"))?,
+        );
+    }
+    if let Some(delivery) = &playbook.delivery {
+        config.insert(
+            "delivery".to_string(),
+            serde_json::to_value(delivery)
+                .map_err(|e| format!("serialize playbook delivery failed: {e}"))?,
+        );
+    }
+    serde_json::to_string(&Value::Object(config))
+        .map_err(|e| format!("serialize playbook config failed: {e}"))
+}
+
+pub fn insert_playbook(
+    conn: &Connection,
+    playbook: &Playbook,
+    sort_index: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO automation_playbooks
+            (playbook_id, name, description, config_json, sort_index, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            playbook.id,
+            playbook.name,
+            playbook.description,
+            playbook_config_json(playbook)?,
+            sort_index,
+            playbook.created_at,
+            playbook.updated_at,
+        ],
+    )
+    .map_err(|e| format!("insert automation_playbooks failed: {e}"))?;
+    Ok(())
+}
+
+pub fn update_playbook_row(conn: &Connection, playbook: &Playbook) -> Result<usize, String> {
+    conn.execute(
+        "UPDATE automation_playbooks
+         SET name = ?2, description = ?3, config_json = ?4, updated_at = ?5
+         WHERE playbook_id = ?1",
+        params![
+            playbook.id,
+            playbook.name,
+            playbook.description,
+            playbook_config_json(playbook)?,
+            playbook.updated_at,
+        ],
+    )
+    .map_err(|e| format!("update automation_playbooks failed: {e}"))
+}
+
 struct TaskConfig {
     script: Option<String>,
     requests: Option<Vec<HttpRequestSpec>>,
@@ -294,6 +445,10 @@ struct TaskConfig {
     selected_model: Option<SelectedModelRef>,
     reasoning: Option<String>,
     workdir: Option<String>,
+    selected_skills: Option<Vec<String>>,
+    selected_system_tools: Option<Vec<String>>,
+    mcp_server_ids: Option<Vec<String>>,
+    delivery: Option<DeliveryConfig>,
     timeout_seconds: Option<u64>,
 }
 
@@ -330,8 +485,47 @@ fn parse_task_config(config_json: &str) -> TaskConfig {
             .get("workdir")
             .and_then(Value::as_str)
             .map(ToString::to_string),
+        selected_skills: map
+            .get("selectedSkills")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        selected_system_tools: map
+            .get("selectedSystemTools")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        mcp_server_ids: map
+            .get("mcpServerIds")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        delivery: map
+            .get("delivery")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
         timeout_seconds: map.get("timeoutSeconds").and_then(Value::as_u64),
     }
+}
+
+fn playbook_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Playbook> {
+    let config_json: String = row.get("config_json")?;
+    let config = parse_task_config(&config_json);
+    Ok(Playbook {
+        id: row.get("playbook_id")?,
+        name: row.get("name")?,
+        description: row.get("description")?,
+        prompt: config.prompt.unwrap_or_default(),
+        selected_model: config.selected_model.unwrap_or(SelectedModelRef {
+            custom_provider_id: String::new(),
+            model: String::new(),
+        }),
+        reasoning: config.reasoning,
+        workdir: config.workdir,
+        selected_skills: config.selected_skills,
+        selected_system_tools: config.selected_system_tools,
+        mcp_server_ids: config.mcp_server_ids,
+        delivery: config.delivery,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
 }
 
 fn cron_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronTask> {
@@ -356,6 +550,10 @@ fn cron_task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronTask> {
         selected_model: config.selected_model,
         reasoning: config.reasoning,
         workdir: config.workdir,
+        selected_skills: config.selected_skills,
+        selected_system_tools: config.selected_system_tools,
+        mcp_server_ids: config.mcp_server_ids,
+        delivery: config.delivery,
         last_error: row.get("last_error")?,
     })
 }
@@ -376,6 +574,31 @@ fn hook_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HookDef> {
             .get::<_, Option<i64>>("timeout_ms")?
             .map(|value| value.max(0) as u64),
     })
+}
+
+pub fn read_playbooks(conn: &Connection) -> Result<Vec<Playbook>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT playbook_id, name, description, config_json, created_at, updated_at
+             FROM automation_playbooks ORDER BY sort_index ASC, playbook_id ASC",
+        )
+        .map_err(|e| format!("prepare automation_playbooks read failed: {e}"))?;
+    let rows = stmt
+        .query_map([], playbook_from_row)
+        .map_err(|e| format!("read automation_playbooks failed: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read automation_playbooks row failed: {e}"))
+}
+
+pub fn read_playbook(conn: &Connection, playbook_id: &str) -> Result<Option<Playbook>, String> {
+    conn.query_row(
+        "SELECT playbook_id, name, description, config_json, created_at, updated_at
+         FROM automation_playbooks WHERE playbook_id = ?1",
+        params![playbook_id],
+        playbook_from_row,
+    )
+    .optional()
+    .map_err(|e| format!("read automation_playbooks.{playbook_id} failed: {e}"))
 }
 
 pub fn read_cron_tasks(conn: &Connection) -> Result<Vec<CronTask>, String> {
@@ -452,6 +675,13 @@ pub fn read_hooks_snapshot(conn: &Connection) -> Result<HooksSnapshot, String> {
     })
 }
 
+pub fn read_playbooks_snapshot(conn: &Connection) -> Result<PlaybooksSnapshot, String> {
+    Ok(PlaybooksSnapshot {
+        revision: read_revision(conn, PLAYBOOKS_REVISION_KEY)?,
+        items: read_playbooks(conn)?,
+    })
+}
+
 fn run_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronRunRecord> {
     let state_raw: String = row.get("state")?;
     Ok(CronRunRecord {
@@ -464,6 +694,11 @@ fn run_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CronRunRecor
         duration_ms: row.get::<_, i64>("duration_ms")?.max(0) as u64,
         exit_code: row.get("exit_code")?,
         output: row.get("output")?,
+        delivery_status: row
+            .get::<_, Option<String>>("delivery_status")?
+            .as_deref()
+            .and_then(DeliveryStatus::parse),
+        delivery_error: row.get("delivery_error")?,
     })
 }
 
@@ -476,7 +711,7 @@ pub fn read_runs(
     let mut stmt = conn
         .prepare(
             "SELECT execution_id, task_id, state, success, started_at, finished_at,
-                    duration_ms, exit_code, output
+                    duration_ms, exit_code, output, delivery_status, delivery_error
              FROM automation_cron_runs
              WHERE task_id = ?1
              ORDER BY started_at DESC, execution_id DESC
@@ -491,6 +726,18 @@ pub fn read_runs(
         runs.push(row.map_err(|e| format!("读取 automation_cron_runs 行失败：{e}"))?);
     }
     Ok(runs)
+}
+
+pub fn read_run(conn: &Connection, execution_id: &str) -> Result<Option<CronRunRecord>, String> {
+    conn.query_row(
+        "SELECT execution_id, task_id, state, success, started_at, finished_at,
+                duration_ms, exit_code, output, delivery_status, delivery_error
+         FROM automation_cron_runs WHERE execution_id = ?1",
+        params![execution_id],
+        run_record_from_row,
+    )
+    .optional()
+    .map_err(|e| format!("read automation_cron_runs.{execution_id} failed: {e}"))
 }
 
 /// Deletes finished runs beyond the per-task retention window plus anything

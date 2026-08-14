@@ -66,6 +66,94 @@ fn cron_run_now_response_uses_camel_case() {
 }
 
 #[test]
+fn playbook_create_cron_input_uses_dedicated_camel_case_revision() {
+    let input: PlaybookCreateCronInput = serde_json::from_value(json!({
+        "playbookId": "weekly-report",
+        "cronBaseRevision": 7,
+        "cron": "0 0 18 * * FRI"
+    }))
+    .expect("deserialize playbook cron input");
+    assert_eq!(input.playbook_id, "weekly-report");
+    assert_eq!(input.cron_base_revision, 7);
+}
+
+#[test]
+fn playbook_delivery_rejects_unroutable_target_ids() {
+    for target_id in ["x".repeat(257), "room\nforged".to_string()] {
+        let result = super::validate::validate_playbook(
+            json!({
+                "id": "invalid-delivery",
+                "name": "Invalid delivery",
+                "prompt": "Summarize the repo",
+                "selectedModel": { "customProviderId": "provider-a", "model": "gpt-5" },
+                "delivery": {
+                    "channel": "wecom",
+                    "targetId": target_id,
+                    "onlyOn": "always"
+                }
+            }),
+            "playbook",
+        );
+        assert!(result.is_err());
+    }
+}
+
+#[test]
+fn schema_v2_upgrades_existing_run_table_and_adds_playbooks() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+    conn.execute_batch(
+        "
+        CREATE TABLE automation_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO automation_meta (key, value) VALUES ('schema_version', '1');
+        CREATE TABLE automation_cron_runs (
+            execution_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            state TEXT NOT NULL,
+            success INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            duration_ms INTEGER NOT NULL DEFAULT 0,
+            exit_code INTEGER,
+            output TEXT NOT NULL DEFAULT '',
+            lease_expires_at INTEGER,
+            request_json TEXT
+        );
+        ",
+    )
+    .expect("create v1 schema");
+
+    db::initialize(&conn).expect("upgrade schema");
+
+    let mut statement = conn
+        .prepare("PRAGMA table_info(automation_cron_runs)")
+        .expect("read run columns");
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query run columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect run columns");
+    assert!(columns.iter().any(|column| column == "delivery_status"));
+    assert!(columns.iter().any(|column| column == "delivery_error"));
+
+    let playbook_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'automation_playbooks'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query playbook table");
+    assert_eq!(playbook_table, 1);
+    let version: String = conn
+        .query_row(
+            "SELECT value FROM automation_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read schema version");
+    assert_eq!(version, "2");
+}
+
+#[test]
 fn cron_apply_rejects_stale_revision() {
     let store = AutomationStore::open_in_memory().expect("open store");
     let base = store.snapshot().expect("snapshot").cron.revision;
@@ -851,4 +939,282 @@ fn queue_prompt_run_lease_uses_task_timeout() {
     let claims = store.claim_prompt_runs().expect("claim");
     assert_eq!(claims.len(), 1);
     assert_eq!(claims[0].lease_expires_at - claims[0].started_at, 30_000);
+}
+
+#[test]
+fn playbooks_apply_crud_conflict_and_create_cron_snapshot() {
+    let store = AutomationStore::open_in_memory().expect("open store");
+    let base = store.snapshot().expect("snapshot").playbooks.revision;
+    let created = store
+        .playbooks_apply(apply_input(
+            base,
+            vec![AutomationOp::Create {
+                item: json!({
+                    "id": "weekly-report",
+                    "name": "Weekly report",
+                    "description": "Summarize delivery risks",
+                    "prompt": "Create the weekly project report",
+                    "selectedModel": {
+                        "customProviderId": "provider-a",
+                        "model": "gpt-5"
+                    },
+                    "reasoning": "high",
+                    "workdir": "  /tmp/project  ",
+                    "selectedSkills": ["documents", "documents"],
+                    "selectedSystemTools": [],
+                    "mcpServerIds": ["project-db"],
+                    "delivery": {
+                        "channel": "wecom",
+                        "targetId": "report-room",
+                        "onlyOn": "success"
+                    },
+                    "createdAt": 1,
+                    "updatedAt": 1
+                }),
+            }],
+        ))
+        .expect("create playbook");
+    assert_eq!(created.status, ApplyStatus::Ok);
+    assert_eq!(created.playbooks.items.len(), 1);
+    let playbook = &created.playbooks.items[0];
+    assert_eq!(
+        playbook.selected_skills.as_deref(),
+        Some(&["documents".to_string()][..])
+    );
+    assert_eq!(playbook.selected_system_tools.as_deref(), Some(&[][..]));
+    assert_eq!(playbook.workdir.as_deref(), Some("/tmp/project"));
+    assert!(playbook.created_at > 1);
+    assert_eq!(playbook.created_at, playbook.updated_at);
+
+    let conflict = store
+        .playbooks_apply(apply_input(base, vec![]))
+        .expect("stale playbooks apply");
+    assert_eq!(conflict.status, ApplyStatus::Conflict);
+    assert_eq!(conflict.playbooks.items.len(), 1);
+
+    let cron_revision = store.snapshot().expect("snapshot").cron.revision;
+    let cron = store
+        .create_cron_from_playbook(PlaybookCreateCronInput {
+            playbook_id: "weekly-report".to_string(),
+            cron_base_revision: cron_revision,
+            cron: "0 0 18 * * FRI".to_string(),
+            name: None,
+            description: None,
+            enabled: true,
+            remaining_executions: Some(4),
+            timeout_seconds: Some(120),
+        })
+        .expect("create cron from playbook");
+    assert_eq!(cron.status, ApplyStatus::Ok);
+    let task = &cron.cron.tasks[0];
+    assert_eq!(task.kind, "prompt");
+    assert_eq!(
+        task.prompt.as_deref(),
+        Some("Create the weekly project report")
+    );
+    assert_eq!(task.selected_skills, playbook.selected_skills);
+    assert_eq!(task.selected_system_tools, playbook.selected_system_tools);
+    assert_eq!(task.mcp_server_ids, playbook.mcp_server_ids);
+    assert_eq!(task.delivery, playbook.delivery);
+    assert_eq!(task.remaining_executions, Some(4));
+
+    let stale_cron = store
+        .create_cron_from_playbook(PlaybookCreateCronInput {
+            playbook_id: "weekly-report".to_string(),
+            cron_base_revision: cron_revision,
+            cron: "0 0 19 * * FRI".to_string(),
+            name: None,
+            description: None,
+            enabled: true,
+            remaining_executions: None,
+            timeout_seconds: None,
+        })
+        .expect("stale cron create");
+    assert_eq!(stale_cron.status, ApplyStatus::Conflict);
+    assert_eq!(stale_cron.cron.tasks.len(), 1);
+
+    let updated = store
+        .playbooks_apply(apply_input(
+            created.playbooks.revision,
+            vec![AutomationOp::Update {
+                id: "weekly-report".to_string(),
+                patch: json!({ "name": "Friday report" }),
+            }],
+        ))
+        .expect("update playbook");
+    assert_eq!(updated.playbooks.items[0].name, "Friday report");
+    let deleted = store
+        .playbooks_apply(apply_input(
+            updated.playbooks.revision,
+            vec![AutomationOp::Delete {
+                id: "weekly-report".to_string(),
+            }],
+        ))
+        .expect("delete playbook");
+    assert!(deleted.playbooks.items.is_empty());
+}
+
+#[test]
+fn prompt_delivery_freezes_capabilities_and_reaches_terminal_state() {
+    let (store, task) = store_with_task(AutomationOp::Create {
+        item: json!({
+            "id": "delivered-prompt",
+            "name": "Delivered prompt",
+            "cron": "0 * * * * *",
+            "enabled": true,
+            "type": "prompt",
+            "prompt": "Summarize the repo",
+            "selectedModel": { "customProviderId": "provider-a", "model": "gpt-5" },
+            "selectedSkills": ["documents"],
+            "selectedSystemTools": [],
+            "mcpServerIds": ["repo-db"],
+            "delivery": {
+                "channel": "wecom",
+                "targetId": "project-room",
+                "onlyOn": "success"
+            }
+        }),
+    });
+    store
+        .queue_prompt_run(&task, "/tmp/project", true)
+        .expect("queue");
+    let claim = store.claim_prompt_runs().expect("claim").remove(0);
+    assert_eq!(claim.selected_skills, task.selected_skills);
+    assert_eq!(claim.selected_system_tools, task.selected_system_tools);
+    assert_eq!(claim.mcp_server_ids, task.mcp_server_ids);
+    assert_eq!(claim.delivery, task.delivery);
+
+    let (response, delivery) = store
+        .complete_prompt_run_with_delivery(CompletePromptRunInput {
+            execution_id: claim.execution_id.clone(),
+            success: true,
+            duration_ms: 25,
+            output: "Report complete".to_string(),
+        })
+        .expect("complete prompt");
+    assert_eq!(response.status, PromptCompletionStatus::Completed);
+    let delivery = delivery.expect("matching onlyOn creates delivery job");
+    assert_eq!(delivery.config.target_id, "project-room");
+    assert_eq!(delivery.output, "Report complete");
+    let pending = store.list_runs(&task.id, 10).expect("pending delivery run");
+    assert_eq!(pending[0].delivery_status, Some(DeliveryStatus::Pending));
+
+    store
+        .update_run_delivery(&claim.execution_id, DeliveryStatus::Sent, None)
+        .expect("finish delivery");
+    let sent = store.list_runs(&task.id, 10).expect("sent delivery run");
+    assert_eq!(sent[0].delivery_status, Some(DeliveryStatus::Sent));
+    assert!(sent[0].delivery_error.is_none());
+}
+
+#[test]
+fn prompt_delivery_only_on_and_recovery_failure_are_persisted() {
+    let (store, task) = store_with_task(AutomationOp::Create {
+        item: json!({
+            "id": "failure-prompt",
+            "name": "Failure prompt",
+            "cron": "0 * * * * *",
+            "enabled": true,
+            "type": "prompt",
+            "prompt": "Summarize the repo",
+            "selectedModel": { "customProviderId": "provider-a", "model": "gpt-5" },
+            "delivery": {
+                "channel": "wecom",
+                "targetId": "alerts-room",
+                "onlyOn": "failure"
+            }
+        }),
+    });
+    store
+        .queue_prompt_run(&task, "", true)
+        .expect("queue failure run");
+    let claim = store.claim_prompt_runs().expect("claim").remove(0);
+    let (_, skipped_job) = store
+        .complete_prompt_run_with_delivery(CompletePromptRunInput {
+            execution_id: claim.execution_id,
+            success: true,
+            duration_ms: 10,
+            output: "success".to_string(),
+        })
+        .expect("complete success");
+    assert!(skipped_job.is_none());
+    assert_eq!(
+        store.list_runs(&task.id, 10).expect("skipped run")[0].delivery_status,
+        Some(DeliveryStatus::Skipped)
+    );
+
+    store
+        .queue_prompt_run(&task, "", true)
+        .expect("queue interrupted run");
+    assert_eq!(store.recover_interrupted_prompt_runs().expect("recover"), 1);
+    let runs = store.list_runs(&task.id, 10).expect("recovered runs");
+    assert_eq!(runs[0].state, RunState::Expired);
+    assert_eq!(runs[0].delivery_status, Some(DeliveryStatus::Pending));
+}
+
+#[test]
+fn interrupted_delivery_recovery_fails_done_and_expired_rows_once() {
+    let (store, task) = store_with_task(AutomationOp::Create {
+        item: json!({
+            "id": "orphaned-delivery",
+            "name": "Orphaned delivery",
+            "cron": "0 * * * * *",
+            "enabled": true,
+            "type": "prompt",
+            "prompt": "Summarize the repo",
+            "selectedModel": { "customProviderId": "provider-a", "model": "gpt-5" },
+            "delivery": {
+                "channel": "wecom",
+                "targetId": "alerts-room",
+                "onlyOn": "always"
+            }
+        }),
+    });
+
+    store
+        .record_completed_run_with_delivery(
+            CompletedRun {
+                task_id: task.id.clone(),
+                success: true,
+                started_at: db::now_ms(),
+                duration_ms: 25,
+                exit_code: None,
+                output: "done".to_string(),
+                counted: false,
+            },
+            Some(DeliveryStatus::Pending),
+            None,
+        )
+        .expect("record completed pending delivery");
+    store
+        .queue_prompt_run(&task, "", false)
+        .expect("queue interrupted prompt");
+    assert_eq!(
+        store
+            .recover_interrupted_prompt_runs()
+            .expect("expire interrupted prompt"),
+        1
+    );
+
+    assert_eq!(
+        store
+            .recover_interrupted_deliveries()
+            .expect("recover interrupted deliveries"),
+        2
+    );
+    let runs = store.list_runs(&task.id, 10).expect("recovered runs");
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().any(|run| run.state == RunState::Done));
+    assert!(runs.iter().any(|run| run.state == RunState::Expired));
+    assert!(runs.iter().all(|run| {
+        run.delivery_status == Some(DeliveryStatus::Failed)
+            && run.delivery_error.as_deref()
+                == Some("WeCom delivery was interrupted by an app restart.")
+    }));
+    assert_eq!(
+        store
+            .recover_interrupted_deliveries()
+            .expect("recovery is idempotent"),
+        0
+    );
 }

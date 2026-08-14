@@ -20,7 +20,7 @@ use crate::commands::{
     },
 };
 use crate::services::automation::{
-    validate_cron_expression, AutomationApplyInput, AutomationStore,
+    validate_cron_expression, AutomationApplyInput, AutomationStore, PlaybookCreateCronInput,
 };
 use crate::services::gateway::proto;
 use crate::services::memory::{
@@ -71,6 +71,26 @@ pub async fn handle_cron_manage(
             let response = tauri::async_runtime::spawn_blocking(move || store.hooks_apply(input))
                 .await
                 .map_err(|e| format!("gateway hooks apply join failed: {e}"))??;
+            serialize_cron_manage_result(&response)?
+        }
+        "playbooks_apply" => {
+            let input = parse_apply_input(&request.task_json)?;
+            let store = Arc::clone(&store);
+            let response =
+                tauri::async_runtime::spawn_blocking(move || store.playbooks_apply(input))
+                    .await
+                    .map_err(|e| format!("gateway playbooks apply join failed: {e}"))??;
+            serialize_cron_manage_result(&response)?
+        }
+        "playbook_create_cron" => {
+            let input = serde_json::from_str::<PlaybookCreateCronInput>(&request.task_json)
+                .map_err(|e| format!("invalid playbook_create_cron payload: {e}"))?;
+            let store = Arc::clone(&store);
+            let response = tauri::async_runtime::spawn_blocking(move || {
+                store.create_cron_from_playbook(input)
+            })
+            .await
+            .map_err(|e| format!("gateway playbook create cron join failed: {e}"))??;
             serialize_cron_manage_result(&response)?
         }
         "list_runs" => {
@@ -1008,6 +1028,8 @@ fn is_builtin_share_tool_name(name: &str) -> bool {
             | "AskUserQuestion"
             | "Bash"
             | "CronTaskManager"
+            | "DatabaseExecute"
+            | "DatabaseQuery"
             | "Delete"
             | "Edit"
             | "Glob"
@@ -1018,10 +1040,13 @@ fn is_builtin_share_tool_name(name: &str) -> bool {
             | "ManagedProcess"
             | "McpManager"
             | "MemoryManager"
+            | "OfficeRuntime"
+            | "PresentFile"
             | "Read"
             | "ReadTerminal"
             | "SendMessage"
             | "SkillsManager"
+            | "SpreadsheetCode"
             | "SSHManager"
             | "SshManager"
             | "TodoWrite"
@@ -1801,6 +1826,21 @@ mod tests {
                         "id": "call-mcp",
                         "name": "mcp_docs_search",
                         "arguments": { "query": "secret mcp query" }
+                    },
+                    {
+                        "type": "toolCall",
+                        "id": "call-office-runtime",
+                        "name": "OfficeRuntime",
+                        "arguments": {
+                            "spec_path": "private/report.json",
+                            "output_path": "private/report.xlsx"
+                        }
+                    },
+                    {
+                        "type": "toolCall",
+                        "id": "call-spreadsheet-code",
+                        "name": "SpreadsheetCode",
+                        "arguments": { "script_path": "private/build.py" }
                     }
                 ]
             },
@@ -1824,6 +1864,23 @@ mod tests {
                 "toolName": "mcp_docs_search",
                 "content": [{ "type": "text", "text": "secret mcp output" }],
                 "details": { "serverId": "docs", "tool": "search", "mcp": { "content": "secret" } }
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "call-office-runtime",
+                "toolName": "OfficeRuntime",
+                "content": [{ "type": "text", "text": "private/report.xlsx" }],
+                "details": {
+                    "stdout": "private/report.xlsx",
+                    "runtimePath": "private/runtime/python.exe"
+                }
+            },
+            {
+                "role": "toolResult",
+                "toolCallId": "call-spreadsheet-code",
+                "toolName": "SpreadsheetCode",
+                "content": [{ "type": "text", "text": "private spreadsheet output" }],
+                "details": { "stdout": "private spreadsheet output" }
             }
         ]))
         .expect("serialize input");
@@ -1846,18 +1903,40 @@ mod tests {
         assert_eq!(blocks[2]["redacted"], true);
         assert_eq!(items[3]["content"][0]["text"], "工具调用内容已脱敏");
         assert_eq!(items[3]["details"]["kind"], "redacted_tool_content");
+        for block in [&blocks[3], &blocks[4]] {
+            assert_eq!(block["arguments"], Value::Null);
+            assert_eq!(block["redacted"], true);
+        }
+        for item in [&items[4], &items[5]] {
+            assert_eq!(item["content"][0]["text"], "工具调用内容已脱敏");
+            assert_eq!(item["details"], json!({ "kind": "redacted_tool_content" }));
+        }
     }
 
     #[test]
-    fn shared_chat_history_builtin_policy_covers_the_tool_catalog() {
+    fn shared_chat_history_builtin_policy_covers_catalog_and_office_runtime() {
         let catalog = include_str!("../../../src/lib/tools/builtinToolCatalog.ts");
-        let tool_names = catalog.lines().filter_map(|line| {
+        let catalog_tool_names = catalog.lines().filter_map(|line| {
             line.trim()
                 .strip_prefix("toolName: \"")
                 .and_then(|value| value.strip_suffix("\","))
         });
+        let office_runtime = include_str!("../../../src/lib/tools/officeRuntimeTools.ts");
+        let office_runtime_tool_names = office_runtime
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .split_once("_TOOL_NAME = \"")
+                    .and_then(|(_, value)| value.strip_suffix("\";"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            office_runtime_tool_names,
+            ["OfficeRuntime", "SpreadsheetCode"]
+        );
+
         let mut count = 0;
-        for tool_name in tool_names {
+        for tool_name in catalog_tool_names.chain(office_runtime_tool_names) {
             count += 1;
             assert!(
                 is_builtin_share_tool_name(tool_name),

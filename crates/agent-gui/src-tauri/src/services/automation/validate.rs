@@ -6,9 +6,9 @@ use tokio_cron_scheduler::Job;
 use uuid::Uuid;
 
 use super::types::{
-    http_method_can_have_body, CronTask, HookDef, HttpRequestSpec, SelectedModelRef,
-    CRON_REASONING_LEVELS, CRON_TASK_KINDS, DEFAULT_CRON_TIMEOUT_SECONDS, HOOK_EVENTS, HOOK_KINDS,
-    HTTP_METHODS, MASKED_HEADER_VALUE,
+    http_method_can_have_body, CronTask, DeliveryConfig, DeliveryOnlyOn, HookDef, HttpRequestSpec,
+    Playbook, SelectedModelRef, CRON_REASONING_LEVELS, CRON_TASK_KINDS,
+    DEFAULT_CRON_TIMEOUT_SECONDS, HOOK_EVENTS, HOOK_KINDS, HTTP_METHODS, MASKED_HEADER_VALUE,
 };
 
 pub const MIN_HOOK_TIMEOUT_MS: u64 = 1_000;
@@ -19,6 +19,7 @@ pub const MAX_HOOK_TIMEOUT_MS: u64 = 10 * 60_000;
 /// minutes for bash tasks, so validation refuses to store one.
 pub const MIN_CRON_TIMEOUT_SECONDS: u64 = 1;
 pub const MAX_CRON_TIMEOUT_SECONDS: u64 = 600;
+const DELIVERY_TARGET_ID_MAX_CHARS: usize = 256;
 
 pub fn validate_cron_expression(expression: &str) -> Result<(), String> {
     let trimmed = expression.trim();
@@ -55,6 +56,78 @@ fn optional_string(map: &Map<String, Value>, key: &str) -> String {
         .map(str::trim)
         .unwrap_or_default()
         .to_string()
+}
+
+fn optional_string_list(
+    map: &Map<String, Value>,
+    key: &str,
+    label: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = map.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{label}.{key} must be an array of strings"))?;
+    let mut normalized = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let item = value
+            .as_str()
+            .ok_or_else(|| format!("{label}.{key}[{index}] must be a string"))?
+            .trim();
+        if !item.is_empty() && !normalized.iter().any(|existing| existing == item) {
+            normalized.push(item.to_string());
+        }
+    }
+    Ok(Some(normalized))
+}
+
+fn parse_delivery(value: Option<&Value>, label: &str) -> Result<Option<DeliveryConfig>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let map = value
+        .as_object()
+        .ok_or_else(|| format!("{label}.delivery must be an object"))?;
+    let channel = required_string(map, "channel", &format!("{label}.delivery"))?;
+    if channel != "wecom" {
+        return Err(format!(
+            "{label}.delivery.channel is unsupported: {channel}"
+        ));
+    }
+    let target_id = required_string(map, "targetId", &format!("{label}.delivery"))?;
+    if target_id.chars().count() > DELIVERY_TARGET_ID_MAX_CHARS {
+        return Err(format!(
+            "{label}.delivery.targetId must not exceed {DELIVERY_TARGET_ID_MAX_CHARS} characters"
+        ));
+    }
+    if target_id.chars().any(char::is_control) {
+        return Err(format!(
+            "{label}.delivery.targetId must not contain control characters"
+        ));
+    }
+    let only_on = match map
+        .get("onlyOn")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("always")
+    {
+        "always" => DeliveryOnlyOn::Always,
+        "success" => DeliveryOnlyOn::Success,
+        "failure" => DeliveryOnlyOn::Failure,
+        other => return Err(format!("{label}.delivery.onlyOn is unsupported: {other}")),
+    };
+    Ok(Some(DeliveryConfig {
+        channel,
+        target_id,
+        only_on,
+    }))
 }
 
 fn bool_with_default(
@@ -244,6 +317,10 @@ pub fn validate_cron_task(value: Value, label: &str) -> Result<CronTask, String>
         selected_model: None,
         reasoning: None,
         workdir: None,
+        selected_skills: None,
+        selected_system_tools: None,
+        mcp_server_ids: None,
+        delivery: None,
         last_error: None,
     };
 
@@ -278,7 +355,36 @@ pub fn validate_cron_task(value: Value, label: &str) -> Result<CronTask, String>
         }
     }
 
+    task.selected_skills = optional_string_list(&map, "selectedSkills", label)?;
+    task.selected_system_tools = optional_string_list(&map, "selectedSystemTools", label)?;
+    task.mcp_server_ids = optional_string_list(&map, "mcpServerIds", label)?;
+    task.delivery = parse_delivery(map.get("delivery"), label)?;
+
     Ok(task)
+}
+
+pub fn validate_playbook(value: Value, label: &str) -> Result<Playbook, String> {
+    let map = expect_object(value, label)?;
+    let reasoning = optional_string(&map, "reasoning");
+    if !reasoning.is_empty() && !CRON_REASONING_LEVELS.contains(&reasoning.as_str()) {
+        return Err(format!("{label}.reasoning is unsupported: {reasoning}"));
+    }
+    let workdir = optional_string(&map, "workdir");
+    Ok(Playbook {
+        id: required_string(&map, "id", label)?,
+        name: required_string(&map, "name", label)?,
+        description: optional_string(&map, "description"),
+        prompt: required_string(&map, "prompt", label)?,
+        selected_model: parse_selected_model(map.get("selectedModel"), label)?,
+        reasoning: (!reasoning.is_empty()).then_some(reasoning),
+        workdir: (!workdir.is_empty()).then_some(workdir),
+        selected_skills: optional_string_list(&map, "selectedSkills", label)?,
+        selected_system_tools: optional_string_list(&map, "selectedSystemTools", label)?,
+        mcp_server_ids: optional_string_list(&map, "mcpServerIds", label)?,
+        delivery: parse_delivery(map.get("delivery"), label)?,
+        created_at: map.get("createdAt").and_then(Value::as_i64).unwrap_or(0),
+        updated_at: map.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
+    })
 }
 
 /// Validate a full hook object. `id` must already be present.

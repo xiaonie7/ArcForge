@@ -18,10 +18,10 @@ pub(crate) struct BuiltinSkill {
     pub(crate) ownership_marker: Option<(&'static str, &'static str)>,
 }
 
-const LEGACY_CODE_REVIEW_SKILL_NAME: &str = "arcforge-code-review";
-const LEGACY_CODE_REVIEW_OWNERSHIP_MARKER_PATH: &str = "_arcforge_builtin.json";
+const LEGACY_CODE_REVIEW_SKILL_NAME: &str = "liveagent-code-review";
+const LEGACY_CODE_REVIEW_OWNERSHIP_MARKER_PATH: &str = "_liveagent_builtin.json";
 const LEGACY_CODE_REVIEW_OWNERSHIP_MARKER_CONTENT: &str =
-    "{\"schemaVersion\":1,\"owner\":\"ArcForge\",\"skill\":\"arcforge-code-review\"}\n";
+    "{\"schemaVersion\":1,\"owner\":\"LiveAgent\",\"skill\":\"liveagent-code-review\"}\n";
 const CODE_REVIEW_OWNERSHIP_MARKER_CONTENT: &str =
     "{\"schemaVersion\":1,\"owner\":\"ArcForge\",\"skill\":\"arcforge-code-review\"}\n";
 

@@ -10,6 +10,7 @@ export type SectionId =
   | "agents"
   | "ssh"
   | "memory"
+  | "playbooks"
   | "hooks"
   | "cron"
   | "remote";

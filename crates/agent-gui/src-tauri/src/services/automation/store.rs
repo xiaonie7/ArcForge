@@ -1,7 +1,7 @@
 use std::sync::{Mutex, Weak};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tauri::Emitter;
 use uuid::Uuid;
 
@@ -39,6 +39,30 @@ impl AutomationNotifier {
         self.refresh_gateway();
     }
 
+    fn playbooks_changed(&self, snapshot: &PlaybooksSnapshot) {
+        if let Err(error) = self.app_handle.emit(PLAYBOOKS_CHANGED_EVENT, snapshot) {
+            eprintln!("emit {PLAYBOOKS_CHANGED_EVENT} failed: {error}");
+        }
+        self.refresh_gateway();
+    }
+
+    fn run_completed(&self, task_name: &str, run: &CronRunRecord) {
+        let event = CronRunCompletedEvent {
+            id: run.id.clone(),
+            task_id: run.task_id.clone(),
+            task_name: task_name.to_string(),
+            success: run.success,
+            started_at: run.started_at,
+            duration_ms: run.duration_ms,
+            output_summary: summarize_run_output(&run.output),
+            delivery_status: run.delivery_status,
+            delivery_error: run.delivery_error.clone(),
+        };
+        if let Err(error) = self.app_handle.emit(RUN_COMPLETED_EVENT, event) {
+            eprintln!("emit {RUN_COMPLETED_EVENT} failed: {error}");
+        }
+    }
+
     fn prompt_pending(&self) {
         if let Err(error) = self.app_handle.emit(PROMPT_PENDING_EVENT, ()) {
             eprintln!("emit {PROMPT_PENDING_EVENT} failed: {error}");
@@ -49,6 +73,15 @@ impl AutomationNotifier {
         if let Err(error) = self.app_handle.emit(PROMPT_EXPIRED_EVENT, event) {
             eprintln!("emit {PROMPT_EXPIRED_EVENT} failed: {error}");
         }
+    }
+
+    fn dispatch_delivery(&self, job: DeliveryJob) {
+        let Some(scheduler) = self.scheduler.upgrade() else {
+            return;
+        };
+        tauri::async_runtime::spawn(async move {
+            scheduler.deliver(job).await;
+        });
     }
 
     fn refresh_gateway(&self) {
@@ -67,6 +100,8 @@ enum CronMutationEffect {
     None,
     Changed,
 }
+
+const INTERRUPTED_DELIVERY_ERROR: &str = "WeCom delivery was interrupted by an app restart.";
 
 pub enum PromptQueueOutcome {
     Queued,
@@ -134,6 +169,7 @@ impl AutomationStore {
         Ok(AutomationSnapshot {
             cron: db::read_cron_snapshot(&conn)?,
             hooks: db::read_hooks_snapshot(&conn)?,
+            playbooks: db::read_playbooks_snapshot(&conn)?,
         })
     }
 
@@ -202,6 +238,81 @@ impl AutomationStore {
         Ok(HooksApplyResponse {
             status: ApplyStatus::Ok,
             hooks: snapshot,
+        })
+    }
+
+    pub fn playbooks_apply(
+        &self,
+        input: AutomationApplyInput,
+    ) -> Result<PlaybooksApplyResponse, String> {
+        let snapshot = {
+            let mut conn = self.lock_conn()?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| format!("begin playbooks apply transaction failed: {e}"))?;
+            let current = db::read_revision(&tx, db::PLAYBOOKS_REVISION_KEY)?;
+            if input.base_revision != current {
+                let snapshot = db::read_playbooks_snapshot(&tx)?;
+                drop(tx);
+                return Ok(PlaybooksApplyResponse {
+                    status: ApplyStatus::Conflict,
+                    playbooks: snapshot,
+                });
+            }
+            for op in input.ops {
+                apply_playbook_op(&tx, op)?;
+            }
+            db::bump_revision(&tx, db::PLAYBOOKS_REVISION_KEY)?;
+            let snapshot = db::read_playbooks_snapshot(&tx)?;
+            tx.commit()
+                .map_err(|e| format!("commit playbooks apply transaction failed: {e}"))?;
+            snapshot
+        };
+        self.with_notifier(|notifier| notifier.playbooks_changed(&snapshot));
+        Ok(PlaybooksApplyResponse {
+            status: ApplyStatus::Ok,
+            playbooks: snapshot,
+        })
+    }
+
+    pub fn create_cron_from_playbook(
+        &self,
+        input: PlaybookCreateCronInput,
+    ) -> Result<CronApplyResponse, String> {
+        let snapshot = {
+            let mut conn = self.lock_conn()?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| format!("begin playbook cron transaction failed: {e}"))?;
+            let current = db::read_revision(&tx, db::CRON_REVISION_KEY)?;
+            if input.cron_base_revision != current {
+                let snapshot = db::read_cron_snapshot(&tx)?;
+                drop(tx);
+                return Ok(CronApplyResponse {
+                    status: ApplyStatus::Conflict,
+                    cron: snapshot,
+                });
+            }
+            let playbook_id = input.playbook_id.trim();
+            if playbook_id.is_empty() {
+                return Err("playbookId cannot be empty".to_string());
+            }
+            let playbook = db::read_playbook(&tx, playbook_id)?
+                .ok_or_else(|| format!("playbook does not exist: {playbook_id}"))?;
+            let item = playbook_cron_json(&playbook, &input);
+            let task = validate::validate_cron_task(item, "playbook cron task")?;
+            let sort_index = next_sort_index(&tx, "automation_cron_tasks")?;
+            db::insert_cron_task(&tx, &task, sort_index)?;
+            db::bump_revision(&tx, db::CRON_REVISION_KEY)?;
+            let snapshot = db::read_cron_snapshot(&tx)?;
+            tx.commit()
+                .map_err(|e| format!("commit playbook cron transaction failed: {e}"))?;
+            snapshot
+        };
+        self.with_notifier(|notifier| notifier.cron_changed(&snapshot));
+        Ok(CronApplyResponse {
+            status: ApplyStatus::Ok,
+            cron: snapshot,
         })
     }
 
@@ -276,13 +387,26 @@ impl AutomationStore {
     }
 
     /// Persist a finished bash/http run (or synthesized failure/skip record).
-    pub fn record_completed_run(&self, run: CompletedRun) -> Result<(), String> {
-        let cron_snapshot = {
+    pub fn record_completed_run(&self, run: CompletedRun) -> Result<String, String> {
+        self.record_completed_run_with_delivery(run, None, None)
+    }
+
+    pub fn record_completed_run_with_delivery(
+        &self,
+        run: CompletedRun,
+        delivery_status: Option<DeliveryStatus>,
+        delivery_error: Option<&str>,
+    ) -> Result<String, String> {
+        let (cron_snapshot, record, task_name) = {
             let mut conn = self.lock_conn()?;
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| format!("开启 run 记录事务失败：{e}"))?;
-            insert_finished_run(&tx, &run, RunState::Done)?;
+            let task_name = db::read_cron_task(&tx, &run.task_id)?
+                .map(|task| task.name)
+                .unwrap_or_else(|| run.task_id.clone());
+            let record =
+                insert_finished_run(&tx, &run, RunState::Done, delivery_status, delivery_error)?;
             let effect = if run.counted {
                 decrement_remaining(&tx, &run.task_id)?
             } else {
@@ -298,13 +422,16 @@ impl AutomationStore {
             };
             tx.commit()
                 .map_err(|e| format!("提交 run 记录事务失败：{e}"))?;
-            snapshot
+            (snapshot, record, task_name)
         };
 
         if let Some(snapshot) = cron_snapshot {
             self.with_notifier(|notifier| notifier.cron_changed(&snapshot));
         }
-        Ok(())
+        if record.delivery_status != Some(DeliveryStatus::Pending) {
+            self.with_notifier(|notifier| notifier.run_completed(&task_name, &record));
+        }
+        Ok(record.id)
     }
 
     /// Queue a prompt run for the frontend executor. The run row *is* the
@@ -368,6 +495,10 @@ impl AutomationStore {
                 counted,
                 workdir: workdir.to_string(),
                 reasoning: task.reasoning.clone().unwrap_or_default(),
+                selected_skills: task.selected_skills.clone(),
+                selected_system_tools: task.selected_system_tools.clone(),
+                mcp_server_ids: task.mcp_server_ids.clone(),
+                delivery: task.delivery.clone(),
             };
             let request_json = serde_json::to_string(&request)
                 .map_err(|e| format!("序列化 prompt run 请求失败：{e}"))?;
@@ -458,16 +589,25 @@ impl AutomationStore {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn complete_prompt_run(
         &self,
         input: CompletePromptRunInput,
     ) -> Result<PromptCompletionResponse, String> {
+        self.complete_prompt_run_with_delivery(input)
+            .map(|(response, _)| response)
+    }
+
+    pub fn complete_prompt_run_with_delivery(
+        &self,
+        input: CompletePromptRunInput,
+    ) -> Result<(PromptCompletionResponse, Option<DeliveryJob>), String> {
         let execution_id = input.execution_id.trim().to_string();
         if execution_id.is_empty() {
             return Err("executionId cannot be empty.".to_string());
         }
 
-        let cron_snapshot = {
+        let (cron_snapshot, delivery_job, record, task_name) = {
             let mut conn = self.lock_conn()?;
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -484,14 +624,20 @@ impl AutomationStore {
                 .map_err(|e| format!("读取 prompt run 失败：{e}"))?;
 
             let Some((task_id, state, started_at, request_json)) = row else {
-                return Ok(PromptCompletionResponse {
-                    status: PromptCompletionStatus::AlreadyFinished,
-                });
+                return Ok((
+                    PromptCompletionResponse {
+                        status: PromptCompletionStatus::AlreadyFinished,
+                    },
+                    None,
+                ));
             };
             if state != "pending" && state != "leased" {
-                return Ok(PromptCompletionResponse {
-                    status: PromptCompletionStatus::AlreadyFinished,
-                });
+                return Ok((
+                    PromptCompletionResponse {
+                        status: PromptCompletionStatus::AlreadyFinished,
+                    },
+                    None,
+                ));
             }
 
             let now = db::now_ms();
@@ -509,18 +655,53 @@ impl AutomationStore {
             } else {
                 (now - started_at).max(0)
             };
-
+            let stored_output = db::truncate_run_output(&output);
+            let prompt_request = request_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<PromptRunRequest>(raw).ok());
+            let task_name = prompt_request
+                .as_ref()
+                .map(|request| request.task_name.clone())
+                .or_else(|| {
+                    db::read_cron_task(&tx, &task_id)
+                        .ok()
+                        .flatten()
+                        .map(|task| task.name)
+                })
+                .unwrap_or_else(|| task_id.clone());
+            let (delivery_status, delivery_job) = match prompt_request
+                .as_ref()
+                .and_then(|request| request.delivery.clone())
+            {
+                Some(config) if config.only_on.matches(input.success) => (
+                    Some(DeliveryStatus::Pending),
+                    Some(DeliveryJob {
+                        execution_id: execution_id.clone(),
+                        task_id: task_id.clone(),
+                        task_name: task_name.clone(),
+                        success: input.success,
+                        started_at,
+                        duration_ms: duration_ms.max(0) as u64,
+                        output: stored_output.clone(),
+                        config,
+                    }),
+                ),
+                Some(_) => (Some(DeliveryStatus::Skipped), None),
+                None => (None, None),
+            };
             tx.execute(
                 "UPDATE automation_cron_runs
                  SET state = 'done', success = ?2, finished_at = ?3, duration_ms = ?4,
-                     output = ?5, lease_expires_at = NULL, request_json = NULL
+                     output = ?5, lease_expires_at = NULL, request_json = NULL,
+                     delivery_status = ?6, delivery_error = NULL
                  WHERE execution_id = ?1",
                 params![
                     execution_id,
                     input.success as i64,
                     now,
                     duration_ms,
-                    db::truncate_run_output(&output),
+                    stored_output,
+                    delivery_status.map(DeliveryStatus::as_str),
                 ],
             )
             .map_err(|e| format!("写入 prompt 完成结果失败：{e}"))?;
@@ -538,17 +719,25 @@ impl AutomationStore {
                 }
                 CronMutationEffect::None => None,
             };
+            let record = db::read_run(&tx, &execution_id)?
+                .ok_or_else(|| "completed prompt run disappeared".to_string())?;
             tx.commit()
                 .map_err(|e| format!("提交 prompt 完成事务失败：{e}"))?;
-            snapshot
+            (snapshot, delivery_job, record, task_name)
         };
 
         if let Some(snapshot) = cron_snapshot {
             self.with_notifier(|notifier| notifier.cron_changed(&snapshot));
         }
-        Ok(PromptCompletionResponse {
-            status: PromptCompletionStatus::Completed,
-        })
+        if record.delivery_status != Some(DeliveryStatus::Pending) {
+            self.with_notifier(|notifier| notifier.run_completed(&task_name, &record));
+        }
+        Ok((
+            PromptCompletionResponse {
+                status: PromptCompletionStatus::Completed,
+            },
+            delivery_job,
+        ))
     }
 
     /// Expire pending/leased prompt runs whose deadline passed. Emits
@@ -573,13 +762,70 @@ impl AutomationStore {
         Ok(expired.len())
     }
 
+    /// A completed run can be committed before its external delivery finishes.
+    /// After a restart there is no in-memory delivery job left to resume, so
+    /// terminate those orphaned states and surface the completed run normally.
+    pub fn recover_interrupted_deliveries(&self) -> Result<usize, String> {
+        let completed = {
+            let mut conn = self.lock_conn()?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| format!("begin interrupted delivery recovery failed: {e}"))?;
+            let execution_ids = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT execution_id FROM automation_cron_runs
+                         WHERE state IN ('done', 'expired') AND delivery_status = 'pending'
+                         ORDER BY started_at ASC, execution_id ASC",
+                    )
+                    .map_err(|e| format!("prepare interrupted delivery recovery failed: {e}"))?;
+                let rows = stmt
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .map_err(|e| format!("read interrupted deliveries failed: {e}"))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("read interrupted delivery row failed: {e}"))?
+            };
+
+            let mut completed = Vec::with_capacity(execution_ids.len());
+            for execution_id in execution_ids {
+                let updated = tx
+                    .execute(
+                        "UPDATE automation_cron_runs
+                         SET delivery_status = 'failed', delivery_error = ?2
+                         WHERE execution_id = ?1 AND state IN ('done', 'expired')
+                           AND delivery_status = 'pending'",
+                        params![execution_id, INTERRUPTED_DELIVERY_ERROR],
+                    )
+                    .map_err(|e| format!("fail interrupted delivery failed: {e}"))?;
+                if updated == 0 {
+                    continue;
+                }
+                let run = db::read_run(&tx, &execution_id)?
+                    .ok_or_else(|| "recovered delivery run disappeared".to_string())?;
+                let task_name = db::read_cron_task(&tx, &run.task_id)?
+                    .map(|task| task.name)
+                    .unwrap_or_else(|| run.task_id.clone());
+                completed.push((task_name, run));
+            }
+            tx.commit()
+                .map_err(|e| format!("commit interrupted delivery recovery failed: {e}"))?;
+            completed
+        };
+
+        let count = completed.len();
+        for (task_name, run) in &completed {
+            self.with_notifier(|notifier| notifier.run_completed(task_name, run));
+        }
+        Ok(count)
+    }
+
     fn expire_prompt_runs_where(
         &self,
         predicate: &str,
         predicate_params: &[&dyn rusqlite::ToSql],
         message: &str,
     ) -> Result<Vec<PromptExpiredEvent>, String> {
-        let (events, cron_snapshot) = {
+        let (events, cron_snapshot, delivery_jobs, completed_runs) = {
             let mut conn = self.lock_conn()?;
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -614,13 +860,56 @@ impl AutomationStore {
             let now = db::now_ms();
             let mut changed = false;
             let mut events = Vec::with_capacity(rows.len());
+            let mut delivery_jobs = Vec::new();
+            let mut completed_runs = Vec::new();
             for (execution_id, task_id, started_at, request_json) in rows {
+                let duration_ms = (now - started_at).max(0);
+                let prompt_request = request_json
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<PromptRunRequest>(raw).ok());
+                let task_name = prompt_request
+                    .as_ref()
+                    .map(|request| request.task_name.clone())
+                    .or_else(|| {
+                        db::read_cron_task(&tx, &task_id)
+                            .ok()
+                            .flatten()
+                            .map(|task| task.name)
+                    })
+                    .unwrap_or_else(|| task_id.clone());
+                let (delivery_status, delivery_job) = match prompt_request
+                    .as_ref()
+                    .and_then(|request| request.delivery.clone())
+                {
+                    Some(config) if config.only_on.matches(false) => (
+                        Some(DeliveryStatus::Pending),
+                        Some(DeliveryJob {
+                            execution_id: execution_id.clone(),
+                            task_id: task_id.clone(),
+                            task_name: task_name.clone(),
+                            success: false,
+                            started_at,
+                            duration_ms: duration_ms as u64,
+                            output: message.to_string(),
+                            config,
+                        }),
+                    ),
+                    Some(_) => (Some(DeliveryStatus::Skipped), None),
+                    None => (None, None),
+                };
                 tx.execute(
                     "UPDATE automation_cron_runs
                      SET state = 'expired', success = 0, finished_at = ?2, duration_ms = ?3,
-                         output = ?4, lease_expires_at = NULL, request_json = NULL
+                         output = ?4, lease_expires_at = NULL, request_json = NULL,
+                         delivery_status = ?5, delivery_error = NULL
                      WHERE execution_id = ?1",
-                    params![execution_id, now, (now - started_at).max(0), message],
+                    params![
+                        execution_id,
+                        now,
+                        duration_ms,
+                        message,
+                        delivery_status.map(DeliveryStatus::as_str),
+                    ],
                 )
                 .map_err(|e| format!("标记 prompt run 过期失败：{e}"))?;
                 if prompt_run_is_counted(request_json.as_deref())
@@ -632,8 +921,16 @@ impl AutomationStore {
                     changed = true;
                 }
                 db::prune_runs(&tx, &task_id)?;
+                let record = db::read_run(&tx, &execution_id)?
+                    .ok_or_else(|| "expired prompt run disappeared".to_string())?;
+                if record.delivery_status != Some(DeliveryStatus::Pending) {
+                    completed_runs.push((task_name, record));
+                }
+                if let Some(job) = delivery_job {
+                    delivery_jobs.push(job);
+                }
                 events.push(PromptExpiredEvent {
-                    execution_id,
+                    execution_id: execution_id.clone(),
                     task_id,
                 });
             }
@@ -645,7 +942,7 @@ impl AutomationStore {
             };
             tx.commit()
                 .map_err(|e| format!("提交 prompt 过期事务失败：{e}"))?;
-            (events, snapshot)
+            (events, snapshot, delivery_jobs, completed_runs)
         };
 
         if let Some(snapshot) = cron_snapshot {
@@ -653,6 +950,12 @@ impl AutomationStore {
         }
         for event in &events {
             self.with_notifier(|notifier| notifier.prompt_expired(event));
+        }
+        for (task_name, run) in &completed_runs {
+            self.with_notifier(|notifier| notifier.run_completed(task_name, run));
+        }
+        for job in delivery_jobs {
+            self.with_notifier(|notifier| notifier.dispatch_delivery(job));
         }
         Ok(events)
     }
@@ -663,6 +966,45 @@ impl AutomationStore {
             return Err(format!("cron task 不存在：{task_id}"));
         }
         db::read_runs(&conn, task_id, limit)
+    }
+
+    pub fn update_run_delivery(
+        &self,
+        execution_id: &str,
+        status: DeliveryStatus,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        if !matches!(status, DeliveryStatus::Sent | DeliveryStatus::Failed) {
+            return Err("delivery status update must be sent or failed".to_string());
+        }
+        let error = error.map(|value| summarize_text(value, 500));
+        let completed = {
+            let conn = self.lock_conn()?;
+            let updated = conn
+                .execute(
+                    "UPDATE automation_cron_runs
+                     SET delivery_status = ?2, delivery_error = ?3
+                     WHERE execution_id = ?1 AND delivery_status = 'pending'",
+                    params![execution_id.trim(), status.as_str(), error],
+                )
+                .map_err(|e| format!("update run delivery status failed: {e}"))?;
+            if updated == 0 {
+                None
+            } else {
+                db::read_run(&conn, execution_id.trim())?.map(|run| {
+                    let task_name = db::read_cron_task(&conn, &run.task_id)
+                        .ok()
+                        .flatten()
+                        .map(|task| task.name)
+                        .unwrap_or_else(|| run.task_id.clone());
+                    (task_name, run)
+                })
+            }
+        };
+        if let Some((task_name, run)) = completed {
+            self.with_notifier(|notifier| notifier.run_completed(&task_name, &run));
+        }
+        Ok(())
     }
 
     pub fn clear_runs(&self, task_id: &str) -> Result<usize, String> {
@@ -877,26 +1219,121 @@ fn insert_finished_run(
     conn: &Connection,
     run: &CompletedRun,
     state: RunState,
-) -> Result<(), String> {
+    delivery_status: Option<DeliveryStatus>,
+    delivery_error: Option<&str>,
+) -> Result<CronRunRecord, String> {
+    let execution_id = Uuid::new_v4().to_string();
+    let finished_at = db::now_ms();
+    let output = db::truncate_run_output(&run.output);
     conn.execute(
         "INSERT INTO automation_cron_runs
             (execution_id, task_id, state, success, started_at, finished_at,
-             duration_ms, exit_code, output)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             duration_ms, exit_code, output, delivery_status, delivery_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
-            Uuid::new_v4().to_string(),
+            execution_id,
             run.task_id,
             state.as_str(),
             run.success as i64,
             run.started_at,
-            db::now_ms(),
+            finished_at,
             run.duration_ms as i64,
             run.exit_code,
-            db::truncate_run_output(&run.output),
+            output,
+            delivery_status.map(DeliveryStatus::as_str),
+            delivery_error,
         ],
     )
     .map_err(|e| format!("写入 automation_cron_runs 失败：{e}"))?;
+    Ok(CronRunRecord {
+        id: execution_id,
+        task_id: run.task_id.clone(),
+        state,
+        success: run.success,
+        started_at: run.started_at,
+        finished_at: Some(finished_at),
+        duration_ms: run.duration_ms,
+        exit_code: run.exit_code,
+        output,
+        delivery_status,
+        delivery_error: delivery_error.map(ToString::to_string),
+    })
+}
+
+fn apply_playbook_op(conn: &Connection, op: AutomationOp) -> Result<(), String> {
+    match op {
+        AutomationOp::Create { item } => {
+            let mut item = item;
+            ensure_id(&mut item);
+            let mut playbook = validate::validate_playbook(item, "playbook")?;
+            if db::read_playbook(conn, &playbook.id)?.is_some() {
+                return Err(format!("playbook already exists: {}", playbook.id));
+            }
+            let now = db::now_ms();
+            playbook.created_at = now;
+            playbook.updated_at = now;
+            let sort_index = next_sort_index(conn, "automation_playbooks")?;
+            db::insert_playbook(conn, &playbook, sort_index)?;
+        }
+        AutomationOp::Update { id, patch } => {
+            let stored = db::read_playbook(conn, id.trim())?
+                .ok_or_else(|| format!("playbook does not exist: {id}"))?;
+            let merged = validate::merge_patch(&stored, patch, "playbook")?;
+            let mut playbook = validate::validate_playbook(merged, "playbook")?;
+            playbook.id = stored.id;
+            playbook.created_at = stored.created_at;
+            playbook.updated_at = db::now_ms();
+            db::update_playbook_row(conn, &playbook)?;
+        }
+        AutomationOp::Delete { id } => {
+            let deleted = conn
+                .execute(
+                    "DELETE FROM automation_playbooks WHERE playbook_id = ?1",
+                    params![id.trim()],
+                )
+                .map_err(|e| format!("delete playbook failed: {e}"))?;
+            if deleted == 0 {
+                return Err(format!("playbook does not exist: {id}"));
+            }
+        }
+        AutomationOp::Reorder { ids } => {
+            reorder_rows(conn, "automation_playbooks", "playbook_id", &ids)?;
+        }
+    }
+
     Ok(())
+}
+
+fn playbook_cron_json(playbook: &Playbook, input: &PlaybookCreateCronInput) -> Value {
+    let name = input
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&playbook.name);
+    let description = input
+        .description
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or(&playbook.description);
+    json!({
+        "id": Uuid::new_v4().to_string(),
+        "name": name,
+        "description": description,
+        "cron": input.cron,
+        "enabled": input.enabled,
+        "remainingExecutions": input.remaining_executions,
+        "timeoutSeconds": input.timeout_seconds,
+        "type": "prompt",
+        "prompt": playbook.prompt,
+        "selectedModel": playbook.selected_model,
+        "reasoning": playbook.reasoning,
+        "workdir": playbook.workdir,
+        "selectedSkills": playbook.selected_skills,
+        "selectedSystemTools": playbook.selected_system_tools,
+        "mcpServerIds": playbook.mcp_server_ids,
+        "delivery": playbook.delivery,
+    })
 }
 
 fn decrement_remaining(conn: &Connection, task_id: &str) -> Result<CronMutationEffect, String> {
@@ -967,4 +1404,18 @@ fn read_system_workdir(conn: &Connection) -> Result<String, String> {
         Ok(Value::Null) | Err(_) => Ok(String::new()),
         Ok(_) => Ok(String::new()),
     }
+}
+
+fn summarize_run_output(output: &str) -> String {
+    summarize_text(output, 800)
+}
+
+fn summarize_text(value: &str, max_chars: usize) -> String {
+    let normalized = value.trim();
+    if normalized.chars().count() <= max_chars {
+        return normalized.to_string();
+    }
+    let mut summary: String = normalized.chars().take(max_chars).collect();
+    summary.push_str("\n...[truncated]");
+    summary
 }

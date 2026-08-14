@@ -1,4 +1,4 @@
-// Wire types for the automation domain (cron tasks + conversation hooks).
+// Wire types for the automation domain (cron tasks, conversation hooks and playbooks).
 // Mirrors src-tauri/src/services/automation/types.rs — the Rust side is the
 // single source of truth; both frontends consume these shapes verbatim.
 
@@ -71,6 +71,35 @@ export type SelectedModelRef = {
   model: string;
 };
 
+export type PlaybookDeliveryOnlyOn = "always" | "success" | "failure";
+
+export type PlaybookDelivery = {
+  channel: "wecom";
+  targetId: string;
+  onlyOn: PlaybookDeliveryOnlyOn;
+};
+
+/**
+ * A reusable prompt automation definition. Scheduling is intentionally kept
+ * outside the template: one playbook can back multiple cron tasks without
+ * duplicating its model, workspace, capabilities or delivery policy.
+ */
+export type Playbook = {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string;
+  selectedModel: SelectedModelRef;
+  reasoning?: string;
+  workdir?: string;
+  selectedSkills?: string[];
+  selectedSystemTools?: string[];
+  mcpServerIds?: string[];
+  delivery?: PlaybookDelivery;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type CronTask = {
   id: string;
   name: string;
@@ -90,6 +119,11 @@ export type CronTask = {
   /** Workspace path pinned for this task; absent/empty = follow the globally
    * active workspace. Never set on http tasks. */
   workdir?: string;
+  /** Capability snapshot captured from a Playbook at schedule creation. */
+  selectedSkills?: string[];
+  selectedSystemTools?: string[];
+  mcpServerIds?: string[];
+  delivery?: PlaybookDelivery;
   lastError?: string;
 };
 
@@ -115,12 +149,21 @@ export type HooksSnapshot = {
   hooks: HookDef[];
 };
 
+export type PlaybooksSnapshot = {
+  revision: number;
+  items: Playbook[];
+};
+
 export type AutomationSnapshot = {
   cron: CronSnapshot;
   hooks: HooksSnapshot;
+  /** Optional only for compatibility with desktops predating Playbooks. */
+  playbooks?: PlaybooksSnapshot;
 };
 
 export type CronRunState = "pending" | "leased" | "done" | "expired";
+
+export type DeliveryStatus = "pending" | "sent" | "skipped" | "failed";
 
 export type CronRunNowResponse = {
   startedAt: number;
@@ -136,6 +179,20 @@ export type CronRunRecord = {
   durationMs: number;
   exitCode?: number;
   output: string;
+  deliveryStatus?: DeliveryStatus;
+  deliveryError?: string;
+};
+
+export type CronRunCompletedEvent = {
+  id: string;
+  taskId: string;
+  taskName: string;
+  success: boolean;
+  startedAt: number;
+  durationMs: number;
+  outputSummary: string;
+  deliveryStatus?: DeliveryStatus;
+  deliveryError?: string;
 };
 
 export const MANUAL_CRON_RUN_POLL_INTERVAL_MS = 1_000;
@@ -179,6 +236,10 @@ export type PromptRunRequest = {
   workdir: string;
   /** Task thinking level; empty means the runner's default. */
   reasoning: string;
+  selectedSkills?: string[];
+  selectedSystemTools?: string[];
+  mcpServerIds?: string[];
+  delivery?: PlaybookDelivery;
 };
 
 export type CompletePromptRunInput = {
@@ -213,6 +274,22 @@ export type CronApplyResponse = {
 export type HooksApplyResponse = {
   status: ApplyStatus;
   hooks: HooksSnapshot;
+};
+
+export type PlaybooksApplyResponse = {
+  status: ApplyStatus;
+  playbooks: PlaybooksSnapshot;
+};
+
+export type CreatePlaybookCronInput = {
+  playbookId: string;
+  cronBaseRevision: number;
+  cron: string;
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  remainingExecutions?: number;
+  timeoutSeconds?: number;
 };
 
 export const HOOK_EVENT_TRANSLATION_KEYS: Record<HookEvent, string> = {

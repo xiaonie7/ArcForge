@@ -5,8 +5,10 @@ use serde_json::Value;
 
 pub const CRON_CHANGED_EVENT: &str = "automation:cron-changed";
 pub const HOOKS_CHANGED_EVENT: &str = "automation:hooks-changed";
+pub const PLAYBOOKS_CHANGED_EVENT: &str = "automation:playbooks-changed";
 pub const PROMPT_PENDING_EVENT: &str = "automation:prompt-pending";
 pub const PROMPT_EXPIRED_EVENT: &str = "automation:prompt-expired";
+pub const RUN_COMPLETED_EVENT: &str = "automation:run-completed";
 
 /// Sentinel written in place of HTTP header values when a snapshot leaves the
 /// desktop (gateway sync / web clients). Apply ops carrying this sentinel keep
@@ -60,6 +62,69 @@ pub struct SelectedModelRef {
     pub model: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryOnlyOn {
+    Always,
+    Success,
+    Failure,
+}
+
+impl Default for DeliveryOnlyOn {
+    fn default() -> Self {
+        Self::Always
+    }
+}
+
+impl DeliveryOnlyOn {
+    pub fn matches(self, success: bool) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Success => success,
+            Self::Failure => !success,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeliveryConfig {
+    pub channel: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub only_on: DeliveryOnlyOn,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryStatus {
+    Pending,
+    Sent,
+    Skipped,
+    Failed,
+}
+
+impl DeliveryStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Sent => "sent",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "sent" => Some(Self::Sent),
+            "skipped" => Some(Self::Skipped),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CronTask {
@@ -93,8 +158,43 @@ pub struct CronTask {
     /// globally active workspace" (the pre-existing behavior).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+    /// Missing means inherit the runtime's current selection; an explicit
+    /// empty list means the task must run without that capability group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_system_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Playbook {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub prompt: String,
+    pub selected_model: SelectedModelRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_system_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryConfig>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,11 +231,19 @@ pub struct HooksSnapshot {
     pub hooks: Vec<HookDef>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybooksSnapshot {
+    pub revision: u64,
+    pub items: Vec<Playbook>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutomationSnapshot {
     pub cron: CronSnapshot,
     pub hooks: HooksSnapshot,
+    pub playbooks: PlaybooksSnapshot,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -176,6 +284,31 @@ pub struct CronApplyResponse {
 pub struct HooksApplyResponse {
     pub status: ApplyStatus,
     pub hooks: HooksSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybooksApplyResponse {
+    pub status: ApplyStatus,
+    pub playbooks: PlaybooksSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybookCreateCronInput {
+    pub playbook_id: String,
+    pub cron_base_revision: u64,
+    pub cron: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub remaining_executions: Option<u64>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -235,6 +368,26 @@ pub struct CronRunRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_status: Option<DeliveryStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronRunCompletedEvent {
+    pub id: String,
+    pub task_id: String,
+    pub task_name: String,
+    pub success: bool,
+    pub started_at: i64,
+    pub duration_ms: u64,
+    pub output_summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_status: Option<DeliveryStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,6 +411,14 @@ pub struct PromptRunRequest {
     /// Task thinking level; empty means the runner's default.
     #[serde(default)]
     pub reasoning: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_skills: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_system_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<DeliveryConfig>,
 }
 
 fn default_true() -> bool {
@@ -308,4 +469,16 @@ pub struct CompletedRun {
     pub output: String,
     /// Counted runs decrement `remaining_executions`; skip records do not.
     pub counted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeliveryJob {
+    pub execution_id: String,
+    pub task_id: String,
+    pub task_name: String,
+    pub success: bool,
+    pub started_at: i64,
+    pub duration_ms: u64,
+    pub output: String,
+    pub config: DeliveryConfig,
 }

@@ -115,8 +115,8 @@ ArcForge 不只是一个聊天窗口。它让 Agent 在你可见、可控的边�
 ArcForge 目前是快速迭代中的开发预览版：
 
 - 桌面客户端当前仅面向 **Windows 10/11 x64**。
-- 桌面端已接入 Tauri 在线更新与 GitHub Releases 标签发布流程；使用前必须配置 updater 签名公钥及 GitHub Actions 私钥 Secrets。
-- 当前仍是开发预览版；在正式 Release 尚未发布时，使用者需要从源码构建。
+- 桌面端已接入 Tauri 在线更新与 GitHub Releases 标签发布流程；维护自有发布流程时，需要配置 updater 签名公钥及 GitHub Actions 私钥 Secrets。
+- 当前仍是开发预览版；版本标签通过 GitHub Releases 提供构建产物，也可以按下文从源码构建。
 - 对外分发前仍应接入自己的 Windows Authenticode 代码签名流程；它与 Tauri updater 签名是两套不同用途的签名。
 - Gateway 是可选组件，桌面客户端本身不依赖服务端。
 

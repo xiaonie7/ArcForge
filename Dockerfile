@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:22.17.1-bookworm-slim AS webui
+FROM node:22.19.0-bookworm-slim AS webui
 
 WORKDIR /src/crates/agent-gateway/web
 RUN npm install -g pnpm@10.32.1
@@ -11,7 +11,7 @@ RUN pnpm install --frozen-lockfile
 COPY crates/agent-gateway/web ./
 RUN pnpm build
 
-FROM golang:1.25-bookworm AS gateway-builder
+FROM golang:1.25.12-bookworm AS gateway-builder
 
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64

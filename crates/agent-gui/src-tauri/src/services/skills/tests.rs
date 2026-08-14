@@ -282,12 +282,12 @@ fn builtin_seed_retires_owned_legacy_code_review_workflow() {
     let root = tmp.path().join("skills");
     let legacy_dir = write_skill(
         &root,
-        "arcforge-code-review",
+        "liveagent-code-review",
         "Legacy managed review workflow",
     );
     fs::write(
-        legacy_dir.join("_arcforge_builtin.json"),
-        "{\"schemaVersion\":1,\"owner\":\"ArcForge\",\"skill\":\"arcforge-code-review\"}\n",
+        legacy_dir.join("_liveagent_builtin.json"),
+        "{\"schemaVersion\":1,\"owner\":\"LiveAgent\",\"skill\":\"liveagent-code-review\"}\n",
     )
     .expect("write legacy ownership marker");
 
@@ -305,7 +305,7 @@ fn builtin_seed_retires_owned_legacy_code_review_workflow() {
         .any(|entry| entry
             .file_name()
             .to_string_lossy()
-            .starts_with("arcforge-code-review-")));
+            .starts_with("liveagent-code-review-")));
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn builtin_seed_preserves_user_owned_legacy_code_review_workflow() {
     let root = tmp.path().join("skills");
     let legacy_dir = write_skill(
         &root,
-        "arcforge-code-review",
+        "liveagent-code-review",
         "User-owned legacy review workflow",
     );
     let original = fs::read(legacy_dir.join("SKILL.md")).expect("read legacy user skill");

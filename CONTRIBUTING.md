@@ -85,9 +85,10 @@ available.
 - **Rust**: follow `rustfmt` / `clippy`. Tauri commands and domain types prefer
   `camelCase` serde renaming at the API boundary while internal Rust stays
   idiomatic.
-- **TypeScript / React**: the existing ESLint and Prettier configuration is the
-  source of truth. Mirror files between `crates/agent-gui` and
-  `crates/agent-gateway/web` must stay in sync — `scripts/check-mirror.mjs`
+- **TypeScript / React**: the existing Biome configuration is the source of
+  truth; use the package `lint` and `format` scripts. Mirror files between
+  `crates/agent-gui` and `crates/agent-gateway/web` must stay in sync —
+  `scripts/check-mirror.mjs`
   enforces this, so run it before committing.
 - **Go**: `gofmt` / `go vet`. Keep the Gateway dependency surface small.
 - **User-facing strings** go through the i18n catalog
@@ -119,9 +120,9 @@ the suite pass.
 
 Development happens on `main`. Tagged releases follow `vMAJOR.MINOR.PATCH`
 (pre-release suffixes are allowed). Pushing such a tag triggers the desktop
-release workflow. Do not modify `package.json` versions or `updater/latest.json`
-by hand for releases — the workflow writes the version into a generated Tauri
-config. See
+release workflow. Do not modify package versions by hand for releases: the
+workflow writes the tag version into a generated Tauri config, then generates
+and uploads `latest.json` with the signed installers. See
 [Desktop updates](crates/agent-gui/docs/releasing/desktop-updates.md) for the
 full release flow.
 

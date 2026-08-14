@@ -159,6 +159,8 @@ macro_rules! app_invoke_handler {
             commands::cron::automation_snapshot,
             commands::cron::automation_cron_apply,
             commands::cron::automation_hooks_apply,
+            commands::cron::automation_playbooks_apply,
+            commands::cron::automation_playbook_create_cron,
             commands::cron::automation_list_runs,
             commands::cron::automation_clear_runs,
             commands::cron::automation_run_cron_now,
@@ -560,7 +562,6 @@ pub fn run() {
                     gateway: Arc::downgrade(&gateway_controller),
                     scheduler: Arc::downgrade(&automation_scheduler),
                 });
-                Arc::clone(&automation_scheduler).start();
                 app.manage(Arc::clone(&gateway_controller));
                 if let Err(error) = gateway_controller.start() {
                     eprintln!("failed to start remote gateway controller: {error}");
@@ -569,16 +570,19 @@ pub fn run() {
                     app.handle().clone(),
                     Arc::clone(&gateway_controller),
                 ));
+                automation_scheduler.attach_wecom_supervisor(&wecom_supervisor);
                 if let Err(error) = wecom_supervisor.start() {
                     eprintln!("failed to start local WeCom runtime supervisor: {error}");
                 }
                 app.manage(Arc::clone(&wecom_supervisor));
                 tauri::async_runtime::spawn({
                     let wecom_supervisor = Arc::clone(&wecom_supervisor);
+                    let automation_scheduler = Arc::clone(&automation_scheduler);
                     async move {
                         if let Err(error) = wecom_supervisor.reload_from_db().await {
                             eprintln!("failed to load WeCom runtime settings: {error}");
                         }
+                        automation_scheduler.start();
                     }
                 });
                 Ok(())

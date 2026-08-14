@@ -144,9 +144,10 @@ ArcForge is a fast-moving development preview:
 
 - The desktop client currently targets **Windows 10/11 x64** only.
 - Tauri online updates and the GitHub Releases tag-based publishing flow are
-  wired up. Before first use you must configure the updater signing public key
-  and the GitHub Actions private-key secrets.
-- Until a formal release is published, users need to build from source.
+  wired up. Maintainers of their own release flow must configure the updater
+  signing public key and GitHub Actions private-key secrets.
+- Tagged preview builds are published through GitHub Releases; building from
+  source remains supported as described below.
 - Wire up your own Windows Authenticode code-signing flow before public
   distribution; it is separate from Tauri updater signing.
 - The Gateway is optional; the desktop client does not depend on any server.

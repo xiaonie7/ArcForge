@@ -2,10 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   type CronSnapshot,
+  feedAutomationSnapshot,
   feedCronSnapshot,
   feedHooksSnapshot,
+  feedPlaybooksSnapshot,
   type HooksSnapshot,
   initAutomation,
+  type PlaybooksSnapshot,
+  resetAutomation,
 } from "@/lib/automation";
 import type { GatewayWebSocketClientLike } from "@/lib/gatewaySocket";
 import { setPreferredMonacoNlsLocale } from "@/lib/monacoNls";
@@ -141,12 +145,20 @@ export function useGatewaySettingsSync(params: {
       const automation = payload as {
         automationCron?: CronSnapshot;
         automationHooks?: HooksSnapshot;
+        automationPlaybooks?: PlaybooksSnapshot;
       };
-      if (automation.automationCron) {
-        feedCronSnapshot(automation.automationCron);
-      }
-      if (automation.automationHooks) {
-        feedHooksSnapshot(automation.automationHooks);
+      if (automation.automationCron && automation.automationHooks) {
+        feedAutomationSnapshot({
+          cron: automation.automationCron,
+          hooks: automation.automationHooks,
+          playbooks: automation.automationPlaybooks,
+        });
+      } else {
+        if (automation.automationCron) feedCronSnapshot(automation.automationCron);
+        if (automation.automationHooks) feedHooksSnapshot(automation.automationHooks);
+        if (automation.automationPlaybooks) {
+          feedPlaybooksSnapshot(automation.automationPlaybooks);
+        }
       }
       const prev = settingsRef.current;
       const rawNext = resolveAppWorkspaceProjects(applyGatewaySettingsSyncPayload(prev, payload));
@@ -176,6 +188,7 @@ export function useGatewaySettingsSync(params: {
   );
 
   useEffect(() => {
+    resetAutomation();
     if (!api) {
       setSettingsSyncReady(token.trim() === "");
       setSettingsSyncError(null);

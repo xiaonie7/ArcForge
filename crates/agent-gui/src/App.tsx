@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
+import { AutomationRunToastHost } from "./components/cron/AutomationRunToastHost";
 import { CronPromptRunner } from "./components/cron/CronPromptRunner";
 import { Pin } from "./components/icons";
 import { useNativeInputContextMenu } from "./components/input-context-menu/NativeInputContextMenu";
@@ -476,6 +477,7 @@ export default function App() {
     <LocaleContext.Provider value={localeContextValue}>
       <AppChrome>
         <CronPromptRunner settings={settings} />
+        <AutomationRunToastHost />
         <MemoryOrganizerHost settings={settings} setSettings={setSettings} />
         <AppErrorBoundary>
           <ChatPage

@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Play,
   ScrollText,
+  Send,
   Terminal,
   Timer,
   X,
@@ -80,6 +81,10 @@ function formatDuration(ms: number): string {
 
 function formatTimestamp(timestamp: number): string {
   return new Date(timestamp).toLocaleString();
+}
+
+function deliveryTranslationKey(status: NonNullable<CronRunRecord["deliveryStatus"]>) {
+  return `settings.cronViewDelivery${status[0].toUpperCase()}${status.slice(1)}`;
 }
 
 function stringifyHeaders(headers?: Record<string, string>) {
@@ -651,7 +656,28 @@ function RightPanel({
                             </span>
                           </span>
                         ) : null}
+                        {log.deliveryStatus ? (
+                          <span
+                            className={`inline-flex items-center gap-1 font-medium ${
+                              log.deliveryStatus === "sent"
+                                ? "text-emerald-600 dark:text-emerald-400"
+                                : log.deliveryStatus === "failed"
+                                  ? "text-red-600 dark:text-red-400"
+                                  : log.deliveryStatus === "pending"
+                                    ? "text-sky-600 dark:text-sky-400"
+                                    : "text-muted-foreground/60"
+                            }`}
+                          >
+                            <Send className="h-3 w-3" />
+                            {t("settings.cronViewDelivery")}: {t(deliveryTranslationKey(log.deliveryStatus))}
+                          </span>
+                        ) : null}
                       </div>
+                      {log.deliveryStatus === "failed" && log.deliveryError ? (
+                        <div className="break-words rounded-lg border border-red-500/15 bg-red-500/[0.03] px-2.5 py-2 text-[11px] leading-relaxed text-red-700 dark:text-red-300">
+                          {t("settings.cronViewDeliveryError")}: {log.deliveryError}
+                        </div>
+                      ) : null}
                       {log.output ? (
                         <div className="space-y-1">
                           <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/50">

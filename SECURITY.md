@@ -62,10 +62,8 @@ Report vulnerabilities privately via GitHub's security advisory feature:
 2. Choose "Report a vulnerability".
 3. Describe the issue, affected components, reproduction steps and impact.
 
-If GitHub Security Advisories are unavailable to you, email the maintainer at
-**security@example.com** (replace with the project's real security contact)
-with the same details, ideally PGP-encrypted. Please do not include sensitive
-credentials in your report.
+GitHub Security Advisories are currently the project's private reporting
+channel. Please do not include sensitive credentials in your report.
 
 We aim to acknowledge reports within **5 business days** and to coordinate a
 fix and disclosure timeline with you. Please allow reasonable time for a fix to

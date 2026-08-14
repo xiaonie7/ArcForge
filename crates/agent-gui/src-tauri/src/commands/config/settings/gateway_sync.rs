@@ -33,6 +33,10 @@ pub(crate) fn load_gateway_settings_sync_snapshot(conn: &Connection) -> Result<V
         load_masked_automation_hooks(conn)?,
     );
     snapshot.insert(
+        "automationPlaybooks".to_string(),
+        load_automation_playbooks(conn)?,
+    );
+    snapshot.insert(
         "memory".to_string(),
         load_memory(conn)?.unwrap_or(Value::Object(Map::new())),
     );
@@ -74,6 +78,13 @@ fn load_masked_automation_hooks(conn: &Connection) -> Result<Value, String> {
         crate::services::automation::validate::mask_request_headers(&mut hook.requests);
     }
     serde_json::to_value(&snapshot).map_err(|e| format!("序列化 automation hooks 快照失败：{e}"))
+}
+
+fn load_automation_playbooks(conn: &Connection) -> Result<Value, String> {
+    crate::services::automation::db::ensure_schema(conn)?;
+    let snapshot = crate::services::automation::db::read_playbooks_snapshot(conn)?;
+    serde_json::to_value(&snapshot)
+        .map_err(|e| format!("serialize automation playbooks snapshot failed: {e}"))
 }
 
 pub(crate) fn redact_gateway_settings_sync_payload(payload: Value) -> Result<Value, String> {

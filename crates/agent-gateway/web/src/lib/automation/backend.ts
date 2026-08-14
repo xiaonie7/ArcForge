@@ -11,17 +11,21 @@ import { loadToken } from "../storage";
 import type {
   AutomationApplyInput,
   AutomationSnapshot,
+  CreatePlaybookCronInput,
   CronApplyResponse,
   CronRunNowResponse,
   CronRunRecord,
   CronSnapshot,
   HooksApplyResponse,
   HooksSnapshot,
+  PlaybooksApplyResponse,
+  PlaybooksSnapshot,
 } from "./types";
 
 export type AutomationBackendHandlers = {
   onCron: (snapshot: CronSnapshot) => void;
   onHooks: (snapshot: HooksSnapshot) => void;
+  onPlaybooks: (snapshot: PlaybooksSnapshot) => void;
 };
 
 async function cronManage<T>(action: string, taskId?: string, payload?: unknown): Promise<T> {
@@ -52,6 +56,14 @@ export const backend = {
 
   hooksApply(input: AutomationApplyInput): Promise<HooksApplyResponse> {
     return cronManage<HooksApplyResponse>("hooks_apply", undefined, input);
+  },
+
+  playbooksApply(input: AutomationApplyInput): Promise<PlaybooksApplyResponse> {
+    return cronManage<PlaybooksApplyResponse>("playbooks_apply", undefined, input);
+  },
+
+  createPlaybookCron(input: CreatePlaybookCronInput): Promise<CronApplyResponse> {
+    return cronManage<CronApplyResponse>("playbook_create_cron", undefined, input);
   },
 
   async listRuns(taskId: string, limit?: number): Promise<CronRunRecord[]> {

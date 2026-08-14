@@ -81,6 +81,7 @@ pub(crate) fn merge_settings_update_into_snapshot(
         if field == "remote"
             || field == "automationCron"
             || field == "automationHooks"
+            || field == "automationPlaybooks"
             || field == "hooks"
             || field == "cron"
         {

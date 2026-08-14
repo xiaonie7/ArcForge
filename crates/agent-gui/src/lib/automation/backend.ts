@@ -10,22 +10,27 @@ import type {
   AutomationApplyInput,
   AutomationSnapshot,
   CompletePromptRunInput,
+  CreatePlaybookCronInput,
   CronApplyResponse,
   CronRunNowResponse,
   CronRunRecord,
   CronSnapshot,
   HooksApplyResponse,
   HooksSnapshot,
+  PlaybooksApplyResponse,
+  PlaybooksSnapshot,
   PromptCompletionResponse,
   PromptRunRequest,
 } from "./types";
 
 const CRON_CHANGED_EVENT = "automation:cron-changed";
 const HOOKS_CHANGED_EVENT = "automation:hooks-changed";
+const PLAYBOOKS_CHANGED_EVENT = "automation:playbooks-changed";
 
 export type AutomationBackendHandlers = {
   onCron: (snapshot: CronSnapshot) => void;
   onHooks: (snapshot: HooksSnapshot) => void;
+  onPlaybooks: (snapshot: PlaybooksSnapshot) => void;
 };
 
 export const backend = {
@@ -39,6 +44,14 @@ export const backend = {
 
   hooksApply(input: AutomationApplyInput): Promise<HooksApplyResponse> {
     return invoke<HooksApplyResponse>("automation_hooks_apply", { input });
+  },
+
+  playbooksApply(input: AutomationApplyInput): Promise<PlaybooksApplyResponse> {
+    return invoke<PlaybooksApplyResponse>("automation_playbooks_apply", { input });
+  },
+
+  createPlaybookCron(input: CreatePlaybookCronInput): Promise<CronApplyResponse> {
+    return invoke<CronApplyResponse>("automation_playbook_create_cron", { input });
   },
 
   listRuns(taskId: string, limit?: number): Promise<CronRunRecord[]> {
@@ -81,9 +94,13 @@ export const backend = {
     const unlistenHooks = listen<HooksSnapshot>(HOOKS_CHANGED_EVENT, (event) => {
       handlers.onHooks(event.payload);
     });
+    const unlistenPlaybooks = listen<PlaybooksSnapshot>(PLAYBOOKS_CHANGED_EVENT, (event) => {
+      handlers.onPlaybooks(event.payload);
+    });
     return () => {
       void unlistenCron.then((unlisten) => unlisten());
       void unlistenHooks.then((unlisten) => unlisten());
+      void unlistenPlaybooks.then((unlisten) => unlisten());
     };
   },
 };

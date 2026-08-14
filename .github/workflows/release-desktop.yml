@@ -41,7 +41,6 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: 1.25.12
-          check-latest: true
           cache-dependency-path: crates/agent-gateway/go.sum
 
       - name: Set up Python
@@ -52,7 +51,7 @@ jobs:
       - name: Set up Protobuf compiler
         uses: arduino/setup-protoc@v3
         with:
-          version: "25.3"
+          version: "34.0"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install desktop dependencies

@@ -25,6 +25,7 @@ import { buildBuiltinToolRegistry } from "../../lib/tools/builtinRegistry";
 import { createFileToolState } from "../../lib/tools/fileToolState";
 import type { SkillAccessPolicy } from "../../lib/tools/skillAccessPolicy";
 import { appendSystemPrompt } from "../../pages/chat";
+import { resolveCronCapabilitySnapshot } from "./playbookCapabilities";
 import {
   createCompletePromptRunInput,
   PROMPT_RUN_RECONCILE_INTERVAL_MS,
@@ -60,8 +61,8 @@ function getActiveAgentPrompt(settings: AppSettings) {
   );
 }
 
-async function buildCronSkillsContext(settings: AppSettings) {
-  const selectedSkillNames = settings.skills.selected.filter(
+async function buildCronSkillsContext(settings: AppSettings, requestedSkillNames: string[]) {
+  const selectedSkillNames = requestedSkillNames.filter(
     (name) => !isAlwaysEnabledSkillName(name),
   );
   if (!settings.skills.enabled || selectedSkillNames.length === 0) {
@@ -154,7 +155,8 @@ async function executeCronPromptRun(
     throw new Error(`Auto Prompt provider API key is empty: ${providerLabel}`);
   }
 
-  const skillsContext = await buildCronSkillsContext(settings);
+  const capabilities = resolveCronCapabilitySnapshot(settings, request);
+  const skillsContext = await buildCronSkillsContext(settings, capabilities.selectedSkills);
   const activeAgentPrompt = getActiveAgentPrompt(settings);
   const runtimeEnvironment = await resolveRuntimeEnvironmentSnapshot();
   const runtimePlatform = runtimeEnvironment.platform;
@@ -172,8 +174,8 @@ async function executeCronPromptRun(
       customProviderId: request.providerId,
       model: request.model,
     },
-    selectedSystemToolIds: settings.system.selectedSystemTools,
-    getMcpSettings: () => settings.mcp,
+    selectedSystemToolIds: capabilities.selectedSystemTools,
+    getMcpSettings: () => capabilities.mcp,
     mcpLoadFailureMode: "throw",
   });
 

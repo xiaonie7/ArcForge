@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use crate::services::automation::{
-    validate_cron_expression, AutomationApplyInput, AutomationSnapshot, AutomationStore,
-    CompletePromptRunInput, CronApplyResponse, CronRunNowResponse, CronRunRecord,
-    HooksApplyResponse, PromptCompletionResponse, PromptRunRequest,
+    validate_cron_expression, AutomationApplyInput, AutomationScheduler, AutomationSnapshot,
+    AutomationStore, CompletePromptRunInput, CronApplyResponse, CronRunNowResponse, CronRunRecord,
+    HooksApplyResponse, PlaybookCreateCronInput, PlaybooksApplyResponse, PromptCompletionResponse,
+    PromptRunRequest,
 };
 
 #[tauri::command(rename_all = "snake_case")]
@@ -43,6 +44,28 @@ pub async fn automation_hooks_apply(
     tauri::async_runtime::spawn_blocking(move || store.hooks_apply(input))
         .await
         .map_err(|e| format!("automation_hooks_apply join 失败：{e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn automation_playbooks_apply(
+    input: AutomationApplyInput,
+    store: tauri::State<'_, Arc<AutomationStore>>,
+) -> Result<PlaybooksApplyResponse, String> {
+    let store = Arc::clone(store.inner());
+    tauri::async_runtime::spawn_blocking(move || store.playbooks_apply(input))
+        .await
+        .map_err(|e| format!("automation_playbooks_apply join failed: {e}"))?
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn automation_playbook_create_cron(
+    input: PlaybookCreateCronInput,
+    store: tauri::State<'_, Arc<AutomationStore>>,
+) -> Result<CronApplyResponse, String> {
+    let store = Arc::clone(store.inner());
+    tauri::async_runtime::spawn_blocking(move || store.create_cron_from_playbook(input))
+        .await
+        .map_err(|e| format!("automation_playbook_create_cron join failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -104,9 +127,16 @@ pub async fn automation_release_prompt_run(
 pub async fn automation_complete_prompt_run(
     input: CompletePromptRunInput,
     store: tauri::State<'_, Arc<AutomationStore>>,
+    scheduler: tauri::State<'_, Arc<AutomationScheduler>>,
 ) -> Result<PromptCompletionResponse, String> {
     let store = Arc::clone(store.inner());
-    tauri::async_runtime::spawn_blocking(move || store.complete_prompt_run(input))
-        .await
-        .map_err(|e| format!("automation_complete_prompt_run join 失败：{e}"))?
+    let (response, delivery) = tauri::async_runtime::spawn_blocking(move || {
+        store.complete_prompt_run_with_delivery(input)
+    })
+    .await
+    .map_err(|e| format!("automation_complete_prompt_run join failed: {e}"))??;
+    if let Some(delivery) = delivery {
+        scheduler.deliver(delivery).await;
+    }
+    Ok(response)
 }

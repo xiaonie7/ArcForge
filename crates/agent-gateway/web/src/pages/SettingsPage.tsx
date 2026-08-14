@@ -13,10 +13,12 @@ import {
 } from "../components/icons";
 
 import { useLocale } from "../i18n";
+import { useAutomation } from "../lib/automation";
 import { AgentsSection } from "./settings/AgentsSection";
 import { CronSection } from "./settings/CronSection";
 import { HooksSection } from "./settings/HooksSection";
 import { MemoryPanel } from "./settings/memory/MemoryPanel";
+import { PlaybooksSection } from "./settings/PlaybooksSection";
 import { ProvidersSection } from "./settings/ProvidersSection";
 import { RemoteSection } from "./settings/RemoteSection";
 import { SshSection } from "./settings/SshSection";
@@ -107,6 +109,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     labelKey: "settings.groupAutomation",
     items: [
+      { id: "playbooks", icon: <BookOpen className="h-4 w-4" /> },
       { id: "hooks", icon: <Zap className="h-4 w-4" /> },
       { id: "cron", icon: <Clock3 className="h-4 w-4" /> },
     ],
@@ -130,6 +133,7 @@ export function SettingsPage(props: SettingsPageProps) {
     hiddenSections = [],
   } = props;
   const { t } = useLocale();
+  const { playbooksCapabilityKnown, supportsPlaybooks } = useAutomation();
   const [section, setSection] = useState<SectionId>(initialSection);
 
   const sectionLabels: Record<SectionId, string> = {
@@ -139,6 +143,7 @@ export function SettingsPage(props: SettingsPageProps) {
     agents: t("settings.navAgents"),
     ssh: t("settings.navSsh"),
     memory: t("settings.navMemory"),
+    playbooks: t("scheduled.playbooksTab"),
     hooks: t("settings.navHooks"),
     cron: t("settings.navCron"),
     remote: t("settings.navRemote"),
@@ -150,27 +155,37 @@ export function SettingsPage(props: SettingsPageProps) {
       NAV_GROUPS.map((group) => ({
         label: t(group.labelKey),
         items: group.items
-          .filter((item) => !hiddenSectionSet.has(item.id))
+          .filter(
+            (item) =>
+              !hiddenSectionSet.has(item.id) &&
+              (item.id !== "playbooks" || (playbooksCapabilityKnown && supportsPlaybooks)),
+          )
           .map((item) => ({ ...item, label: sectionLabels[item.id] })),
       })).filter((group) => group.items.length > 0),
-    [hiddenSectionSet, sectionLabels, t],
+    [hiddenSectionSet, playbooksCapabilityKnown, sectionLabels, supportsPlaybooks, t],
   );
   const allNavItems = useMemo(() => navGroups.flatMap((g) => g.items), [navGroups]);
+  const sectionAvailable = allNavItems.some((item) => item.id === section);
+  const awaitingPlaybooksCapability =
+    section === "playbooks" && !playbooksCapabilityKnown && !hiddenSectionSet.has("playbooks");
+  const fallbackSection = allNavItems[0]?.id ?? "system";
+  const effectiveSection =
+    sectionAvailable || awaitingPlaybooksCapability ? section : fallbackSection;
 
   useEffect(() => {
     setSection(initialSection);
   }, [initialSection]);
 
   useEffect(() => {
-    if (allNavItems.some((item) => item.id === section)) {
+    if (sectionAvailable || awaitingPlaybooksCapability) {
       return;
     }
-    setSection(allNavItems[0]?.id ?? "system");
-  }, [allNavItems, section]);
+    setSection(fallbackSection);
+  }, [awaitingPlaybooksCapability, fallbackSection, sectionAvailable]);
 
   const saveIndicator = getSaveIndicator(saveState, t);
   const sectionContent = (() => {
-    switch (section) {
+    switch (effectiveSection) {
       case "providers":
         return <ProvidersSection settings={settings} setSettings={setSettings} />;
       case "system":
@@ -179,6 +194,8 @@ export function SettingsPage(props: SettingsPageProps) {
         return <SystemToolsSection settings={settings} setSettings={setSettings} />;
       case "hooks":
         return <HooksSection settings={settings} setSettings={setSettings} />;
+      case "playbooks":
+        return <PlaybooksSection settings={settings} setSettings={setSettings} />;
       case "cron":
         return <CronSection settings={settings} setSettings={setSettings} />;
       case "agents":
@@ -196,7 +213,7 @@ export function SettingsPage(props: SettingsPageProps) {
           />
         );
       default: {
-        const unreachable: never = section;
+        const unreachable: never = effectiveSection;
         return unreachable;
       }
     }
@@ -249,7 +266,7 @@ export function SettingsPage(props: SettingsPageProps) {
                     key={item.id}
                     icon={item.icon}
                     label={item.label}
-                    active={section === item.id}
+                    active={effectiveSection === item.id}
                     onClick={() => setSection(item.id)}
                   />
                 ))}
@@ -262,8 +279,11 @@ export function SettingsPage(props: SettingsPageProps) {
       <main className="settings-main flex min-w-0 flex-1 flex-col">
         <header className="settings-main-header flex items-center justify-between border-b px-6 py-4">
           <div className="settings-main-title overflow-hidden">
-            <div key={section} className="settings-section-title-enter text-base font-semibold">
-              {sectionLabels[section]}
+            <div
+              key={effectiveSection}
+              className="settings-section-title-enter text-base font-semibold"
+            >
+              {sectionLabels[effectiveSection]}
             </div>
           </div>
           <div
@@ -276,16 +296,20 @@ export function SettingsPage(props: SettingsPageProps) {
         </header>
 
         <div
-          key={section}
-          className={`settings-content settings-content-${section} settings-section-enter flex-1 px-6 py-5 ${
-            section === "hooks" || section === "providers" || section === "memory"
+          key={effectiveSection}
+          className={`settings-content settings-content-${effectiveSection} settings-section-enter flex-1 px-6 py-5 ${
+            effectiveSection === "hooks" ||
+            effectiveSection === "providers" ||
+            effectiveSection === "memory"
               ? "flex min-h-0 flex-col overflow-hidden"
               : "overflow-auto"
           }`}
         >
           <div
-            className={`settings-section-shell settings-section-shell-${section} ${
-              section === "hooks" || section === "providers" || section === "memory"
+            className={`settings-section-shell settings-section-shell-${effectiveSection} ${
+              effectiveSection === "hooks" ||
+              effectiveSection === "providers" ||
+              effectiveSection === "memory"
                 ? "flex min-h-0 flex-1 flex-col"
                 : "min-h-full"
             }`}

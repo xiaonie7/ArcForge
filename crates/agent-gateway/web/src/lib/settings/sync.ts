@@ -1,3 +1,4 @@
+import type { CronSnapshot, HooksSnapshot, PlaybooksSnapshot } from "../automation";
 import {
   type AppSettings,
   getDefaultSystemProxyConfig,
@@ -55,6 +56,10 @@ export type GatewaySettingsSyncPayload = {
   selectedModel: AppSettings["selectedModel"] | null;
   theme: AppSettings["theme"];
   locale: AppSettings["locale"];
+  /** Desktop-owned automation snapshots delivered over settings sync. */
+  automationCron?: CronSnapshot;
+  automationHooks?: HooksSnapshot;
+  automationPlaybooks?: PlaybooksSnapshot;
   sshPatch?: GatewaySshSyncPatch;
   providerApiKeyUpdates?: GatewayProviderApiKeyUpdates;
   sshSecretUpdates?: GatewaySshSecretUpdates;

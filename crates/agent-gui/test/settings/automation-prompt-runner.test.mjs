@@ -37,6 +37,9 @@ const {
 const { createCompletePromptRunInput, PROMPT_RUN_RECONCILE_INTERVAL_MS } = loader.loadModule(
   "src/components/cron/promptRunProtocol.ts",
 );
+const { resolveCronCapabilitySnapshot } = loader.loadModule(
+  "src/components/cron/playbookCapabilities.ts",
+);
 const runnerSource = readFileSync(
   new URL("../../src/components/cron/CronPromptRunner.tsx", import.meta.url),
   "utf8",
@@ -181,6 +184,48 @@ test("Auto Prompt run prefers the queue-time workdir with a global fallback", ()
     runnerSource,
     /const workdir = \(request\.workdir \?\? ""\)\.trim\(\) \|\| settings\.system\.workdir\.trim\(\)/,
   );
+});
+
+test("Playbook capability snapshots override global selections without widening access", () => {
+  const settings = {
+    skills: { selected: ["global-skill"] },
+    system: { selectedSystemTools: ["global-tool"] },
+    mcp: {
+      selected: ["mcp-a", "mcp-b"],
+      servers: [
+        { id: "mcp-a", enabled: true },
+        { id: "mcp-b", enabled: true },
+      ],
+    },
+  };
+
+  const snapshot = resolveCronCapabilitySnapshot(settings, {
+    selectedSkills: [],
+    selectedSystemTools: ["http_get_test", "unknown-tool"],
+    mcpServerIds: ["mcp-b"],
+  });
+
+  assert.deepEqual(snapshot.selectedSkills, []);
+  assert.deepEqual(snapshot.selectedSystemTools, ["http_get_test"]);
+  assert.deepEqual(snapshot.mcp.selected, ["mcp-b"]);
+  assert.deepEqual(snapshot.mcp.servers, [{ id: "mcp-b", enabled: true }]);
+});
+
+test("legacy prompt tasks still follow the current global capability selections", () => {
+  const settings = {
+    skills: { selected: ["global-skill"] },
+    system: { selectedSystemTools: ["global-tool"] },
+    mcp: {
+      selected: ["mcp-a"],
+      servers: [{ id: "mcp-a", enabled: true }],
+    },
+  };
+
+  const snapshot = resolveCronCapabilitySnapshot(settings, {});
+
+  assert.equal(snapshot.selectedSkills, settings.skills.selected);
+  assert.equal(snapshot.selectedSystemTools, settings.system.selectedSystemTools);
+  assert.equal(snapshot.mcp, settings.mcp);
 });
 
 test("Cron workspace pin stays wired across GUI and WebUI", () => {
