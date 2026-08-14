@@ -240,6 +240,16 @@ fn cron_apply_reorder_requires_full_permutation() {
         .expect_err("partial reorder rejected");
     assert!(error.contains("全部"));
 
+    let duplicate_error = store
+        .cron_apply(apply_input(
+            response.cron.revision,
+            vec![AutomationOp::Reorder {
+                ids: vec!["a".to_string(), " a ".to_string()],
+            }],
+        ))
+        .expect_err("duplicate reorder rejected");
+    assert!(duplicate_error.contains("duplicate"));
+
     let reordered = store
         .cron_apply(apply_input(
             response.cron.revision,
@@ -1102,6 +1112,13 @@ fn prompt_delivery_freezes_capabilities_and_reaches_terminal_state() {
     store
         .update_run_delivery(&claim.execution_id, DeliveryStatus::Sent, None)
         .expect("finish delivery");
+    store
+        .update_run_delivery(
+            &claim.execution_id,
+            DeliveryStatus::Failed,
+            Some("late duplicate callback"),
+        )
+        .expect("ignore duplicate terminal delivery update");
     let sent = store.list_runs(&task.id, 10).expect("sent delivery run");
     assert_eq!(sent[0].delivery_status, Some(DeliveryStatus::Sent));
     assert!(sent[0].delivery_error.is_none());

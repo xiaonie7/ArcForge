@@ -173,7 +173,7 @@ Cron、Hooks 和 Playbooks 各自维护独立 revision，避免无关域的写�
 - Gateway WebUI 只能通过已认证的 `cron.manage` 修改配置；浏览器不直接连接企业微信，也不持有 Connector 认证信息。
 - 实际发送只发生在桌面进程的 `LocalWecomSupervisor`，复用已启动且已认证的本地 Connector。Playbook 不保存企业微信 token 或 secret。
 - 出站消息只使用 Markdown 发送协议。会话 ID 会去首尾空白、限制为 256 个字符并拒绝控制字符；本地发送队列有限，发送确认超时为 10 秒。
-- 投递正文由 ArcForge 组装，包含任务名称、成功/失败、耗时、任务 ID 和最终输出。输出先按 UTF-8 安全截断到约 8 KiB，整条消息上限约 12 KiB；运行库中的输出另有 50,000 字符上限。
+- 投递正文由 ArcForge 组装，包含任务名称、成功/失败、耗时、任务 ID 和最终输出。输出会移除 ANSI 转义序列及 Connector 禁止的控制字符，再按 UTF-8 安全边界截断到约 8 KiB；整条消息上限约 12 KiB，运行库中的输出另有 50,000 字符上限。
 - 运行结果本身可能包含业务数据或工具输出。目标会话应由有权限的操作者配置，并遵循最小披露原则；不要依赖长度截断来脱敏秘密。
 
 `targetId` 是路由标识，不应当被当作秘密。它会随 Playbook/Cron 权威快照供已授权的桌面端和 Gateway WebUI 展示。企业微信认证材料不进入这些快照。
@@ -198,7 +198,7 @@ Cron、Hooks 和 Playbooks 各自维护独立 revision，避免无关域的写�
 | `sent` | Connector 已确认发送成功。 |
 | `failed` | Connector 不可用、未认证、队列满、超时或拒绝发送；`deliveryError` 保存稳定的安全错误摘要。 |
 
-当需要发送时，后端先以 `pending` 保存运行记录，再调用 Connector，最后以条件更新 `pending -> sent|failed`。`automation:run-completed` 在无投递、`skipped`，或发送进入 `sent/failed` 后只发布最终状态，避免桌面端先显示 pending、随后重复提醒。桌面通知把“运行失败”和“投递失败”都视为需要注意，但运行历史仍分别保留两类结果。
+当需要发送时，后端先以 `pending` 保存运行记录，再调用 Connector，最后以条件更新 `pending -> sent|failed`。发送结果的 SQLite 更新在独立事务中执行，遇到暂时性落盘错误会有限重试；这个重试只更新本地状态，不会再次调用 Connector。`automation:run-completed` 在无投递、`skipped`，或发送进入 `sent/failed` 后只发布最终状态，避免桌面端先显示 pending、随后重复提醒。桌面通知把“运行失败”和“投递失败”都视为需要注意，但运行历史仍分别保留两类结果。
 
 当前发送会对 Connector 未运行、未认证或暂不可用等尚未开始发送的短暂错误最多尝试 10 次，每次间隔 500ms；超时、发送后连接中断等结果未知的错误不会重试，直接进入 `failed`。当前没有指数退避或人工“重新投递”操作。有限重试可以覆盖 Connector 启动窗口，同时避免在发送结果未知时主动制造重复消息；系统仍不承诺 exactly-once。
 

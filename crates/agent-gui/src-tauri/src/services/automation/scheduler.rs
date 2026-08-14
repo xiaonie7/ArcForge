@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::Local;
+use regex::Regex;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use uuid::Uuid;
@@ -22,6 +23,8 @@ use super::types::{
 };
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const DELIVERY_STATUS_UPDATE_ATTEMPTS: usize = 3;
+const DELIVERY_STATUS_UPDATE_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 struct ScheduledJob {
@@ -567,16 +570,38 @@ impl AutomationScheduler {
                 (DeliveryStatus::Failed, Some(safe_error))
             }
         };
-        let store = Arc::clone(&self.store);
-        let execution_id = job.execution_id;
-        let updated = tauri::async_runtime::spawn_blocking(move || {
-            store.update_run_delivery(&execution_id, status, error.as_deref())
-        })
-        .await;
-        match updated {
-            Ok(Err(error)) => eprintln!("update Cron delivery status failed: {error}"),
-            Err(error) => eprintln!("update Cron delivery status join failed: {error}"),
-            _ => {}
+        self.persist_delivery_result(job.execution_id, status, error)
+            .await;
+    }
+
+    async fn persist_delivery_result(
+        &self,
+        execution_id: String,
+        status: DeliveryStatus,
+        error: Option<String>,
+    ) {
+        let mut last_error = None;
+        for attempt in 0..DELIVERY_STATUS_UPDATE_ATTEMPTS {
+            let store = Arc::clone(&self.store);
+            let execution_id = execution_id.clone();
+            let error = error.clone();
+            let updated = tauri::async_runtime::spawn_blocking(move || {
+                store.update_run_delivery(&execution_id, status, error.as_deref())
+            })
+            .await;
+            match updated {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => last_error = Some(error),
+                Err(error) => {
+                    last_error = Some(format!("delivery status update task failed: {error}"));
+                }
+            }
+            if attempt + 1 < DELIVERY_STATUS_UPDATE_ATTEMPTS {
+                tokio::time::sleep(DELIVERY_STATUS_UPDATE_RETRY_DELAY).await;
+            }
+        }
+        if let Some(error) = last_error {
+            eprintln!("update Cron delivery status failed after retries: {error}");
         }
     }
 
@@ -609,7 +634,8 @@ fn format_delivery_markdown(job: &DeliveryJob) -> String {
         job.task_id.trim(),
         DELIVERY_INLINE_MAX_BYTES,
     ));
-    let bounded_output = truncate_utf8_bytes(job.output.trim(), DELIVERY_OUTPUT_INPUT_MAX_BYTES);
+    let safe_output = sanitize_delivery_output(job.output.trim());
+    let bounded_output = truncate_utf8_bytes(&safe_output, DELIVERY_OUTPUT_INPUT_MAX_BYTES);
     let output = truncate_utf8_bytes(
         &break_markdown_fences(&bounded_output),
         DELIVERY_OUTPUT_MAX_BYTES,
@@ -644,6 +670,23 @@ fn escape_markdown_inline(value: &str) -> String {
     escaped
 }
 
+fn sanitize_delivery_output(value: &str) -> String {
+    static ANSI_ESCAPE: OnceLock<Regex> = OnceLock::new();
+    let ansi_escape = ANSI_ESCAPE.get_or_init(|| {
+        Regex::new(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))")
+            .expect("valid ANSI escape regex")
+    });
+    ansi_escape
+        .replace_all(value, "")
+        .chars()
+        .filter(|character| {
+            let code_point = *character as u32;
+            matches!(*character, '\n' | '\r' | '\t')
+                || !(code_point < 32 || (127..=159).contains(&code_point))
+        })
+        .collect()
+}
+
 fn break_markdown_fences(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     let mut consecutive_backticks = 0;
@@ -664,9 +707,12 @@ fn break_markdown_fences(value: &str) -> String {
 }
 
 fn is_transient_delivery_error(error: &str) -> bool {
-    error.contains("not running")
-        || error.contains("not authenticated")
-        || error.contains("unavailable")
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("not running")
+        || normalized.contains("not authenticated")
+        || normalized.contains("not_authenticated")
+        || normalized.contains("unavailable")
+        || normalized.contains("waiting to be sent")
 }
 
 fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
@@ -684,11 +730,14 @@ fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
 }
 
 fn safe_delivery_error(raw_error: &str) -> String {
-    if raw_error.contains("Timed out") || raw_error.contains("timed out") {
+    let normalized = raw_error.to_ascii_lowercase();
+    if normalized.contains("timed out") {
         "WeCom delivery timed out".to_string()
-    } else if raw_error.contains("unavailable")
-        || raw_error.contains("stopped")
-        || raw_error.contains("not running")
+    } else if normalized.contains("unavailable")
+        || normalized.contains("stopped")
+        || normalized.contains("not running")
+        || normalized.contains("not authenticated")
+        || normalized.contains("not_authenticated")
     {
         "WeCom runtime is unavailable".to_string()
     } else {
@@ -873,6 +922,10 @@ mod delivery_tests {
         assert!(is_transient_delivery_error(
             "WeCom Connector is not authenticated"
         ));
+        assert!(is_transient_delivery_error("not_authenticated"));
+        assert!(is_transient_delivery_error(
+            "Too many WeCom messages are waiting to be sent"
+        ));
         assert!(!is_transient_delivery_error(
             "WeCom Connector stopped before acknowledging the message"
         ));
@@ -891,6 +944,19 @@ mod delivery_tests {
         assert!(markdown.contains("Task ID: task\\`id"));
         assert!(markdown.contains("``\\`"));
         assert_eq!(markdown.matches("```").count(), 2);
+    }
+
+    #[test]
+    fn delivery_markdown_strips_ansi_and_forbidden_control_characters() {
+        let markdown = format_delivery_markdown(&job(
+            "\x1b[31mred\x1b[0m\0still here\u{0085}\nnext".to_string(),
+        ));
+        assert!(markdown.contains("redstill here\nnext"));
+        assert!(!markdown.chars().any(|character| {
+            let code_point = character as u32;
+            !matches!(character, '\n' | '\r' | '\t')
+                && (code_point < 32 || (127..=159).contains(&code_point))
+        }));
     }
 
     #[test]

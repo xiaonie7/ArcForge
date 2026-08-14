@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Mutex, Weak};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -979,8 +980,11 @@ impl AutomationStore {
         }
         let error = error.map(|value| summarize_text(value, 500));
         let completed = {
-            let conn = self.lock_conn()?;
-            let updated = conn
+            let mut conn = self.lock_conn()?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|e| format!("begin delivery status update failed: {e}"))?;
+            let updated = tx
                 .execute(
                     "UPDATE automation_cron_runs
                      SET delivery_status = ?2, delivery_error = ?3
@@ -988,18 +992,21 @@ impl AutomationStore {
                     params![execution_id.trim(), status.as_str(), error],
                 )
                 .map_err(|e| format!("update run delivery status failed: {e}"))?;
-            if updated == 0 {
+            let completed = if updated == 0 {
                 None
             } else {
-                db::read_run(&conn, execution_id.trim())?.map(|run| {
-                    let task_name = db::read_cron_task(&conn, &run.task_id)
+                db::read_run(&tx, execution_id.trim())?.map(|run| {
+                    let task_name = db::read_cron_task(&tx, &run.task_id)
                         .ok()
                         .flatten()
                         .map(|task| task.name)
                         .unwrap_or_else(|| run.task_id.clone());
                     (task_name, run)
                 })
-            }
+            };
+            tx.commit()
+                .map_err(|e| format!("commit delivery status update failed: {e}"))?;
+            completed
         };
         if let Some((task_name, run)) = completed {
             self.with_notifier(|notifier| notifier.run_completed(&task_name, &run));
@@ -1200,6 +1207,16 @@ fn reorder_rows(
         .map_err(|e| format!("读取 {table} 数量失败：{e}"))?;
     if count as usize != ids.len() {
         return Err(format!("reorder 必须包含全部 {count} 个条目"));
+    }
+    let mut unique_ids = HashSet::with_capacity(ids.len());
+    for id in ids {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("reorder item ID cannot be empty".to_string());
+        }
+        if !unique_ids.insert(id) {
+            return Err(format!("reorder contains a duplicate item ID: {id}"));
+        }
     }
     for (index, id) in ids.iter().enumerate() {
         let updated = conn
