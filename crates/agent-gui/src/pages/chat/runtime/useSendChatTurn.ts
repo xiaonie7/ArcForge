@@ -9,6 +9,10 @@ import type {
 import { getAutomationState } from "../../../lib/automation";
 import { createHookRunScope } from "../../../lib/automation/hookRunner";
 import {
+  createChannelMcpSettingsSnapshot,
+  normalizeChannelPermissionPolicy,
+} from "../../../lib/channelPermissionPolicy";
+import {
   buildPersistableMessagesFromSnapshot,
   type SuppressedToolTraceSnapshot,
 } from "../../../lib/chat/conversation/chatAbort";
@@ -49,6 +53,7 @@ import {
   getSshProjectHostIds,
   isAgentDevMode,
   isAgentExecutionMode,
+  normalizeSystemToolSelection,
   type SelectedModel,
   type SystemToolId,
   updateMemorySettings,
@@ -77,6 +82,7 @@ import type { PersistConversationParams } from "../history/useConversationHistor
 import type { useChatPageRuntimeStore } from "../hooks/useChatPageRuntimeStore";
 import type { useLiveTranscriptController } from "../hooks/useLiveTranscriptController";
 import { resolveAgentTurnWorkdir } from "./agentWorkdirScope";
+import { createChannelTurnDeadline } from "./channelTurnDeadline";
 import type { createChatRuntimeHost } from "./ChatRuntimeHost";
 import { buildErrorAssistantMessage, formatHookWarningMessage } from "./chatPageRuntime";
 import {
@@ -289,32 +295,51 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
 
     const gatewayBridgeRequest = overrides?.gatewayBridgeRequestOverride ?? null;
     const principal = gatewayBridgeRequest?.principal;
+    const permissionPolicy = gatewayBridgeRequest?.permissionProfile
+      ? normalizeChannelPermissionPolicy(gatewayBridgeRequest.permissionProfile.policy)
+      : null;
     const effectiveExecutionMode =
+      permissionPolicy?.executionMode ??
       overrides?.executionModeOverride ??
       gatewayBridgeRequest?.executionModeOverride ??
       settings.system.executionMode;
     const effectiveIsAgentMode = isAgentExecutionMode(effectiveExecutionMode);
     const workdirResolution = resolveAgentTurnWorkdir({
       isAgentMode: effectiveIsAgentMode,
-      explicitWorkdir: overrides?.workdirOverride,
-      allowEmptyWorkdirOverride: overrides?.allowEmptyWorkdirOverride,
-      gatewayWorkdir: gatewayBridgeRequest?.workdirOverride,
-      unscopedAgent: !gatewayBridgeRequest && allowEmptyAgentWorkdir,
+      explicitWorkdir: permissionPolicy?.workdir ?? overrides?.workdirOverride,
+      allowEmptyWorkdirOverride:
+        permissionPolicy?.allowEmptyWorkdir ?? overrides?.allowEmptyWorkdirOverride,
+      gatewayWorkdir: permissionPolicy ? undefined : gatewayBridgeRequest?.workdirOverride,
+      unscopedAgent: !permissionPolicy && !gatewayBridgeRequest && allowEmptyAgentWorkdir,
       conversationWorkdir: runtimeEntry?.workdir,
       defaultWorkdir: defaultAgentWorkdir,
     });
     const effectiveWorkdir = workdirResolution.workdir;
-    const effectiveSelectedSystemToolIds =
-      overrides?.selectedSystemToolIdsOverride ??
-      gatewayBridgeRequest?.selectedSystemToolIdsOverride ??
-      settings.system.selectedSystemTools;
+    const effectiveSelectedSystemToolIds = permissionPolicy
+      ? normalizeSystemToolSelection(permissionPolicy.allowedSystemTools)
+      : (overrides?.selectedSystemToolIdsOverride ??
+        gatewayBridgeRequest?.selectedSystemToolIdsOverride ??
+        settings.system.selectedSystemTools);
+    const effectiveSelectedSkillNames = permissionPolicy
+      ? permissionPolicy.allowedSkills
+      : selectedSkillNames;
+    const permissionMcpSettings = permissionPolicy
+      ? createChannelMcpSettingsSnapshot(getMcpSettings(), permissionPolicy.allowedMcpServers)
+      : null;
+    const effectiveGetMcpSettings = permissionMcpSettings
+      ? () => permissionMcpSettings
+      : getMcpSettings;
+    const effectiveMemoryEnabled = permissionPolicy?.memoryEnabled ?? true;
     const effectiveProjectPathKey = workspaceProjectPathKey(effectiveWorkdir);
     const effectiveAssociatedSshHostIds = getSshProjectHostIds(
       settings.ssh,
       effectiveProjectPathKey,
     );
     const effectiveIsAgentDevExecutionMode = isAgentDevMode(effectiveExecutionMode);
-    const effectiveSkillsEnabled = settings.skills.enabled && effectiveIsAgentMode;
+    const effectiveSkillsEnabled =
+      settings.skills.enabled &&
+      effectiveIsAgentMode &&
+      (!permissionPolicy || effectiveSelectedSkillNames.length > 0);
     const hasRemoteGatewayTarget =
       settings.remote.enabled &&
       settings.remote.gatewayUrl.trim() !== "" &&
@@ -331,6 +356,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       requestId: gatewayBridgeRequestId,
       workerId: gatewayBridgeWorkerId,
       enabled: Boolean(gatewayBridgeRequest) || hasRemoteGatewayTarget,
+      maxOutputChars: permissionPolicy?.maxOutputChars,
       sendEvent: (requestId, event, options) => {
         const result = queueGatewayBridgeEventForRequest(requestId, event, options);
         void queueGatewayRuntimeSnapshot(conversationId);
@@ -339,6 +365,12 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       resolveErrorConversationId: () =>
         gatewayBridgeRequest?.conversationId ?? currentConversationIdRef.current,
     });
+    if (principal && !permissionPolicy) {
+      const message = "Trusted channel request is missing a permission profile.";
+      await gatewayBridgeEvents.emitError(message, conversationId);
+      gatewayBridgeEvents.close();
+      return false;
+    }
     const updateGatewayBridgeToolStatus = (status: string | null, isCompaction = false) => {
       gatewayBridgeEvents.queueToolStatus(status, isCompaction);
       updateToolStatus(status, transcriptStore);
@@ -362,13 +394,13 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     };
     if (!runtimeEntry) {
       const message = `Conversation runtime not found: ${conversationId}`;
-      gatewayBridgeEvents.emitError(message, conversationId);
+      await gatewayBridgeEvents.emitError(message, conversationId);
       throw new Error(message);
     }
     if (runtimeEntry.isSending) {
       if (gatewayBridgeRequest) {
         const message = "Conversation is already sending.";
-        gatewayBridgeEvents.emitError(message, conversationId);
+        await gatewayBridgeEvents.emitError(message, conversationId);
         gatewayBridgeEvents.close();
       }
       return false;
@@ -379,13 +411,13 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     if (hydratingConversationIdRef.current === conversationId) {
       const message = "当前会话仍在补全完整历史，请稍候。";
       setConversationErrorState(message);
-      gatewayBridgeEvents.emitError(message, conversationId);
+      await gatewayBridgeEvents.emitError(message, conversationId);
       return false;
     }
     if (hydrationFailedConversationIdRef.current === conversationId) {
       const message = "当前会话完整历史加载失败，请重新打开该会话后再继续。";
       setConversationErrorState(message);
-      gatewayBridgeEvents.emitError(message, conversationId);
+      await gatewayBridgeEvents.emitError(message, conversationId);
       return false;
     }
     if (runtimeEntry.compactionStatus.phase !== "idle") {
@@ -406,7 +438,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     } catch (error) {
       const message = asErrorMessage(error, "当前模型配置不可用，请重新选择后重试。");
       setConversationErrorState(message);
-      gatewayBridgeEvents.emitError(message);
+      await gatewayBridgeEvents.emitError(message);
       return false;
     }
 
@@ -414,10 +446,16 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     updateConversationRuntimeEntry(conversationId, (prev) =>
       selectedModelsMatch(prev.selectedModel, selectedModel) ? prev : { ...prev, selectedModel },
     );
-    const runtimeControls =
+    const requestedRuntimeControls =
       gatewayBridgeRequest?.runtimeControlsOverride ??
       overrides?.runtimeControlsOverride ??
       settings.chatRuntimeControls;
+    const runtimeControls = permissionPolicy
+      ? {
+          ...requestedRuntimeControls,
+          nativeWebSearchEnabled: permissionPolicy.nativeWebSearchEnabled,
+        }
+      : requestedRuntimeControls;
     const providerConfig = buildProviderRuntimeConfig(provider, model, runtimeControls);
     if (principal?.channelCommand === "compact") {
       const commandBaseState = runtimeEntry.state;
@@ -522,31 +560,42 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       });
       setConversationAbortController(conversationId, commandCancellation.userStop);
       setConversationSendingState(conversationId, true);
+      const commandDeadline = permissionPolicy
+        ? createChannelTurnDeadline({
+            maxDurationSeconds: permissionPolicy.maxDurationSeconds,
+            onTimeout: (error) => commandCancellation.userStop.abort(error),
+          })
+        : null;
+      const runCommandWithinDeadline = <T>(operation: T | PromiseLike<T>) =>
+        commandDeadline ? commandDeadline.run(operation) : Promise.resolve(operation);
       try {
         if (overrides?.beforeRuntimeStart) {
-          await overrides.beforeRuntimeStart();
+          await runCommandWithinDeadline(overrides.beforeRuntimeStart());
         }
-        const applied = await compaction.maybeCompactPreSend({
-          budgetContext: buildCommandPreparedContext(commandBaseState),
-          force: true,
-        });
-        if (applied && !(await persistCommandState(commandState))) {
+        const applied = await runCommandWithinDeadline(
+          compaction.maybeCompactPreSend({
+            budgetContext: buildCommandPreparedContext(commandBaseState),
+            force: true,
+          }),
+        );
+        if (applied && !(await runCommandWithinDeadline(persistCommandState(commandState)))) {
           throw new Error("压缩后的会话保存失败。");
         }
         if (commandCompactionFailure) {
           throw new Error(commandCompactionFailure);
         }
-        const finalText = applied
-          ? "已压缩当前会话上下文。"
-          : "当前会话暂无可压缩的上下文。";
-        await gatewayBridgeEvents.queueEvent({
-          type: "done",
-          final_text: finalText,
-          conversation_id: conversationId,
-        });
+        const finalText = applied ? "已压缩当前会话上下文。" : "当前会话暂无可压缩的上下文。";
+        await runCommandWithinDeadline(
+          gatewayBridgeEvents.queueEvent({
+            type: "done",
+            final_text: finalText,
+            conversation_id: conversationId,
+          }),
+        );
         gatewayBridgeEvents.close();
         return true;
       } finally {
+        commandDeadline?.clear();
         compaction.unbindTurn();
         setConversationAbortController(conversationId, null);
         setConversationSendingState(conversationId, false);
@@ -628,7 +677,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         const message = asErrorMessage(error, "大段粘贴内容导入附件失败");
         setConversationErrorState(message);
         setErrorMessage(message);
-        gatewayBridgeEvents.emitError(message, conversationId);
+        await gatewayBridgeEvents.emitError(message, conversationId);
         gatewayBridgeEvents.close();
         return false;
       } finally {
@@ -641,7 +690,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     if (!userMessage) {
       if (gatewayBridgeRequest) {
         const message = "Message is required.";
-        gatewayBridgeEvents.emitError(message, conversationId);
+        await gatewayBridgeEvents.emitError(message, conversationId);
         gatewayBridgeEvents.close();
       }
       return false;
@@ -663,6 +712,14 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     // 轮次级取消：会话 abort controller 只注册 userStop 一次；每个 LLM 请求
     // （主请求/压缩摘要/标题任务）各自派生子 scope，杜绝 abort 换代丢停止的窗口。
     const cancellation = createTurnCancellation();
+    const channelDeadline = permissionPolicy
+      ? createChannelTurnDeadline({
+          maxDurationSeconds: permissionPolicy.maxDurationSeconds,
+          onTimeout: (error) => cancellation.userStop.abort(error),
+        })
+      : null;
+    const runWithinChannelDeadline = <T>(operation: T | PromiseLike<T>) =>
+      channelDeadline ? channelDeadline.run(operation) : Promise.resolve(operation);
     const conversationDebugLogger = createStreamDebugLogger({
       enabled: effectiveIsAgentDevExecutionMode,
       conversationId,
@@ -819,7 +876,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       await invoke("gateway_chat_mark_local_started", {
         request_id: gatewayBridgeRequestId,
         conversation_id: conversationId,
-      } as any);
+      });
       localGatewayRunStarted = true;
     }
 
@@ -868,23 +925,43 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         setPendingUploadsForConversation(conversationId, clearedPendingUploads);
       }
     };
+    const failBeforeRuntimeStart = async (error: unknown, fallback: string) => {
+      const message = channelDeadline?.isTimedOut()
+        ? channelDeadline.error.message
+        : asErrorMessage(error, fallback);
+      if (!cancellation.userStop.signal.aborted) {
+        cancellation.userStop.abort(error instanceof Error ? error : new Error(message));
+      }
+      setConversationErrorState(message);
+      await gatewayBridgeEvents.emitError(message, conversationId);
+      gatewayBridgeEvents.close();
+      compaction.unbindTurn();
+      markConversationRunStopped("failed");
+      restoreComposerOnStartFailure();
+      if (titleJobRef.current?.conversationId === conversationId) {
+        titleJobRef.current = null;
+      }
+      channelDeadline?.clear();
+      pruneIdleConversationCaches([conversationId]);
+      requestQueuedChatTurnProcessing(conversationId);
+      return message;
+    };
     if (mirrorsLocalRunToGateway) {
       try {
-        await markLocalGatewayRunStarted();
+        await runWithinChannelDeadline(markLocalGatewayRunStarted());
       } catch (error) {
+        if (channelDeadline?.isTimedOut()) {
+          await failBeforeRuntimeStart(error, "启动远程对话运行超时");
+          return false;
+        }
         console.warn("gateway_chat_mark_local_started failed", error);
       }
     }
     if (overrides?.beforeRuntimeStart) {
       try {
-        await overrides.beforeRuntimeStart();
+        await runWithinChannelDeadline(overrides.beforeRuntimeStart());
       } catch (error) {
-        const message = asErrorMessage(error, "启动远程对话运行失败");
-        setConversationErrorState(message);
-        gatewayBridgeEvents.emitError(message, conversationId);
-        gatewayBridgeEvents.close();
-        markConversationRunStopped("failed");
-        restoreComposerOnStartFailure();
+        await failBeforeRuntimeStart(error, "启动远程对话运行失败");
         return false;
       }
     }
@@ -906,25 +983,24 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       titleLookahead: true,
     });
     if (overrides?.afterInitialHistoryPersist && !overrides.beforeRuntimeStart) {
-      const persisted = await initialPersist;
+      let persisted = false;
+      try {
+        persisted = await runWithinChannelDeadline(initialPersist);
+      } catch (error) {
+        await failBeforeRuntimeStart(error, "历史记录保存失败");
+        return true;
+      }
       if (!persisted) {
-        const message = "历史记录保存失败，已取消回滚与重发。";
-        setConversationErrorState(message);
-        gatewayBridgeEvents.emitError(message, conversationId);
-        gatewayBridgeEvents.close();
-        markConversationRunStopped("failed");
-        restoreComposerOnStartFailure();
+        await failBeforeRuntimeStart(
+          new Error("历史记录保存失败，已取消回滚与重发。"),
+          "历史记录保存失败，已取消回滚与重发。",
+        );
         return true;
       }
       try {
-        await overrides.afterInitialHistoryPersist();
+        await runWithinChannelDeadline(overrides.afterInitialHistoryPersist());
       } catch (error) {
-        const message = asErrorMessage(error, "回滚历史失败");
-        setConversationErrorState(message);
-        gatewayBridgeEvents.emitError(message, conversationId);
-        gatewayBridgeEvents.close();
-        markConversationRunStopped("failed");
-        restoreComposerOnStartFailure();
+        await failBeforeRuntimeStart(error, "回滚历史失败");
         return true;
       }
     } else {
@@ -937,7 +1013,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             return false;
           }
           if (overrides?.afterInitialHistoryPersist) {
-            await overrides.afterInitialHistoryPersist();
+            await runWithinChannelDeadline(overrides.afterInitialHistoryPersist());
           }
           return true;
         })
@@ -948,30 +1024,44 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       void initialPersistConfirmation;
     }
     if (gatewayBridgeRequest || hasRemoteGatewayTarget) {
-      const persisted = await initialPersist.catch((error) => {
+      let persisted = false;
+      try {
+        persisted = await runWithinChannelDeadline(initialPersist);
+      } catch (error) {
+        if (channelDeadline?.isTimedOut()) {
+          await failBeforeRuntimeStart(error, "历史记录保存超时");
+          return true;
+        }
         console.warn("initial conversation history persist before gateway stream failed", error);
-        return false;
-      });
+      }
       if (!persisted) {
         console.warn("gateway stream started before initial user turn was persisted");
       }
     }
-    await gatewayBridgeEvents.queueUserMessage(text, uploadedFiles, {
-      baseMessageRef: overrides?.editResendBaseMessageRef,
-    });
+    try {
+      await runWithinChannelDeadline(
+        gatewayBridgeEvents.queueUserMessage(text, uploadedFiles, {
+          baseMessageRef: overrides?.editResendBaseMessageRef,
+        }),
+      );
+    } catch (error) {
+      await failBeforeRuntimeStart(error, "发送 Gateway 用户消息失败");
+      return true;
+    }
     acknowledgeGatewayRunStarted();
     let skillsPrompt = "";
     let memoryPrompt = "";
     let skillsRootDirForTools = skillsRootDir;
-    let skillAccessPolicyForTools: SkillAccessPolicy | undefined = effectiveSkillsEnabled
-      ? {
-          allowedSkillNames: [],
-          allowedSkillBaseDirs: [],
-          allowSkillInventory: false,
-          allowSkillManagement: false,
-          allowSkillMutation: true,
-        }
-      : undefined;
+    let skillAccessPolicyForTools: SkillAccessPolicy | undefined =
+      permissionPolicy || effectiveSkillsEnabled
+        ? {
+            allowedSkillNames: [],
+            allowedSkillBaseDirs: [],
+            allowSkillInventory: false,
+            allowSkillManagement: false,
+            allowSkillMutation: !principal,
+          }
+        : undefined;
 
     function buildPreparedContext(
       state: ConversationViewState,
@@ -1079,37 +1169,41 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       },
     });
 
-    if (effectiveSkillsEnabled && selectedSkillNames.length > 0) {
+    if (effectiveSkillsEnabled && effectiveSelectedSkillNames.length > 0) {
       let skillsList = availableSkills;
       let rootDir = skillsRootDir;
       let byName = new Map(skillsList.map((skill) => [skill.name, skill]));
-      let missing = selectedSkillNames.filter((name) => !byName.has(name));
+      let missing = effectiveSelectedSkillNames.filter((name) => !byName.has(name));
       if (missing.length > 0) {
-        const fresh = await refreshSkills();
+        let fresh: Awaited<ReturnType<typeof refreshSkills>>;
+        try {
+          fresh = await runWithinChannelDeadline(refreshSkills());
+        } catch (error) {
+          await failBeforeRuntimeStart(error, "刷新 Skills 失败");
+          return true;
+        }
         if (fresh) {
           skillsList = fresh.skills;
           rootDir = fresh.rootDir;
           byName = new Map(skillsList.map((skill) => [skill.name, skill]));
-          missing = selectedSkillNames.filter((name) => !byName.has(name));
+          missing = effectiveSelectedSkillNames.filter((name) => !byName.has(name));
         }
       }
 
       if (missing.length > 0) {
         const message = `找不到以下 Skills：${missing.join(", ")}（请先重新扫描固定 Skills 目录）`;
-        setConversationErrorState(message);
-        gatewayBridgeEvents.emitError(message, conversationId);
-        gatewayBridgeEvents.close();
-        markConversationRunStopped("failed");
-        restoreComposerOnStartFailure();
+        await failBeforeRuntimeStart(new Error(message), message);
         return true;
       }
 
-      const selectedSkills = selectedSkillNames
+      const selectedSkills = effectiveSelectedSkillNames
         .map((name) => byName.get(name))
         .filter((skill): skill is SkillSummary => Boolean(skill));
-      const allowBuiltinSkillManagement = selectedSkills.some(
-        (skill) => skill.name === "skills-creator" || skill.name === "skills-installer",
-      );
+      const allowBuiltinSkillManagement =
+        !principal &&
+        selectedSkills.some(
+          (skill) => skill.name === "skills-creator" || skill.name === "skills-installer",
+        );
       skillsRootDirForTools = rootDir;
       skillAccessPolicyForTools = {
         allowedSkillNames: selectedSkills.map((skill) => skill.name),
@@ -1122,7 +1216,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
           .map((skill) => skill.baseDir),
         allowSkillInventory: true,
         allowSkillManagement: allowBuiltinSkillManagement,
-        allowSkillMutation: true,
+        allowSkillMutation: !principal,
       };
       const explicitSkills = resolveExplicitSkillMentions({
         text,
@@ -1136,15 +1230,23 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       });
     }
 
-    try {
-      memoryPrompt = await buildMemoryOverviewSection(effectiveWorkdir);
-    } catch (error) {
-      console.warn("Failed to build memory overview prompt", error);
-      memoryPrompt = "";
+    if (effectiveMemoryEnabled) {
+      try {
+        memoryPrompt = await runWithinChannelDeadline(buildMemoryOverviewSection(effectiveWorkdir));
+      } catch (error) {
+        if (channelDeadline?.isTimedOut()) {
+          await failBeforeRuntimeStart(error, "读取 Memory 概览超时");
+          return true;
+        }
+        console.warn("Failed to build memory overview prompt", error);
+        memoryPrompt = "";
+      }
     }
 
     const hookScope = createHookRunScope({
-      hooks: getAutomationState().hooks.hooks,
+      // Hooks can execute arbitrary local scripts or HTTP requests and are not
+      // represented by ChannelPermissionPolicy. Trusted channel runs deny them.
+      hooks: principal ? [] : getAutomationState().hooks.hooks,
       conversationId,
       workdir: effectiveWorkdir,
       onWarning: (warning) => {
@@ -1262,7 +1364,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     let gatewayRuntimeFinalState: GatewayRuntimeSnapshotState = "completed";
     try {
       if (effectiveIsAgentMode) {
-        await chatRuntimeHost.runTurn({
+        await runWithinChannelDeadline(chatRuntimeHost.runTurn({
           mode: "agent",
           params: {
             providerId,
@@ -1282,7 +1384,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionModel,
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
-            memoryEnabled: true,
+            memoryEnabled: effectiveMemoryEnabled,
             effectiveWorkdir,
             allowEmptyWorkdir: workdirResolution.allowEmptyWorkdir,
             effectiveSkillsEnabled,
@@ -1290,15 +1392,20 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             skillsRootDir: skillsRootDirForTools,
             skillAccessPolicy: skillAccessPolicyForTools,
             principal,
-            onManagedSkillsChanged: (change) => {
-              enableManagedSkills(change.names);
-            },
+            onManagedSkillsChanged: principal
+              ? undefined
+              : (change) => {
+                  enableManagedSkills(change.names);
+                },
             agentTemplates: settings.agents,
             selectedSystemToolIds: effectiveSelectedSystemToolIds,
-            getMcpSettings,
-            applyMcpOps: (ops) => {
-              setSettings((prev) => applyMcpOpsToAppSettings(prev, ops));
-            },
+            allowedSystemTools: permissionPolicy?.allowedSystemTools,
+            getMcpSettings: effectiveGetMcpSettings,
+            applyMcpOps: permissionPolicy
+              ? undefined
+              : (ops) => {
+                  setSettings((prev) => applyMcpOpsToAppSettings(prev, ops));
+                },
             remoteWebTunnelsEnabled: settings.remote.enableWebTunnels,
             tunnelPublicBaseUrl: settings.remote.gatewayUrl.trim(),
             sshHosts: settings.ssh.hosts,
@@ -1345,9 +1452,9 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             updateConversationRuntimeEntry,
             persistConversationWithHistorySync,
           },
-        });
+        }));
       } else {
-        await chatRuntimeHost.runTurn({
+        await runWithinChannelDeadline(chatRuntimeHost.runTurn({
           mode: "text",
           params: {
             providerId,
@@ -1367,7 +1474,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionModel,
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
-            memoryEnabled: true,
+            memoryEnabled: effectiveMemoryEnabled,
             sessionId,
             conversationId,
             conversationCwd,
@@ -1394,15 +1501,21 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             updateConversationRuntimeEntry,
             persistConversationWithHistorySync,
           },
-        });
+        }));
       }
     } catch (err) {
       const aborted = cancellation.userStop.signal.aborted || isAbortLikeError(err);
-      gatewayRuntimeFinalState = aborted ? "cancelled" : "failed";
-      const remoteErrorMessage = aborted
-        ? "Cancelled"
-        : (err instanceof Error ? err.message : String(err)) || "Request failed";
-      gatewayBridgeEvents.emitError(remoteErrorMessage, conversationId);
+      const permissionTimedOut = channelDeadline?.isTimedOut() === true;
+      gatewayRuntimeFinalState = permissionTimedOut ? "failed" : aborted ? "cancelled" : "failed";
+      const remoteErrorMessage = permissionTimedOut
+        ? channelDeadline.error.message
+        : aborted
+          ? "Cancelled"
+          : (err instanceof Error ? err.message : String(err)) || "Request failed";
+      if (permissionTimedOut) {
+        setConversationErrorState(remoteErrorMessage);
+      }
+      await gatewayBridgeEvents.emitError(remoteErrorMessage, conversationId);
       gatewayBridgeEvents.close();
       if (aborted) {
         hookScope.cancel();
@@ -1421,6 +1534,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         titleJobRef.current = null;
       }
     } finally {
+      channelDeadline?.clear();
       compaction.unbindTurn();
       hookLifecycle.endAgent();
       hookScope.close();

@@ -426,7 +426,8 @@ message ChatCommandAccepted {
   bool deduped = 4;
 }
 
-// ChatCommandUpdate 推送命令的前置阶段结果（bound / queued_in_gui / failed），镜像 session.ChatCommandUpdate。
+// ChatCommandUpdate 推送命令阶段结果。除前置阶段 bound / queued_in_gui / failed 外，
+// durable dedupe 重放 completed / cancelled / unknown 终态。
 message ChatCommandUpdate {
   string run_id = 1;
   string client_request_id = 2;
@@ -434,6 +435,10 @@ message ChatCommandUpdate {
   string phase = 4;
   string error_code = 5;
   string message = 6;
+  // True when the Desktop run had started before this terminal transition.
+  // Clients must preserve the submitted user message in that case even if a
+  // priority command update overtakes the ordered conversation stream.
+  bool run_started = 7;
 }
 
 // ChatSubscriptionReset 通知客户端某会话流已被限流丢弃，需重新订阅（after_seq 断点续传）。

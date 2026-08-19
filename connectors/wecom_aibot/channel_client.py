@@ -35,6 +35,7 @@ from .protocol import (
 )
 
 logger = logging.getLogger(__name__)
+_ACCEPTED_RECONNECT_TIMEOUT_SECONDS = 60.0
 
 ChannelInputHandler = Callable[[Any], Any]
 
@@ -56,6 +57,7 @@ class ChannelResponse:
     run_id: str = ""
     conversation_id: str = ""
     deduped: bool = False
+    canonical_started: bool = False
     text: str = ""
     status: str = ""
     error_code: str = ""
@@ -67,6 +69,16 @@ class ChannelResponse:
     input_resolved_handler: ChannelInputHandler | None = field(default=None, repr=False)
 
 
+class ChannelSubmitInterrupted(ConnectionError):
+    """A transport failure after a submission may have reached Gateway."""
+
+    def __init__(self, response: ChannelResponse):
+        super().__init__(
+            response.message or "ArcForge channel disconnected after acceptance"
+        )
+        self.response = response
+
+
 class ChannelClient:
     def __init__(self, config: ConnectorConfig):
         self.config = config
@@ -74,6 +86,7 @@ class ChannelClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
         self._hello = asyncio.Event()
+        self._connected = asyncio.Event()
         self._connection_closed = asyncio.Event()
         self._connection_error: BaseException | None = None
         self._closed = False
@@ -89,6 +102,7 @@ class ChannelClient:
         self._closed = False
         self._connection_error = None
         self._hello.clear()
+        self._connected.clear()
         self._connection_closed.clear()
         try:
             self._ws = await websockets.connect(
@@ -119,7 +133,10 @@ class ChannelClient:
             await self._send(ChannelClientFrame(request_id=request_id, hello=hello))
             await asyncio.wait_for(self._hello.wait(), timeout=10)
             if self._connection_error is not None:
-                raise RuntimeError(str(self._connection_error)) from self._connection_error
+                raise RuntimeError(
+                    str(self._connection_error)
+                ) from self._connection_error
+            self._connected.set()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -130,6 +147,7 @@ class ChannelClient:
 
     async def close(self) -> None:
         self._closed = True
+        self._connected.clear()
         await self._mark_failed(ConnectionError("ArcForge channel closed"))
         await self._stop_transport()
         self._hello.clear()
@@ -149,34 +167,98 @@ class ChannelClient:
         on_input_request: ChannelInputHandler | None = None,
         on_input_resolved: ChannelInputHandler | None = None,
     ) -> ChannelResponse:
-        if self._closed or self._ws is None or self._connection_error is not None:
-            raise RuntimeError("ArcForge channel is not connected")
         if input_request_handler is not None and on_input_request is not None:
             raise ValueError("input_request_handler and on_input_request are aliases")
         if input_resolved_handler is not None and on_input_resolved is not None:
             raise ValueError("input_resolved_handler and on_input_resolved are aliases")
-        request_id = f"channel-{uuid.uuid4().hex}"
-        response = ChannelResponse(
-            request_id=request_id,
-            input_request_handler=input_request_handler or on_input_request,
-            input_resolved_handler=input_resolved_handler or on_input_resolved,
-        )
-        async with self._responses_lock:
-            self._responses[request_id] = response
-        try:
-            await self._send(
-                ChannelClientFrame(
-                    request_id=request_id,
-                    inbound=inbound,
-                )
+        deadline = asyncio.get_running_loop().time() + timeout
+        accepted_interruption: ChannelSubmitInterrupted | None = None
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                if accepted_interruption is not None:
+                    raise accepted_interruption
+                raise asyncio.TimeoutError
+            if self._closed or self._ws is None or self._connection_error is not None:
+                if accepted_interruption is None:
+                    raise RuntimeError("ArcForge channel is not connected")
+                try:
+                    await asyncio.wait_for(
+                        self._connected.wait(),
+                        timeout=min(remaining, _ACCEPTED_RECONNECT_TIMEOUT_SECONDS),
+                    )
+                except asyncio.TimeoutError:
+                    raise accepted_interruption
+                continue
+
+            request_id = f"channel-{uuid.uuid4().hex}"
+            response = ChannelResponse(
+                request_id=request_id,
+                input_request_handler=input_request_handler or on_input_request,
+                input_resolved_handler=input_resolved_handler or on_input_resolved,
             )
-            await asyncio.wait_for(response.done.wait(), timeout=timeout)
-            if response.failure is not None:
-                raise ConnectionError(response.message or "ArcForge channel disconnected") from response.failure
-            return response
-        finally:
             async with self._responses_lock:
-                self._responses.pop(request_id, None)
+                self._responses[request_id] = response
+            try:
+                await self._send(
+                    ChannelClientFrame(
+                        request_id=request_id,
+                        inbound=inbound,
+                    )
+                )
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                await asyncio.wait_for(response.done.wait(), timeout=remaining)
+                if response.failure is None:
+                    response.canonical_started = bool(
+                        response.canonical_started
+                        or (
+                            accepted_interruption is not None
+                            and accepted_interruption.response.canonical_started
+                        )
+                    )
+                    return response
+                if response.run_id and response.conversation_id:
+                    response.canonical_started = not response.deduped or bool(
+                        accepted_interruption
+                        and accepted_interruption.response.canonical_started
+                    )
+                    accepted_interruption = ChannelSubmitInterrupted(response)
+                    continue
+                # The websocket send completed, so a disconnect before the
+                # accepted frame is an ambiguous acknowledgement: Gateway may
+                # already have durably claimed and dispatched this request.
+                # Reconnect and query the canonical request instead of turning
+                # a command such as /new into a permanent local failure. With
+                # no canonical run id there is nothing useful to query on this
+                # call, so release promptly and let the durable callback inbox
+                # retry the external message id.
+                response.canonical_started = True
+                raise ChannelSubmitInterrupted(response)
+            except asyncio.TimeoutError:
+                if response.run_id and response.conversation_id:
+                    response.canonical_started = not response.deduped or bool(
+                        accepted_interruption
+                        and accepted_interruption.response.canonical_started
+                    )
+                    accepted_interruption = ChannelSubmitInterrupted(response)
+                    continue
+                if accepted_interruption is not None:
+                    raise accepted_interruption
+                # A response timeout after websocket.send completed is the
+                # same ambiguous-ack window as a reader disconnect.
+                response.canonical_started = True
+                raise ChannelSubmitInterrupted(response)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if accepted_interruption is not None:
+                    raise accepted_interruption from exc
+                raise
+            finally:
+                async with self._responses_lock:
+                    self._responses.pop(request_id, None)
 
     async def answer_input(
         self,
@@ -207,7 +289,9 @@ class ChannelClient:
             )
             result = await asyncio.wait_for(waiter, timeout=timeout)
             if result.interaction_id.strip() != normalized_interaction_id:
-                raise RuntimeError("ArcForge returned an input answer for another interaction")
+                raise RuntimeError(
+                    "ArcForge returned an input answer for another interaction"
+                )
             return result
         finally:
             async with self._answer_waiters_lock:
@@ -237,6 +321,7 @@ class ChannelClient:
         if self._connection_error is None:
             self._connection_error = failure
         message = str(self._connection_error) or "ArcForge channel disconnected"
+        self._connected.clear()
         self._hello.set()
         self._connection_closed.set()
         async with self._responses_lock:
@@ -281,7 +366,9 @@ class ChannelClient:
         request_id = frame.request_id.strip()
         if frame.HasField("hello"):
             if not frame.hello.ok:
-                raise RuntimeError(frame.hello.message or "ArcForge channel handshake rejected")
+                raise RuntimeError(
+                    frame.hello.message or "ArcForge channel handshake rejected"
+                )
             self._hello.set()
             return
         if frame.HasField("ping"):
@@ -304,7 +391,10 @@ class ChannelClient:
             if answer_waiter is not None:
                 if not answer_waiter.done():
                     answer_waiter.set_exception(
-                        RuntimeError(frame.local_error.message or "ArcForge rejected the input answer")
+                        RuntimeError(
+                            frame.local_error.message
+                            or "ArcForge rejected the input answer"
+                        )
                     )
                 return
         async with self._responses_lock:
@@ -344,7 +434,9 @@ class ChannelClient:
             self._schedule_input_handler(response.input_request_handler, input_request)
         elif frame.HasField("input_resolved"):
             input_resolved: ChannelInputResolved = frame.input_resolved
-            self._schedule_input_handler(response.input_resolved_handler, input_resolved)
+            self._schedule_input_handler(
+                response.input_resolved_handler, input_resolved
+            )
         elif frame.HasField("final"):
             final: ChannelFinal = frame.final
             response.status = final.status
@@ -357,7 +449,9 @@ class ChannelClient:
             response.message = frame.local_error.message
             response.done.set()
 
-    def _schedule_input_handler(self, handler: ChannelInputHandler | None, payload: Any) -> None:
+    def _schedule_input_handler(
+        self, handler: ChannelInputHandler | None, payload: Any
+    ) -> None:
         if handler is None:
             return
         copied_payload = _copy_message(payload)
@@ -372,7 +466,9 @@ class ChannelClient:
             except Exception:
                 logger.exception("ArcForge channel input callback failed")
 
-        task = asyncio.create_task(invoke_handler(), name="arcforge-channel-input-callback")
+        task = asyncio.create_task(
+            invoke_handler(), name="arcforge-channel-input-callback"
+        )
         self._callback_tasks.add(task)
         task.add_done_callback(self._callback_tasks.discard)
 
@@ -395,7 +491,9 @@ def _normalize_input_selections(selections: Iterable[Any]) -> list[Any]:
         elif isinstance(selection, (tuple, list)) and len(selection) == 2:
             question_id, option_id = selection
         else:
-            raise TypeError("each input selection must contain question_id and option_id")
+            raise TypeError(
+                "each input selection must contain question_id and option_id"
+            )
         question_id = str(question_id).strip()
         option_id = str(option_id).strip()
         if not question_id or not option_id:

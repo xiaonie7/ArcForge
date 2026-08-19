@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
-
+import { type ChannelPermissionProfile, channelControl } from "../../../lib/channelControl";
 import type { HistoryMessageRef } from "../../../lib/chat/conversation/conversationState";
 import {
   derivePrincipalConversationId,
@@ -12,6 +12,8 @@ import { normalizeChatRuntimeControls, normalizeSystemToolSelection } from "../.
 import { createUuid } from "../../../lib/shared/id";
 import {
   type ActiveGatewayBridgeRequest,
+  type ChannelPermissionProfileSnapshot,
+  freezeChannelPermissionProfile,
   type GatewayBridgeRuntimeRefs,
   type GatewayChatCancelEvent,
   type GatewayChatClaimedRequest,
@@ -36,6 +38,7 @@ type UseGatewayBridgeListenersParams = GatewayBridgeRuntimeRefs & {
     claimed: GatewayChatClaimedRequest,
     conversationId: string,
     principal?: PrincipalContext,
+    permissionProfile?: ChannelPermissionProfileSnapshot,
   ) => Promise<boolean>;
   isConversationRunning: (conversationId: string) => boolean;
   getConversationAbortController: (conversationId: string) => AbortController | null;
@@ -338,6 +341,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
       claimed: GatewayChatClaimedRequest,
       conversationId: string,
       principal?: PrincipalContext,
+      permissionProfile?: ChannelPermissionProfileSnapshot,
     ) => {
       const requestId = claimed.requestId.trim();
       if (!requestId) return false;
@@ -345,6 +349,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
         claimed,
         conversationId,
         principal,
+        permissionProfile,
       );
       if (!queued) return false;
       await invoke("gateway_chat_mark_queued_in_gui", {
@@ -367,6 +372,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
       let resolvedConversationId = targetConversationId;
       let gatewayBridgeRequest: ActiveGatewayBridgeRequest | null = null;
       let principal: PrincipalContext | undefined;
+      let permissionProfile: ChannelPermissionProfileSnapshot | undefined;
       let claimedRequest = false;
 
       if (!requestId) {
@@ -382,6 +388,53 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
         } catch (error) {
           const message = asErrorMessage(error, "Invalid trusted channel identity.");
           failClaimedRequest(requestId, targetConversationId, "invalid_channel_identity", message);
+          stopHeartbeat(requestId);
+          return;
+        }
+        let resolvedPermissionProfile: ChannelPermissionProfile | null;
+        try {
+          resolvedPermissionProfile = await channelControl.resolveEffectiveProfile({
+            installationId: principal.installationId,
+            userId: principal.externalUserId,
+            conversationId: principal.chatType === "group" ? principal.chatId : undefined,
+          });
+        } catch (error) {
+          const message = asErrorMessage(
+            error,
+            "Failed to resolve the trusted channel permission profile.",
+          );
+          failClaimedRequest(
+            requestId,
+            targetConversationId,
+            "channel_permission_resolution_failed",
+            message,
+          );
+          stopHeartbeat(requestId);
+          return;
+        }
+        if (!resolvedPermissionProfile) {
+          failClaimedRequest(
+            requestId,
+            targetConversationId,
+            "channel_permission_denied",
+            "No enabled permission profile is bound to this channel identity.",
+          );
+          stopHeartbeat(requestId);
+          return;
+        }
+        try {
+          permissionProfile = freezeChannelPermissionProfile(resolvedPermissionProfile);
+        } catch (error) {
+          const message = asErrorMessage(
+            error,
+            "The trusted channel permission profile is invalid.",
+          );
+          failClaimedRequest(
+            requestId,
+            targetConversationId,
+            "channel_permission_invalid",
+            message,
+          );
           stopHeartbeat(requestId);
           return;
         }
@@ -458,7 +511,9 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
         if (claimResult === "conversation_busy") {
           if (targetConversationId) {
             try {
-              if (await markQueuedInGui(claimed, targetConversationId, principal)) {
+              if (
+                await markQueuedInGui(claimed, targetConversationId, principal, permissionProfile)
+              ) {
                 return;
               }
             } catch (error) {
@@ -526,7 +581,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
           if (principal?.channelCommand === "new") {
             throw new Error(`Conversation is already running: ${targetConversationId}`);
           }
-          if (await markQueuedInGui(claimed, targetConversationId, principal)) {
+          if (await markQueuedInGui(claimed, targetConversationId, principal, permissionProfile)) {
             return;
           }
           return;
@@ -564,6 +619,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
               claimed,
               runningRequest?.conversationId || resolvedConversationId,
               principal,
+              permissionProfile,
             )
           ) {
             return;
@@ -613,6 +669,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
             ? undefined
             : normalizeSystemToolSelection(payload.selectedSystemTools),
           principal,
+          permissionProfile,
         });
         const markRuntimeStarted = async () => {
           await invoke("gateway_chat_mark_started", {

@@ -88,5 +88,6 @@ func chatCommandUpdate(update session.ChatCommandUpdate) *gatewayv2.ChatCommandU
 		Phase:           update.Phase,
 		ErrorCode:       update.ErrorCode,
 		Message:         update.Message,
+		RunStarted:      update.RunStarted,
 	}
 }

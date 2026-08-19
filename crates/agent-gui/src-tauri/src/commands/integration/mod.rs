@@ -1,3 +1,4 @@
+pub mod channel_control;
 pub mod database;
 pub mod gateway;
 pub mod mcp;

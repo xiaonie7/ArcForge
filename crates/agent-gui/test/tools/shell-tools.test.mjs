@@ -838,6 +838,7 @@ test("Bash tool allows enabled Skill scripts by direct absolute path without cd"
     skillAccessPolicy: {
       allowedSkillNames: ["metaphysics-steward"],
       allowedSkillBaseDirs: ["metaphysics-steward"],
+      allowSkillMutation: true,
     },
   });
 
@@ -857,6 +858,173 @@ test("Bash tool allows enabled Skill scripts by direct absolute path without cd"
   assert.equal(calls.length, 1);
   assert.equal(calls[0].args.workdir, "/repo");
   assert.equal(calls[0].args.command, command);
+});
+
+test("Bash blocks direct Skill execution when the restrictive policy denies mutation", async () => {
+  const calls = [];
+  const loader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          throw new Error("unexpected invoke");
+        },
+      },
+    },
+  });
+
+  const { createShellTools } = loader.loadModule("src/lib/tools/shellTools.ts");
+  const bundle = createShellTools({
+    workdir: "/repo",
+    providerId: "claude_code",
+    skillsRootEnabled: true,
+    skillsRootDir: "/Users/me/.arcforge/skills",
+    skillAccessPolicy: {
+      allowedSkillNames: ["review"],
+      allowedSkillBaseDirs: ["review"],
+      allowSkillMutation: false,
+    },
+  });
+
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "blocked-readonly-skill-bash",
+    name: "Bash",
+    arguments: {
+      command: "python3 /Users/me/.arcforge/skills/review/scripts/review.py",
+      timeout_ms: 1000,
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /Bash command is blocked/);
+  assert.match(result.content[0].text, /is not writable in this conversation/);
+  assert.deepEqual(calls, []);
+});
+
+test("Bash empty Skill allowlist rejects direct absolute Skill execution", async () => {
+  const calls = [];
+  const loader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          throw new Error("unexpected invoke");
+        },
+      },
+    },
+  });
+
+  const { createShellTools } = loader.loadModule("src/lib/tools/shellTools.ts");
+  const bundle = createShellTools({
+    workdir: "/repo",
+    providerId: "claude_code",
+    skillsRootEnabled: false,
+    skillsRootDir: "/Users/me/.arcforge/skills",
+    skillAccessPolicy: {
+      allowedSkillNames: [],
+      allowedSkillBaseDirs: [],
+      allowSkillMutation: false,
+    },
+  });
+
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "blocked-empty-skill-allowlist",
+    name: "Bash",
+    arguments: {
+      command: "python3 /Users/me/.arcforge/skills/review/scripts/review.py",
+      timeout_ms: 1000,
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /review.*is not enabled/);
+  assert.deepEqual(calls, []);
+});
+
+test("ManagedProcess applies the same read-only Skill policy before start", async () => {
+  const calls = [];
+  const loader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          throw new Error("unexpected invoke");
+        },
+      },
+    },
+  });
+
+  const { createShellTools } = loader.loadModule("src/lib/tools/shellTools.ts");
+  const bundle = createShellTools({
+    workdir: "/repo",
+    providerId: "claude_code",
+    skillsRootEnabled: true,
+    skillsRootDir: "/Users/me/.arcforge/skills",
+    skillAccessPolicy: {
+      allowedSkillNames: ["review"],
+      allowedSkillBaseDirs: ["review"],
+      allowSkillMutation: false,
+    },
+  });
+
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "blocked-readonly-skill-managed-process",
+    name: "ManagedProcess",
+    arguments: {
+      action: "start",
+      cwd: "skill://review/scripts",
+      command: "python3 review_server.py",
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /ManagedProcess command is blocked/);
+  assert.match(result.content[0].text, /is not writable in this conversation/);
+  assert.deepEqual(calls, []);
+});
+
+test("ManagedProcess empty Skill allowlist rejects direct absolute Skill execution", async () => {
+  const calls = [];
+  const loader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          throw new Error("unexpected invoke");
+        },
+      },
+    },
+  });
+
+  const { createShellTools } = loader.loadModule("src/lib/tools/shellTools.ts");
+  const bundle = createShellTools({
+    workdir: "/repo",
+    providerId: "claude_code",
+    skillsRootEnabled: false,
+    skillsRootDir: "/Users/me/.arcforge/skills",
+    skillAccessPolicy: {
+      allowedSkillNames: [],
+      allowedSkillBaseDirs: [],
+      allowSkillMutation: false,
+    },
+  });
+
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "blocked-empty-skill-managed-process",
+    name: "ManagedProcess",
+    arguments: {
+      action: "start",
+      command: "python3 /Users/me/.arcforge/skills/review/scripts/review_server.py",
+    },
+  });
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /review.*is not enabled/);
+  assert.deepEqual(calls, []);
 });
 
 test("Bash tool enforces enabled Skill allowlist for skill cwd", async () => {

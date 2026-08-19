@@ -39,6 +39,16 @@ def _desktop_db_path() -> Path | None:
     return Path(home).expanduser() / "config.sqlite"
 
 
+def _state_db_path() -> Path:
+    explicit = _env("ARCFORGE_CHANNEL_STATE_DB")
+    if explicit:
+        return Path(explicit).expanduser()
+    home = _env("ARCFORGE_HOME") or _env("LIVEAGENT_HOME")
+    if not home:
+        home = str(Path.home() / ".arcforge")
+    return Path(home).expanduser() / "channel-state" / "wecom-state.sqlite3"
+
+
 def _read_desktop_settings(path: Path | None) -> dict[str, object]:
     if path is None or not path.is_file():
         return {}
@@ -109,6 +119,7 @@ class ConnectorConfig:
     max_file_bytes: int = 20 * 1024 * 1024
     dedupe_ttl_seconds: int = 24 * 60 * 60
     delta_interval_seconds: float = 0.12
+    state_db_path: str = ""
 
 
 def load_config() -> ConnectorConfig:
@@ -170,4 +181,5 @@ def load_config() -> ConnectorConfig:
         ),
         dedupe_ttl_seconds=max(60, int(_env("ARCFORGE_GATEWAY_CHANNEL_DEDUPE_TTL_SECONDS", "86400"))),
         delta_interval_seconds=max(0.02, float(_env("ARCFORGE_GATEWAY_CHANNEL_DELTA_INTERVAL_SECONDS", "0.12"))),
+        state_db_path=str(_state_db_path()),
     )

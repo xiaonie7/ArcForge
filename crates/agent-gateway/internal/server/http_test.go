@@ -28,7 +28,7 @@ func TestNewHTTPServerServesRootWithoutRedirect(t *testing.T) {
 	if location := rec.Header().Get("Location"); location != "" {
 		t.Fatalf("expected no redirect location, got %q", location)
 	}
-	if !strings.Contains(rec.Body.String(), "<title>ArcForge Gateway</title>") {
+	if !strings.Contains(rec.Body.String(), "<title>ArcForge</title>") {
 		t.Fatalf("expected WebUI index.html, got body %q", rec.Body.String())
 	}
 	if cacheControl := rec.Header().Get("Cache-Control"); !strings.Contains(cacheControl, "no-store") {
@@ -49,7 +49,7 @@ func TestNewHTTPServerServesSpaFallbackWithoutRedirect(t *testing.T) {
 	if location := rec.Header().Get("Location"); location != "" {
 		t.Fatalf("expected no redirect location, got %q", location)
 	}
-	if !strings.Contains(rec.Body.String(), "<title>ArcForge Gateway</title>") {
+	if !strings.Contains(rec.Body.String(), "<title>ArcForge</title>") {
 		t.Fatalf("expected WebUI index.html, got body %q", rec.Body.String())
 	}
 }
@@ -69,7 +69,7 @@ func TestNewHTTPServerDoesNotFallbackMissingStaticAssetsToIndex(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("%s status = %d, want %d", target, rec.Code, http.StatusNotFound)
 		}
-		if strings.Contains(rec.Body.String(), "<title>ArcForge Gateway</title>") {
+		if strings.Contains(rec.Body.String(), "<title>ArcForge</title>") {
 			t.Fatalf("%s returned SPA index fallback for a missing static asset", target)
 		}
 		if contentType := rec.Header().Get("Content-Type"); strings.Contains(contentType, "text/html") {

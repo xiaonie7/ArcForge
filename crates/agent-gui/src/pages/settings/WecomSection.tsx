@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Bot,
@@ -27,6 +27,7 @@ import { Textarea } from "../../components/ui/textarea";
 import { useLocale } from "../../i18n";
 import type { AppSettings, WecomGatewayMode, WecomSettings } from "../../lib/settings";
 import { isSupportedGatewayUrl } from "../../lib/settings/normalize";
+import { ensureWecomInstallationDefault } from "../../lib/wecomPermissionProfile";
 import { AgentActivationSwitch } from "./shared";
 import type { SettingsSectionProps } from "./types";
 
@@ -194,6 +195,10 @@ export function WecomSection(props: WecomSectionProps) {
   const [channelTokenDraft, setChannelTokenDraft] = useState("");
   const [savingCredentials, setSavingCredentials] = useState(false);
   const [credentialError, setCredentialError] = useState<string | null>(null);
+  const [activating, setActivating] = useState(false);
+  const activatingRef = useRef(false);
+  const defaultProfileEnsuredRef = useRef(false);
+  const [activationError, setActivationError] = useState<string | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<WecomRuntimeStatus | null>(null);
   const [runtimeLoading, setRuntimeLoading] = useState(true);
   const [runtimeActionError, setRuntimeActionError] = useState<string | null>(null);
@@ -415,8 +420,40 @@ export function WecomSection(props: WecomSectionProps) {
     if (element instanceof HTMLInputElement) element.focus();
   }, [missingConfiguration, onOpenRemote]);
 
-  const handleActivationToggle = useCallback(() => {
+  const ensureInstallationDefaultForCurrentSettings = useCallback(async () => {
+    await ensureWecomInstallationDefault(settings);
+  }, [settings]);
+
+  useEffect(() => {
+    if (
+      !settings.wecom.enabled ||
+      !connectorReady ||
+      defaultProfileEnsuredRef.current ||
+      activatingRef.current
+    ) {
+      return;
+    }
+    activatingRef.current = true;
+    setActivating(true);
+    setActivationError(null);
+    void ensureInstallationDefaultForCurrentSettings()
+      .then(() => {
+        defaultProfileEnsuredRef.current = true;
+      })
+      .catch((error) => {
+        setActivationError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        activatingRef.current = false;
+        setActivating(false);
+      });
+  }, [connectorReady, ensureInstallationDefaultForCurrentSettings, settings.wecom.enabled]);
+
+  const handleActivationToggle = useCallback(async () => {
+    if (activatingRef.current) return;
     if (settings.wecom.enabled) {
+      defaultProfileEnsuredRef.current = false;
+      setActivationError(null);
       updateWecomSettings(setSettings, { enabled: false });
       return;
     }
@@ -424,8 +461,27 @@ export function WecomSection(props: WecomSectionProps) {
       focusMissingConfiguration();
       return;
     }
-    updateWecomSettings(setSettings, { enabled: true });
-  }, [connectorReady, focusMissingConfiguration, setSettings, settings.wecom.enabled]);
+
+    activatingRef.current = true;
+    setActivating(true);
+    setActivationError(null);
+    try {
+      await ensureInstallationDefaultForCurrentSettings();
+      defaultProfileEnsuredRef.current = true;
+      updateWecomSettings(setSettings, { enabled: true });
+    } catch (error) {
+      setActivationError(error instanceof Error ? error.message : String(error));
+    } finally {
+      activatingRef.current = false;
+      setActivating(false);
+    }
+  }, [
+    connectorReady,
+    ensureInstallationDefaultForCurrentSettings,
+    focusMissingConfiguration,
+    setSettings,
+    settings.wecom.enabled,
+  ]);
 
   const saveCredentials = useCallback(async () => {
     const secretUpdate = secretDraft.trim();
@@ -510,6 +566,7 @@ export function WecomSection(props: WecomSectionProps) {
           </button>
           <AgentActivationSwitch
             checked={settings.wecom.enabled}
+            disabled={activating}
             title={
               settings.wecom.enabled
                 ? t("settings.wecomDisable")
@@ -519,8 +576,17 @@ export function WecomSection(props: WecomSectionProps) {
             }
             onToggle={handleActivationToggle}
           />
+          {activating ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+          ) : null}
         </div>
       </div>
+
+      {activationError ? (
+        <p className="whitespace-pre-wrap break-words rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          {activationError}
+        </p>
+      ) : null}
 
       {
         <div className="space-y-4 rounded-xl border border-border/60 bg-card p-5">

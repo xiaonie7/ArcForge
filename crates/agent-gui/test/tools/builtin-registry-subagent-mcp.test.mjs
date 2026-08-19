@@ -33,6 +33,22 @@ const DOCS_SERVER = {
   env: {},
 };
 
+const WECOM_PRINCIPAL = {
+  principalId: "wecom:user-1",
+  channel: "wecom",
+  tenantId: "tenant-1",
+  botId: "bot-1",
+  externalUserId: "user-1",
+  chatId: "",
+  chatType: "direct",
+  externalMessageId: "message-1",
+  connectorId: "connector-1",
+  channelSessionId: "session-1",
+  channelCommand: "",
+  authTime: 1_700_000_000_000,
+  requestId: "request-1",
+};
+
 function createRegistryHarness() {
   const runnerCalls = [];
   const listedServerIds = [];
@@ -145,7 +161,15 @@ function createRegistryHarness() {
 
 async function buildRegistry(
   harness,
-  { withSubagentRuntime, storeIpc, workspaceAccess, principal } = {},
+  {
+    withSubagentRuntime,
+    storeIpc,
+    workspaceAccess,
+    principal,
+    allowedSystemTools,
+    memoryEnabled,
+    selectedSystemToolIds = [],
+  } = {},
 ) {
   const { loader } = harness;
   const { buildBuiltinToolRegistry } = loader.loadModule("src/lib/tools/builtinRegistry.ts");
@@ -159,7 +183,9 @@ async function buildRegistry(
     runtimeScope: "chat",
     workspaceAccess,
     principal,
-    selectedSystemToolIds: [],
+    selectedSystemToolIds,
+    allowedSystemTools,
+    memoryEnabled,
     getMcpSettings: () => mcpSettingsHolder.value,
     remoteWebTunnelsEnabled: true,
     tunnelProjectPathKey: "/tmp/arcforge-subagent-registry-test",
@@ -244,30 +270,19 @@ test("registry with a subagent runtime exposes Agent and the parent SendMessage"
   assert.ok(registry.hasTool("agent"));
 });
 
-test("a WeCom principal receives the same full tool registry as desktop chat", async () => {
+test("a WeCom principal cannot access desktop MCP or automation management", async () => {
   const desktop = await buildRegistry(createRegistryHarness(), { withSubagentRuntime: true });
   const wecom = await buildRegistry(createRegistryHarness(), {
     withSubagentRuntime: true,
-    principal: {
-      principalId: "wecom:user-1",
-      channel: "wecom",
-      tenantId: "tenant-1",
-      botId: "bot-1",
-      externalUserId: "user-1",
-      chatId: "",
-      chatType: "direct",
-      externalMessageId: "message-1",
-      connectorId: "connector-1",
-      channelSessionId: "session-1",
-      channelCommand: "",
-      authTime: 1_700_000_000_000,
-      requestId: "request-1",
-    },
+    principal: WECOM_PRINCIPAL,
   });
 
   const desktopNames = desktop.registry.tools.map((tool) => tool.name);
   const wecomNames = wecom.registry.tools.map((tool) => tool.name);
-  assert.deepEqual(wecomNames, desktopNames);
+  assert.ok(desktopNames.includes("McpManager"));
+  assert.ok(!wecomNames.includes("McpManager"));
+  assert.ok(desktopNames.includes("CronTaskManager"));
+  assert.ok(!wecomNames.includes("CronTaskManager"));
   for (const name of [
     "Read",
     "Write",
@@ -275,8 +290,6 @@ test("a WeCom principal receives the same full tool registry as desktop chat", a
     "DatabaseExecute",
     "MemoryManager",
     "SkillsManager",
-    "McpManager",
-    "CronTaskManager",
     "TunnelManager",
     "SSHManager",
     "ReadTerminal",
@@ -285,6 +298,61 @@ test("a WeCom principal receives the same full tool registry as desktop chat", a
   ]) {
     assert.ok(wecomNames.includes(name), `${name} must remain available to WeCom`);
   }
+});
+
+test("an empty channel system allowlist cannot recover the MCP manager escape hatch", async () => {
+  const { registry } = await buildRegistry(createRegistryHarness(), {
+    withSubagentRuntime: true,
+    principal: WECOM_PRINCIPAL,
+    allowedSystemTools: [],
+    selectedSystemToolIds: ["http_get_test"],
+  });
+  const names = registry.tools.map((tool) => tool.name);
+
+  for (const denied of [
+    "Read",
+    "Write",
+    "Bash",
+    "DatabaseQuery",
+    "CronTaskManager",
+    "Agent",
+    "AskUserQuestion",
+    "HttpGetTest",
+  ]) {
+    assert.ok(!names.includes(denied), `${denied} must be denied`);
+  }
+  for (const independentlyControlled of [
+    "SkillsManager",
+    "MemoryManager",
+    "mcp_docs_search",
+  ]) {
+    assert.ok(names.includes(independentlyControlled), `${independentlyControlled} has its own gate`);
+  }
+  assert.ok(!names.includes("McpManager"));
+});
+
+test("channel system allowlist accepts catalog ids, runtime groups, and custom ids", async () => {
+  const { registry } = await buildRegistry(createRegistryHarness(), {
+    allowedSystemTools: ["read", "office", "http_get_test"],
+    selectedSystemToolIds: ["http_get_test"],
+  });
+  const names = registry.tools.map((tool) => tool.name);
+
+  assert.ok(names.includes("Read"));
+  assert.ok(names.includes("OfficeRuntime"));
+  assert.ok(names.includes("SpreadsheetCode"));
+  assert.ok(names.includes("HttpGetTest"));
+  assert.ok(!names.includes("Write"));
+  assert.ok(!names.includes("Bash"));
+});
+
+test("memoryEnabled false removes MemoryManager regardless of system allowlist", async () => {
+  const { registry } = await buildRegistry(createRegistryHarness(), {
+    allowedSystemTools: ["memory_manager"],
+    memoryEnabled: false,
+  });
+
+  assert.equal(registry.hasTool("MemoryManager"), false);
 });
 
 test("workspaceAccess none keeps resource tools but excludes every workdir-bound surface", async () => {

@@ -542,6 +542,278 @@ fn run_retention_prunes_old_rows() {
 }
 
 #[test]
+fn orphaned_delivery_outbox_pruning_is_bounded() {
+    let conn = rusqlite::Connection::open_in_memory().expect("open sqlite");
+    db::ensure_schema(&conn).expect("ensure schema");
+    crate::services::channel_control::initialize_schema(&conn)
+        .expect("ensure channel delivery schema");
+    conn.execute(
+        "INSERT INTO channel_delivery_targets(
+           id,channel,installation_id,external_target_id,target_type,display_name,
+           enabled,validation_status,revision,created_at,updated_at
+         ) VALUES('target-1','wecom','installation-1','room-1','group','',1,'valid',1,0,0)",
+        [],
+    )
+    .expect("insert target");
+    conn.execute(
+        "WITH RECURSIVE seq(n) AS (
+           SELECT 0 UNION ALL SELECT n + 1 FROM seq WHERE n < ?1
+         ) INSERT INTO channel_delivery_outbox(
+           id,target_id,run_id,idempotency_key,body,status,created_at,updated_at
+         ) SELECT printf('outbox-%d',n),'target-1',printf('missing-run-%d',n),
+           printf('key-%d',n),'body','sent',n,n FROM seq",
+        rusqlite::params![db::DELIVERY_OUTBOX_PRUNE_BATCH_SIZE as i64],
+    )
+    .expect("insert orphan outbox rows");
+
+    assert_eq!(
+        db::prune_orphaned_delivery_outbox(&conn).expect("first prune"),
+        db::DELIVERY_OUTBOX_PRUNE_BATCH_SIZE
+    );
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM channel_delivery_outbox", [], |row| {
+            row.get(0)
+        })
+        .expect("count after first prune");
+    assert_eq!(remaining, 1);
+    assert_eq!(
+        db::prune_orphaned_delivery_outbox(&conn).expect("second prune"),
+        1
+    );
+}
+
+#[test]
+fn run_cleanup_preserves_pending_delivery_until_outbox_is_terminal() {
+    let (store, task) = store_with_task(AutomationOp::Create {
+        item: json!({
+            "id": "retained-delivery",
+            "name": "Retained delivery",
+            "cron": "0 * * * * *",
+            "enabled": true,
+            "type": "bash",
+            "script": "echo hello",
+            "delivery": {
+                "channel": "wecom",
+                "targetId": "retention-room",
+                "onlyOn": "always"
+            }
+        }),
+    });
+    store
+        .configure_wecom_installation_for_test("bot-1", "tenant-1", "wecom-desktop")
+        .expect("configure WeCom installation");
+    let pending_id = store
+        .record_completed_run_with_delivery(
+            CompletedRun {
+                task_id: task.id.clone(),
+                success: true,
+                started_at: db::now_ms() - 1_000_000,
+                duration_ms: 1,
+                exit_code: Some(0),
+                output: "deliver me".to_string(),
+                counted: false,
+            },
+            task.delivery.clone(),
+            Some(DeliveryStatus::Pending),
+            None,
+        )
+        .expect("record pending delivery");
+
+    for index in 0..(db::RUN_RETENTION_PER_TASK + 5) {
+        store
+            .record_completed_run(CompletedRun {
+                task_id: task.id.clone(),
+                success: true,
+                started_at: db::now_ms() + index as i64,
+                duration_ms: 1,
+                exit_code: Some(0),
+                output: format!("newer run {index}"),
+                counted: false,
+            })
+            .expect("record newer run");
+    }
+    assert!(store
+        .list_runs(&task.id, 500)
+        .expect("runs after retention")
+        .iter()
+        .any(|run| run.id == pending_id));
+
+    store.clear_runs(&task.id).expect("clear completed history");
+    let retained = store.list_runs(&task.id, 10).expect("retained pending run");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].id, pending_id);
+
+    let claimed = store
+        .claim_delivery_for_run(&pending_id)
+        .expect("claim retained delivery")
+        .expect("prepared retained delivery");
+    store
+        .finish_delivery(&pending_id, &claimed.outbox.id, "sent", None)
+        .expect("finish retained delivery");
+    store.clear_runs(&task.id).expect("clear terminal history");
+    assert!(store
+        .list_runs(&task.id, 10)
+        .expect("empty history")
+        .is_empty());
+    assert_eq!(
+        store
+            .delivery_outbox_count_for_test()
+            .expect("outbox count"),
+        0
+    );
+}
+
+#[test]
+fn rejected_delivery_does_not_rollback_completed_or_expired_runs() {
+    let (store, task) = store_with_task(AutomationOp::Create {
+        item: json!({
+            "id": "rejected-delivery",
+            "name": "Rejected delivery",
+            "cron": "0 * * * * *",
+            "enabled": true,
+            "type": "prompt",
+            "prompt": "Summarize the repo",
+            "selectedModel": { "customProviderId": "provider-a", "model": "gpt-5" },
+            "delivery": {
+                "channel": "wecom",
+                "targetId": "target_missing",
+                "onlyOn": "always"
+            }
+        }),
+    });
+    store
+        .configure_wecom_installation_for_test("bot-1", "tenant-1", "wecom-desktop")
+        .expect("configure WeCom installation");
+
+    store
+        .queue_prompt_run(&task, "", false)
+        .expect("queue completed run");
+    let completed_claim = store
+        .claim_prompt_runs()
+        .expect("claim completed run")
+        .remove(0);
+    let (response, delivery) = store
+        .complete_prompt_run_with_delivery(CompletePromptRunInput {
+            execution_id: completed_claim.execution_id.clone(),
+            success: true,
+            duration_ms: 10,
+            output: "done".to_string(),
+        })
+        .expect("terminal run must commit even when delivery is rejected");
+    assert_eq!(response.status, PromptCompletionStatus::Completed);
+    assert!(delivery.is_none());
+
+    store
+        .queue_prompt_run(&task, "", false)
+        .expect("queue expired run");
+    assert_eq!(
+        store.recover_interrupted_prompt_runs().expect("expire run"),
+        1
+    );
+    let runs = store.list_runs(&task.id, 10).expect("terminal runs");
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().any(|run| run.state == RunState::Done));
+    assert!(runs.iter().any(|run| run.state == RunState::Expired));
+    assert!(runs.iter().all(|run| {
+        run.delivery_status == Some(DeliveryStatus::Failed)
+            && run
+                .delivery_error
+                .as_deref()
+                .is_some_and(|error| error.contains("not registered"))
+    }));
+    assert_eq!(
+        store
+            .delivery_outbox_count_for_test()
+            .expect("outbox count"),
+        0
+    );
+}
+
+#[test]
+fn registered_target_from_another_installation_is_rejected_without_losing_run() {
+    let (store, task) = store_with_task(AutomationOp::Create {
+        item: json!({
+            "id": "installation-bound-delivery",
+            "name": "Installation bound delivery",
+            "cron": "0 * * * * *",
+            "enabled": true,
+            "type": "bash",
+            "script": "echo hello",
+            "delivery": {
+                "channel": "wecom",
+                "targetId": "shared-room",
+                "onlyOn": "always"
+            }
+        }),
+    });
+    store
+        .configure_wecom_installation_for_test("bot-old", "tenant-old", "wecom-desktop")
+        .expect("configure old installation");
+    let old_run = store
+        .record_completed_run_with_delivery(
+            CompletedRun {
+                task_id: task.id.clone(),
+                success: true,
+                started_at: db::now_ms(),
+                duration_ms: 1,
+                exit_code: Some(0),
+                output: "old".to_string(),
+                counted: false,
+            },
+            task.delivery.clone(),
+            Some(DeliveryStatus::Pending),
+            None,
+        )
+        .expect("record old delivery");
+    let old_delivery = store
+        .claim_delivery_for_run(&old_run)
+        .expect("claim old delivery")
+        .expect("old delivery");
+    store
+        .finish_delivery(&old_run, &old_delivery.outbox.id, "sent", None)
+        .expect("finish old delivery");
+
+    store
+        .configure_wecom_installation_for_test("bot-new", "tenant-new", "wecom-desktop")
+        .expect("switch installation");
+    let switched_run = store
+        .record_completed_run_with_delivery(
+            CompletedRun {
+                task_id: task.id.clone(),
+                success: true,
+                started_at: db::now_ms() + 1,
+                duration_ms: 1,
+                exit_code: Some(0),
+                output: "new".to_string(),
+                counted: false,
+            },
+            Some(DeliveryConfig {
+                channel: "wecom".to_string(),
+                target_id: old_delivery.target.id,
+                only_on: DeliveryOnlyOn::Always,
+            }),
+            Some(DeliveryStatus::Pending),
+            None,
+        )
+        .expect("the run terminal state must still commit");
+    let run = store
+        .list_runs(&task.id, 10)
+        .expect("list switched run")
+        .into_iter()
+        .find(|run| run.id == switched_run)
+        .expect("switched run");
+    assert_eq!(run.delivery_status, Some(DeliveryStatus::Failed));
+    assert!(run
+        .delivery_error
+        .as_deref()
+        .is_some_and(|error| error.contains("different channel installation")));
+    assert!(store
+        .claim_delivery_for_run(&switched_run)
+        .expect("do not claim rejected delivery")
+        .is_none());
+}
+
+#[test]
 fn masked_headers_round_trip_keeps_stored_secret() {
     let store = AutomationStore::open_in_memory().expect("open store");
     let base = store.snapshot().expect("snapshot").cron.revision;
@@ -1086,6 +1358,9 @@ fn prompt_delivery_freezes_capabilities_and_reaches_terminal_state() {
         }),
     });
     store
+        .configure_wecom_installation_for_test("bot-1", "tenant-1", "wecom-desktop")
+        .expect("configure WeCom installation");
+    store
         .queue_prompt_run(&task, "/tmp/project", true)
         .expect("queue");
     let claim = store.claim_prompt_runs().expect("claim").remove(0);
@@ -1109,16 +1384,54 @@ fn prompt_delivery_freezes_capabilities_and_reaches_terminal_state() {
     let pending = store.list_runs(&task.id, 10).expect("pending delivery run");
     assert_eq!(pending[0].delivery_status, Some(DeliveryStatus::Pending));
 
+    let claimed_delivery = store
+        .claim_delivery_for_run(&claim.execution_id)
+        .expect("claim delivery")
+        .expect("prepared delivery");
+    assert_eq!(claimed_delivery.target.external_target_id, "project-room");
+    assert!(claimed_delivery.outbox.body.contains("Report complete"));
+    assert!(store
+        .finish_delivery("different-run", &claimed_delivery.outbox.id, "sent", None,)
+        .is_err());
     store
-        .update_run_delivery(&claim.execution_id, DeliveryStatus::Sent, None)
-        .expect("finish delivery");
-    store
-        .update_run_delivery(
+        .requeue_delivery(
             &claim.execution_id,
-            DeliveryStatus::Failed,
+            &claimed_delivery.outbox.id,
+            Some("connector is still starting"),
+        )
+        .expect("requeue preflight failure");
+    assert_eq!(
+        store.list_runs(&task.id, 10).expect("pending retry")[0].delivery_status,
+        Some(DeliveryStatus::Pending)
+    );
+    assert!(store
+        .claim_delivery_for_run(&claim.execution_id)
+        .expect("respect retry cooldown")
+        .is_none());
+    store
+        .make_delivery_retry_ready_for_test(&claimed_delivery.outbox.id)
+        .expect("age retry cooldown");
+    let claimed_delivery = store
+        .claim_delivery_for_run(&claim.execution_id)
+        .expect("claim retried delivery")
+        .expect("prepared retry");
+    assert_eq!(claimed_delivery.outbox.attempt_count, 2);
+    store
+        .finish_delivery(
+            &claim.execution_id,
+            &claimed_delivery.outbox.id,
+            "sent",
+            None,
+        )
+        .expect("finish delivery");
+    assert!(store
+        .finish_delivery(
+            &claim.execution_id,
+            &claimed_delivery.outbox.id,
+            "failed",
             Some("late duplicate callback"),
         )
-        .expect("ignore duplicate terminal delivery update");
+        .is_err());
     let sent = store.list_runs(&task.id, 10).expect("sent delivery run");
     assert_eq!(sent[0].delivery_status, Some(DeliveryStatus::Sent));
     assert!(sent[0].delivery_error.is_none());
@@ -1142,6 +1455,9 @@ fn prompt_delivery_only_on_and_recovery_failure_are_persisted() {
             }
         }),
     });
+    store
+        .configure_wecom_installation_for_test("bot-1", "tenant-1", "wecom-desktop")
+        .expect("configure WeCom installation");
     store
         .queue_prompt_run(&task, "", true)
         .expect("queue failure run");
@@ -1170,7 +1486,7 @@ fn prompt_delivery_only_on_and_recovery_failure_are_persisted() {
 }
 
 #[test]
-fn interrupted_delivery_recovery_fails_done_and_expired_rows_once() {
+fn interrupted_delivery_recovery_resumes_prepared_and_quarantines_sending() {
     let (store, task) = store_with_task(AutomationOp::Create {
         item: json!({
             "id": "orphaned-delivery",
@@ -1187,8 +1503,11 @@ fn interrupted_delivery_recovery_fails_done_and_expired_rows_once() {
             }
         }),
     });
-
     store
+        .configure_wecom_installation_for_test("bot-1", "tenant-1", "wecom-desktop")
+        .expect("configure WeCom installation");
+
+    let done_id = store
         .record_completed_run_with_delivery(
             CompletedRun {
                 task_id: task.id.clone(),
@@ -1199,6 +1518,7 @@ fn interrupted_delivery_recovery_fails_done_and_expired_rows_once() {
                 output: "done".to_string(),
                 counted: false,
             },
+            task.delivery.clone(),
             Some(DeliveryStatus::Pending),
             None,
         )
@@ -1213,25 +1533,122 @@ fn interrupted_delivery_recovery_fails_done_and_expired_rows_once() {
         1
     );
 
+    assert_eq!(store.recover_interrupted_deliveries().expect("recover"), 0);
     assert_eq!(
-        store
-            .recover_interrupted_deliveries()
-            .expect("recover interrupted deliveries"),
+        store.prepared_delivery_run_ids().expect("prepared").len(),
         2
     );
-    let runs = store.list_runs(&task.id, 10).expect("recovered runs");
-    assert_eq!(runs.len(), 2);
-    assert!(runs.iter().any(|run| run.state == RunState::Done));
-    assert!(runs.iter().any(|run| run.state == RunState::Expired));
-    assert!(runs.iter().all(|run| {
-        run.delivery_status == Some(DeliveryStatus::Failed)
-            && run.delivery_error.as_deref()
-                == Some("WeCom delivery was interrupted by an app restart.")
-    }));
+    assert!(store
+        .list_runs(&task.id, 10)
+        .expect("recoverable runs")
+        .iter()
+        .all(|run| run.delivery_status == Some(DeliveryStatus::Pending)));
+
+    let claimed = store
+        .claim_delivery_for_run(&done_id)
+        .expect("claim")
+        .expect("prepared delivery");
+    assert_eq!(claimed.outbox.status, "sending");
+    assert_eq!(store.recover_expired_deliveries().expect("unexpired"), 0);
+    store
+        .expire_delivery_lease_for_test(&claimed.outbox.id)
+        .expect("expire delivery lease");
+    assert_eq!(
+        store.recover_expired_deliveries().expect("recover expired"),
+        1
+    );
+    let done = store
+        .list_runs(&task.id, 10)
+        .expect("recovered runs")
+        .into_iter()
+        .find(|run| run.id == done_id)
+        .expect("done run");
+    assert_eq!(done.delivery_status, Some(DeliveryStatus::Unknown));
+    assert!(done
+        .delivery_error
+        .as_deref()
+        .is_some_and(|error| { error.contains("interrupted after send became in-flight") }));
+    assert!(store
+        .claim_delivery_for_run(&done_id)
+        .expect("do not reclaim")
+        .is_none());
+    assert_eq!(
+        store.prepared_delivery_run_ids().expect("prepared").len(),
+        1
+    );
     assert_eq!(
         store
             .recover_interrupted_deliveries()
             .expect("recovery is idempotent"),
         0
+    );
+}
+
+#[test]
+fn legacy_wecom_installation_id_matches_connector_canonical_json() {
+    let store = AutomationStore::open_in_memory().expect("open store");
+    store
+        .configure_wecom_installation_for_test("bot-1", "", "")
+        .expect("configure WeCom installation");
+    assert_eq!(
+        store
+            .wecom_installation_id_for_test()
+            .expect("installation id"),
+        r#"{"bot_id":"bot-1","channel":"wecom","connector_id":"wecom-desktop","tenant_id":"bot-1"}"#
+    );
+}
+
+#[test]
+fn automation_store_uses_full_synchronous_durability() {
+    let store = AutomationStore::open_in_memory().expect("open store");
+    assert_eq!(store.synchronous_mode_for_test().expect("synchronous"), 2);
+}
+
+#[test]
+fn prepared_delivery_scan_is_bounded_per_scheduler_pass() {
+    let (store, task) = store_with_task(AutomationOp::Create {
+        item: json!({
+            "id": "delivery-scan-limit",
+            "name": "Delivery scan limit",
+            "cron": "0 * * * * *",
+            "enabled": true,
+            "type": "bash",
+            "script": "echo done",
+            "delivery": {
+                "channel": "wecom",
+                "targetId": "batch-room",
+                "onlyOn": "always"
+            }
+        }),
+    });
+    store
+        .configure_wecom_installation_for_test("bot-1", "tenant-1", "wecom-desktop")
+        .expect("configure WeCom installation");
+
+    for index in 0..65 {
+        store
+            .record_completed_run_with_delivery(
+                CompletedRun {
+                    task_id: task.id.clone(),
+                    success: true,
+                    started_at: db::now_ms() + index,
+                    duration_ms: 1,
+                    exit_code: Some(0),
+                    output: format!("run {index}"),
+                    counted: false,
+                },
+                task.delivery.clone(),
+                Some(DeliveryStatus::Pending),
+                None,
+            )
+            .expect("record prepared delivery");
+    }
+
+    assert_eq!(
+        store
+            .prepared_delivery_run_ids()
+            .expect("bounded prepared scan")
+            .len(),
+        64
     );
 }

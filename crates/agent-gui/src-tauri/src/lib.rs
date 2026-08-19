@@ -135,6 +135,18 @@ macro_rules! app_invoke_handler {
             commands::wecom_runtime::wecom_runtime_restart,
             commands::wecom_runtime::wecom_runtime_logs,
             commands::wecom_runtime::wecom_runtime_send_message,
+            commands::channel_control::channel_profiles_list,
+            commands::channel_control::channel_profile_save,
+            commands::channel_control::channel_installation_default_ensure,
+            commands::channel_control::channel_principal_bind,
+            commands::channel_control::channel_profile_resolve,
+            commands::channel_control::channel_profile_resolve_effective,
+            commands::channel_control::channel_delivery_targets_list,
+            commands::channel_control::channel_delivery_target_save,
+            commands::channel_control::channel_delivery_outbox_enqueue,
+            commands::channel_control::channel_delivery_outbox_claim,
+            commands::channel_control::channel_delivery_outbox_claim_for_run,
+            commands::channel_control::channel_delivery_outbox_mark,
             commands::database::database_profiles_list,
             commands::database::database_profile_save,
             commands::database::database_profile_delete,
@@ -463,6 +475,10 @@ fn configure_windows_window_chrome(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let channel_control_store = Arc::new(
+        services::channel_control::ChannelControlStore::open()
+            .expect("failed to initialize ArcForge channel control store"),
+    );
     let automation_store = Arc::new(
         services::automation::AutomationStore::open()
             .expect("failed to initialize ArcForge automation store"),
@@ -515,6 +531,7 @@ pub fn run() {
         .manage(Arc::clone(&allow_exit))
         .manage(Arc::clone(&close_window_behavior))
         .manage(Arc::clone(&automation_store))
+        .manage(Arc::clone(&channel_control_store))
         .manage(Arc::clone(&automation_scheduler))
         .manage(Arc::new(commands::hook::HookScopeRegistry::default()))
         .setup({

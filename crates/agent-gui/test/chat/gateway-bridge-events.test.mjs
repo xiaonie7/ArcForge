@@ -27,6 +27,7 @@ function createController(options = {}) {
     requestId: options.requestId ?? "request-1",
     workerId: options.workerId,
     enabled: options.enabled ?? true,
+    maxOutputChars: options.maxOutputChars,
     sendEvent: (requestId, event, sendOptions) => {
       const item = { requestId, event };
       if (sendOptions?.workerId) {
@@ -49,7 +50,40 @@ test("gateway bridge event controller emits nothing when disabled", () => {
   controller.emitError("failed");
 
   assert.deepEqual(sent, []);
+  assert.equal(controller.hasForwardedText(), false);
+});
+
+test("gateway bridge enforces one cumulative Unicode code-point budget for token events", () => {
+  const { controller, sent } = createController({ maxOutputChars: 3 });
+
+  controller.queueToken("A😀", { round: 1 });
+  controller.queueEvent({
+    type: "token",
+    text: "BC",
+    conversation_id: "conversation-1",
+    checkpoint: { summaryId: "summary-1" },
+  });
+  controller.queueToken("Z", { round: 1 });
+  controller.queueEvent({
+    type: "done",
+    final_text: "A😀BC",
+    conversation_id: "conversation-1",
+  });
+
   assert.equal(controller.hasForwardedText(), true);
+  assert.deepEqual(
+    sent.map((item) => item.event.text ?? item.event.final_text),
+    ["A😀", "B", "", "A😀B"],
+  );
+});
+
+test("gateway output truncation never splits a surrogate pair", () => {
+  const { controller, sent } = createController({ maxOutputChars: 1 });
+
+  controller.queueToken("😀x");
+
+  assert.equal(sent[0].event.text, "😀");
+  assert.equal(Array.from(sent[0].event.text).length, 1);
 });
 
 test("gateway bridge token forwarding tracks non-empty text only", () => {
@@ -250,6 +284,61 @@ test("compact command carries its user-facing result on the terminal bridge even
   );
 });
 
+test("trusted channel runs require and consume a frozen permission profile", () => {
+  assert.match(sendTurnSource, /if \(principal && !permissionPolicy\)/);
+  assert.match(
+    sendTurnSource,
+    /createChannelMcpSettingsSnapshot\(getMcpSettings\(\), permissionPolicy\.allowedMcpServers\)/,
+  );
+  assert.match(sendTurnSource, /memoryEnabled: effectiveMemoryEnabled/);
+  assert.match(sendTurnSource, /allowedSystemTools: permissionPolicy\?\.allowedSystemTools/);
+  assert.match(sendTurnSource, /applyMcpOps: permissionPolicy\s*\? undefined/);
+  assert.match(
+    sendTurnSource,
+    /nativeWebSearchEnabled:\s*permissionPolicy\.nativeWebSearchEnabled/,
+  );
+});
+
+test("trusted channel runs cannot trigger global command or HTTP hooks", () => {
+  assert.match(
+    sendTurnSource,
+    /hooks:\s*principal\s*\?\s*\[\]\s*:\s*getAutomationState\(\)\.hooks\.hooks/,
+  );
+});
+
+test("trusted channel runs cannot mutate or dynamically grant Skills", () => {
+  assert.match(sendTurnSource, /allowSkillMutation:\s*!principal/);
+  assert.match(
+    sendTurnSource,
+    /skillAccessPolicyForTools:[\s\S]*?permissionPolicy \|\| effectiveSkillsEnabled\s*\?\s*\{[\s\S]*?allowedSkillNames:\s*\[\]/,
+  );
+  assert.match(sendTurnSource, /onManagedSkillsChanged:\s*principal\s*\? undefined/);
+  assert.match(sendTurnSource, /const allowBuiltinSkillManagement =\s*!principal/);
+});
+
+test("trusted channel deadline covers persistence, bridge delivery, Skills, Memory, and runtime", () => {
+  const deadlineStart = sendTurnSource.indexOf("const channelDeadline = permissionPolicy");
+  const initialPersist = sendTurnSource.indexOf(
+    "const initialPersist = persistConversationWithHistorySync",
+  );
+  assert.ok(deadlineStart >= 0 && deadlineStart < initialPersist);
+  assert.match(
+    sendTurnSource,
+    /runWithinChannelDeadline\(initialPersist\)/,
+  );
+  assert.match(
+    sendTurnSource,
+    /runWithinChannelDeadline\(\s*gatewayBridgeEvents\.queueUserMessage/,
+  );
+  assert.match(sendTurnSource, /runWithinChannelDeadline\(refreshSkills\(\)\)/);
+  assert.match(
+    sendTurnSource,
+    /runWithinChannelDeadline\(\s*buildMemoryOverviewSection\(effectiveWorkdir\)/,
+  );
+  assert.match(sendTurnSource, /cancellation\.userStop\.abort\(error\)/);
+  assert.match(sendTurnSource, /channelDeadline\?\.clear\(\)/);
+});
+
 test("gateway bridge checkpoint emits compaction summary payload", () => {
   const { controller, sent } = createController();
   const state = {
@@ -402,5 +491,43 @@ test("gateway bridge error can resolve the latest conversation id", () => {
         conversation_id: "conversation-explicit",
       },
     ],
+  );
+});
+
+test("gateway bridge error exposes terminal send completion", async () => {
+  let finishSend;
+  const sendCompletion = new Promise((resolve) => {
+    finishSend = resolve;
+  });
+  const controller = createGatewayBridgeEventController({
+    conversationId: "conversation-1",
+    requestId: "request-1",
+    enabled: true,
+    sendEvent: () => sendCompletion,
+  });
+
+  const result = controller.emitError("failed");
+  assert.equal(result, sendCompletion);
+
+  let settled = false;
+  void Promise.resolve(result).then(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  finishSend();
+  await result;
+  assert.equal(settled, true);
+});
+
+test("failure bridge events settle before terminal runtime snapshots", () => {
+  assert.match(
+    sendTurnSource,
+    /const failBeforeRuntimeStart = async[\s\S]*?await gatewayBridgeEvents\.emitError\([\s\S]*?markConversationRunStopped\("failed"\)/,
+  );
+  assert.match(
+    sendTurnSource,
+    /catch \(err\) \{[\s\S]*?await gatewayBridgeEvents\.emitError\(remoteErrorMessage, conversationId\)[\s\S]*?finally \{[\s\S]*?markConversationRunStopped\(gatewayRuntimeFinalState\)/,
   );
 });

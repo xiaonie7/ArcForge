@@ -542,6 +542,51 @@ func TestDeduplicatedPendingCommandReplaysFailedUpdate(t *testing.T) {
 	}
 }
 
+func TestWatchChatCommandReplaysTerminalFinishedBetweenLookupAndWatch(t *testing.T) {
+	m := NewManager()
+	m.StartChatCommand("run-terminal", "conv-terminal", "", "client-terminal", []map[string]any{
+		{"type": "user_message", "message": "hello"},
+	})
+
+	stale, ok := m.LookupChatCommand("client-terminal")
+	if !ok || stale.Terminal != nil {
+		t.Fatalf("pre-finish lookup = %#v, ok=%v", stale, ok)
+	}
+
+	// Model the dedupe transport's lookup/watch gap: the canonical run reaches
+	// terminal after LookupChatCommand returns but before WatchChatCommand.
+	m.ingestChatEvent("run-terminal", doneEventWithFinalText("conv-terminal", "final answer"))
+	updates, cleanup := m.WatchChatCommand(stale.RunID)
+	defer cleanup()
+
+	select {
+	case update := <-updates:
+		if update.Phase != "completed" || update.Message != "final answer" ||
+			update.ClientRequestID != "client-terminal" || update.ConversationID != "conv-terminal" {
+			t.Fatalf("terminal replay update = %#v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for terminal command replay")
+	}
+}
+
+func TestWatchChatCommandReceivesTerminalAfterRegistration(t *testing.T) {
+	m := NewManager()
+	m.StartChatCommand("run-terminal", "conv-terminal", "", "client-terminal", nil)
+	updates, cleanup := m.WatchChatCommand("run-terminal")
+	defer cleanup()
+
+	m.ingestChatEvent("run-terminal", doneEventWithFinalText("conv-terminal", "final answer"))
+	select {
+	case update := <-updates:
+		if update.Phase != "completed" || update.Message != "final answer" {
+			t.Fatalf("live terminal update = %#v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for live terminal command update")
+	}
+}
+
 func TestActivityHubCarriesRunIDs(t *testing.T) {
 	m := NewManager()
 	activity, cleanup := m.SubscribeChatActivity()

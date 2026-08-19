@@ -29,7 +29,12 @@ func main() {
 	if cfg.GRPCAddr != "" {
 		slog.Warn("-grpc-addr is deprecated and ignored: the v1 gRPC listener was removed; desktop clients connect via /ws/v2/agent on the HTTP port")
 	}
-	sm := session.NewManager()
+	commandStore, err := session.OpenSQLiteChatCommandStore(cfg.GatewayStateDB)
+	if err != nil {
+		fatal("open gateway state database", "path", cfg.GatewayStateDB, "err", err)
+	}
+	defer commandStore.Close()
+	sm := session.NewManagerWithChatCommandPersistence(commandStore)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,

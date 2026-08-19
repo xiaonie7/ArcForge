@@ -102,6 +102,7 @@ pub enum DeliveryStatus {
     Sent,
     Skipped,
     Failed,
+    Unknown,
 }
 
 impl DeliveryStatus {
@@ -111,6 +112,7 @@ impl DeliveryStatus {
             Self::Sent => "sent",
             Self::Skipped => "skipped",
             Self::Failed => "failed",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -120,6 +122,7 @@ impl DeliveryStatus {
             "sent" => Some(Self::Sent),
             "skipped" => Some(Self::Skipped),
             "failed" => Some(Self::Failed),
+            "unknown" => Some(Self::Unknown),
             _ => None,
         }
     }

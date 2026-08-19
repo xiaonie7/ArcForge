@@ -174,6 +174,6 @@ test("Recent scope is wired to cwd-empty history and the guarded Agent runtime",
   assert.match(queueSource, /allowEmptyWorkdirOverride: queuedTurn\.allowEmptyWorkdir/);
   assert.match(
     queueSource,
-    /allowEmptyWorkdir:\s*isAgentExecutionMode\(executionMode\) && workdir\.length === 0 && allowEmptyAgentWorkdir/,
+    /const allowEmptyWorkdir =\s*editSlot\?\.allowEmptyWorkdir \?\?\s*\(isAgentExecutionMode\(executionMode\) && allowEmptyAgentWorkdir\)/,
   );
 });

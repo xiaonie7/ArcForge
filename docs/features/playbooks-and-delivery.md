@@ -27,9 +27,10 @@ flowchart LR
     AS --> DB[("automation SQLite v2")]
     AS -->|"复制模板快照"| CT["Prompt CronTask"]
     CT --> SCH["Rust Scheduler"]
-    SCH -->|"持久化 pending/leased 请求"| PR["CronPromptRunner"]
+    SCH -->|"持久化 Prompt lease"| PR["CronPromptRunner"]
     PR -->|"完成或失败"| AS
-    AS -->|"onlyOn 匹配"| WC["LocalWecomSupervisor"]
+    AS -->|"原子写入 prepared Outbox"| OB["Delivery Outbox"]
+    OB -->|"仅领取有效目标"| WC["LocalWecomSupervisor"]
     WC --> CONN["企业微信 Connector"]
     AS -->|"automation:run-completed"| TOAST["桌面完成通知"]
 ```
@@ -120,7 +121,7 @@ type CreatePlaybookCronInput = {
 `CronRunRecord` 在原有运行信息之外增加：
 
 ```ts
-type DeliveryStatus = "pending" | "sent" | "skipped" | "failed";
+type DeliveryStatus = "pending" | "sent" | "skipped" | "failed" | "unknown";
 
 type CronRunRecord = {
   // 原有运行字段省略
@@ -129,7 +130,18 @@ type CronRunRecord = {
 };
 ```
 
-`deliveryStatus` 缺失表示该任务没有投递配置。`deliveryError` 只在发送失败时出现，并保存经过归一化、截断的安全错误，而不是 Connector 原始错误。
+`deliveryStatus` 缺失表示该任务没有投递配置。运行记录上的 `pending` 表示投递 Outbox 尚未收敛到终态；`unknown` 表示发送调用已经进入进行中，但结果无法确认。`deliveryError` 只保存经过归一化、截断的安全错误，而不是 Connector 原始错误。
+
+企业微信投递另外有一张 durable Outbox 表，状态机为：
+
+```text
+prepared -> sending -> sent
+   ^          |  \-> failed
+   |          \----> unknown
+   +-- 仅发送前失败
+```
+
+`prepared` 行与运行终态在同一个 SQLite 事务中创建，并使用 `automation:<executionId>:delivery:v1` 幂等键。领取时会再次检查目标 `enabled=true` 且 `validationStatus="valid"`，然后以短事务把行变为 `sending` 并写入 lease。只有当前 `sending` 行能被标记为 `sent`、`failed` 或 `unknown`；终态不可被覆盖。
 
 ## 能力快照与向后兼容
 
@@ -193,32 +205,33 @@ Cron、Hooks 和 Playbooks 各自维护独立 revision，避免无关域的写�
 | 状态 | 含义与后续行为 |
 |---|---|
 | 未设置 | 任务没有 `delivery`，运行完成后直接发送桌面完成事件。 |
-| `pending` | 运行结果已持久化且条件匹配，正在等待本地企业微信发送完成；这是中间状态。 |
+| `pending` | 运行结果已持久化且条件匹配，Outbox 仍为 `prepared` 或 `sending`；这是中间状态。 |
 | `skipped` | 任务有投递配置，但 `onlyOn` 与运行结果不匹配；不会调用 Connector。 |
 | `sent` | Connector 已确认发送成功。 |
-| `failed` | Connector 不可用、未认证、队列满、超时或拒绝发送；`deliveryError` 保存稳定的安全错误摘要。 |
+| `failed` | 发送前已确认请求本身不可恢复（例如通道或目标参数非法）；`deliveryError` 保存稳定的安全错误摘要。 |
+| `unknown` | 已进入发送阶段但结果无法确认，例如发送后断连或进程退出；系统不会自动重发。 |
 
-当需要发送时，后端先以 `pending` 保存运行记录，再调用 Connector，最后以条件更新 `pending -> sent|failed`。发送结果的 SQLite 更新在独立事务中执行，遇到暂时性落盘错误会有限重试；这个重试只更新本地状态，不会再次调用 Connector。`automation:run-completed` 在无投递、`skipped`，或发送进入 `sent/failed` 后只发布最终状态，避免桌面端先显示 pending、随后重复提醒。桌面通知把“运行失败”和“投递失败”都视为需要注意，但运行历史仍分别保留两类结果。
+当需要发送时，后端在同一个 SQLite 事务中写入运行记录和 `prepared` Outbox，然后领取并调用 Connector。发送结果通过绑定 `executionId` 的条件更新同时收敛 Outbox 与运行记录；状态落盘遇到暂时性错误会有限重试，但只更新本地状态，不会再次调用 Connector。`automation:run-completed` 在无投递、`skipped`，或投递进入 `sent/failed/unknown` 后只发布最终状态，避免桌面端先显示 pending、随后重复提醒。桌面通知把“运行失败”和“投递失败/未知”都视为需要注意，但运行历史仍分别保留两类结果。
 
-当前发送会对 Connector 未运行、未认证或暂不可用等尚未开始发送的短暂错误最多尝试 10 次，每次间隔 500ms；超时、发送后连接中断等结果未知的错误不会重试，直接进入 `failed`。当前没有指数退避或人工“重新投递”操作。有限重试可以覆盖 Connector 启动窗口，同时避免在发送结果未知时主动制造重复消息；系统仍不承诺 exactly-once。
+每次 Outbox 领取只发起一次 Connector 调用。若调用前即可确认尚未触达企业微信（例如 Connector 未运行、未认证、输入通道尚不可用或本地队列已满），Outbox 会安全回到 `prepared`，由后续扫描再次领取；运行记录在此期间保持 `pending`。请求本身非法等不可恢复的前置错误写为 `failed`；超时、发送后连接中断等结果未知的错误写为 `unknown`，绝不自动重发。系统没有人工“重新投递”操作；SQLite 状态更新本身最多重试 3 次、每次间隔 250ms，这些状态更新不会调用 Connector。系统仍不承诺 exactly-once。
 
 ## 超时与重启恢复
 
 Prompt 运行先以 `pending`/`leased` 状态和 lease 截止时间持久化，默认 lease 与任务 `timeoutSeconds` 一致。
 
 - lease 超时：记录转为 `expired`、`success: false`，通知前端中止仍在执行的 Prompt；`always` 或 `failure` 仍会生成失败投递。
-- 应用重启：启动时把上次进程遗留的 `pending`/`leased` Prompt 标为 `expired`，记录“被重启中断”，并按失败结果执行同样的 `onlyOn` 策略。
+- 应用重启：启动时先把上次进程遗留的 `pending`/`leased` Prompt 标为 `expired`，记录“被重启中断”，并按失败结果执行同样的 `onlyOn` 策略；随后把仍处于 `sending` 的 Outbox 隔离为 `unknown`。
 - 任务有有限执行次数时，已入队且最终超时/中断的计数仍会扣减，避免重启导致计划执行次数无限回补。
 - 固定工作目录丢失、Prompt 入队失败或 Runner 返回失败时，也按失败结果评估投递；运行错误不会被投递失败覆盖。
 
-恢复边界需要特别注意：进程在运行记录写为 `pending` 后、企业微信发送完成前退出时，下次启动会扫描这类记录并收敛为 `failed`，错误摘要标明投递被应用重启中断，同时只发布一次最终完成事件。系统不会自动重发，因为 Connector 可能已经接收消息但确认尚未落库；这条路径同样无法提供 exactly-once 保证。
+恢复边界需要特别注意：`prepared` 表示尚未调用供应商发送 API，启动时会重新扫描并安全领取；`sending` 表示调用可能已经发生，启动时会收敛为 `unknown`，并把对应运行记录从 `pending` 收敛为 `unknown`，只发布一次最终完成事件。系统不会自动重发 `unknown`，因为 Connector 可能已经接收消息但确认尚未落库；这条路径同样无法提供 exactly-once 保证。目标在排队后变为 disabled 或 pending/invalid 时不会被领取，重新验证目标后才可继续处理。
 
 ## MVP 边界
 
 - Playbook 当前只实例化为 Prompt CronTask，不包含 Bash、HTTP 或多步骤 DAG 编排。
 - Playbook 与 CronTask 没有持续关联、版本号或批量升级机制；模板变更不会传播到既有任务。
 - 自动投递仅支持企业微信 Markdown 和一个固定目标，不支持多收件人、附件、消息模板、Webhook、邮件或其他 IM。
-- 只有针对 Connector 短暂不可用的有限固定间隔重试；没有死信队列、幂等键、送达查询或人工重新投递按钮。重启会把遗留 `pending` 收敛为 `failed`，不会自动重发。
+- 没有对已开始的外部发送做自动重试，也没有死信队列、送达查询或人工重新投递按钮。Outbox 使用幂等键；仅能证明尚未调用供应商 API 的 `prepared` 前置失败会重试，`unknown` 永不自动重发。
 - Gateway WebUI 可管理和查看快照，但执行、Prompt lease、企业微信发送和桌面完成通知都依赖桌面进程运行。
 - 能力快照只保存 ID，不打包 Skill/MCP 内容或 provider 配置；外部资源变化仍可能使未来运行失败。
 - 并发 Prompt 尚未完成时再次触发会记录跳过；该合成跳过记录不走 Playbook 自动投递链路。
@@ -234,10 +247,10 @@ Prompt 运行先以 `pending`/`leased` 状态和 lease 截止时间持久化，�
 - Playbook 与 Cron 使用独立 revision；冲突响应返回最新快照且不产生部分写入。
 - 实例化复制全部字段，生成唯一任务 ID；修改/删除 Playbook 后既有 CronTask 保持不变。
 - `cronBaseRevision` 冲突、Playbook 不存在、六段 Cron 非法、执行次数和 1-600 秒超时边界。
-- `onlyOn` 九宫格：三个策略分别覆盖成功、失败、过期；检查 `pending/skipped/sent/failed` 和 `deliveryError`。
+- `onlyOn` 九宫格：三个策略分别覆盖成功、失败、过期；检查 `pending/skipped/sent/failed/unknown`、Outbox 状态和 `deliveryError`。
 - Connector 未运行、未认证、超时、队列满与成功确认；验证安全错误不泄漏底层细节、消息按 UTF-8 边界截断。
 - Prompt 正常完成、lease 超时和重启恢复都能触发 failure/always 投递，并且最终只发一次 `automation:run-completed`。
-- `update_run_delivery` 只允许从 `pending` 转为最终状态，重复回调不能重复通知。
+- `update_run_delivery` 只允许绑定的 `sending` Outbox 把运行记录从 `pending` 转为最终状态，重复回调不能重复通知；重启后 `prepared` 可恢复、`sending` 进入 `unknown`。
 
 ### 前端契约测试
 
@@ -255,4 +268,4 @@ Prompt 运行先以 `pending`/`leased` 状态和 lease 截止时间持久化，�
 2. 创建任务后修改模板能力和目标，确认旧任务仍使用旧快照，新任务使用新快照。
 3. 覆盖成功、模型错误、目录丢失、Prompt 超时和应用重启场景，核对运行状态、投递状态、企业微信正文和桌面通知。
 4. 两个客户端同时编辑 Playbook/创建计划，验证 revision 冲突重放不会丢失无关字段，也不会创建重复任务。
-5. 在企业微信 Connector 停止和恢复时运行任务，确认失败不会改变任务 `success`，且当前版本不会自动补发。
+5. 在企业微信 Connector 停止和恢复时运行任务，确认投递先保持 `pending`、恢复后从 `prepared` 安全发出，且任务 `success` 不受影响；再模拟发送后断连，确认 `unknown` 不会自动补发。

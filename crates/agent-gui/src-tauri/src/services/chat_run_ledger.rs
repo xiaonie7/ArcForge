@@ -163,7 +163,33 @@ impl ChatRunLedger {
             // First terminal wins: a later, conflicting terminal must not
             // overwrite the state that already represents the run outcome.
             if entry.state.is_terminal() {
-                return false;
+                if entry.state != state {
+                    return false;
+                }
+
+                // A runtime snapshot can race the richer done/error event and
+                // record the same terminal state without its user-facing
+                // payload. Permit that payload to fill previously empty slots,
+                // while keeping non-empty first-terminal data immutable.
+                let mut enriched = false;
+                if entry.error_code.trim().is_empty() && !error_code.trim().is_empty() {
+                    entry.error_code = error_code.to_string();
+                    enriched = true;
+                }
+                if entry.message.trim().is_empty() && !message.trim().is_empty() {
+                    entry.message = message.to_string();
+                    enriched = true;
+                }
+                if entry.conversation_id.is_empty() && !conversation_id.trim().is_empty() {
+                    entry.conversation_id = conversation_id.trim().to_string();
+                    enriched = true;
+                }
+                if enriched {
+                    entry.terminal_sent = false;
+                    entry.touched_at = now;
+                    entry.updated_at_ms = now_ms;
+                }
+                return enriched;
             }
             entry.state = state;
             entry.error_code = error_code.to_string();
@@ -377,6 +403,56 @@ mod tests {
             ledger.active_reports(t0 + Duration::from_secs(400)).len(),
             1
         );
+    }
+
+    #[test]
+    fn same_terminal_can_enrich_empty_payload_without_overwriting_first_content() {
+        let mut ledger = test_ledger();
+        let t0 = Instant::now();
+        assert!(ledger.mark_terminal("run-1", "", ChatRunLedgerState::Failed, "", "", t0, 1_000,));
+        ledger.mark_terminal_sent("run-1");
+
+        assert!(ledger.mark_terminal(
+            "run-1",
+            "conversation-1",
+            ChatRunLedgerState::Failed,
+            "runtime_error",
+            "request failed",
+            t0 + Duration::from_secs(1),
+            2_000,
+        ));
+        let enriched = ledger.unsent_terminals();
+        assert_eq!(enriched.len(), 1);
+        assert_eq!(enriched[0].conversation_id, "conversation-1");
+        assert_eq!(enriched[0].error_code, "runtime_error");
+        assert_eq!(enriched[0].message, "request failed");
+        assert_eq!(enriched[0].updated_at_ms, 2_000);
+
+        ledger.mark_terminal_sent("run-1");
+        assert!(!ledger.mark_terminal(
+            "run-1",
+            "conversation-1",
+            ChatRunLedgerState::Failed,
+            "replacement_error",
+            "replacement message",
+            t0 + Duration::from_secs(2),
+            3_000,
+        ));
+        assert!(!ledger.mark_terminal(
+            "run-1",
+            "conversation-1",
+            ChatRunLedgerState::Completed,
+            "",
+            "conflicting completion",
+            t0 + Duration::from_secs(3),
+            4_000,
+        ));
+        assert!(ledger.unsent_terminals().is_empty());
+        let entry = ledger.get("run-1").expect("terminal entry");
+        assert_eq!(entry.state, ChatRunLedgerState::Failed);
+        assert_eq!(entry.error_code, "runtime_error");
+        assert_eq!(entry.message, "request failed");
+        assert_eq!(entry.updated_at_ms, 2_000);
     }
 
     #[test]

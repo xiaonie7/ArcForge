@@ -3553,7 +3553,8 @@ func (x *ChatCommandAccepted) GetDeduped() bool {
 	return false
 }
 
-// ChatCommandUpdate 推送命令的前置阶段结果（bound / queued_in_gui / failed），镜像 session.ChatCommandUpdate。
+// ChatCommandUpdate 推送命令阶段结果。除前置阶段 bound / queued_in_gui / failed 外，
+// durable dedupe 重放 completed / cancelled / unknown 终态。
 type ChatCommandUpdate struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	RunId           string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -3562,8 +3563,12 @@ type ChatCommandUpdate struct {
 	Phase           string                 `protobuf:"bytes,4,opt,name=phase,proto3" json:"phase,omitempty"`
 	ErrorCode       string                 `protobuf:"bytes,5,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
 	Message         string                 `protobuf:"bytes,6,opt,name=message,proto3" json:"message,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// True when the Desktop run had started before this terminal transition.
+	// Clients must preserve the submitted user message in that case even if a
+	// priority command update overtakes the ordered conversation stream.
+	RunStarted    bool `protobuf:"varint,7,opt,name=run_started,json=runStarted,proto3" json:"run_started,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChatCommandUpdate) Reset() {
@@ -3636,6 +3641,13 @@ func (x *ChatCommandUpdate) GetMessage() string {
 		return x.Message
 	}
 	return ""
+}
+
+func (x *ChatCommandUpdate) GetRunStarted() bool {
+	if x != nil {
+		return x.RunStarted
+	}
+	return false
 }
 
 // ChatSubscriptionReset 通知客户端某会话流已被限流丢弃，需重新订阅（after_seq 断点续传）。
@@ -4195,7 +4207,7 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12'\n" +
 	"\x0fconversation_id\x18\x02 \x01(\tR\x0econversationId\x12!\n" +
 	"\faccepted_seq\x18\x03 \x01(\x03R\vacceptedSeq\x12\x18\n" +
-	"\adeduped\x18\x04 \x01(\bR\adeduped\"\xce\x01\n" +
+	"\adeduped\x18\x04 \x01(\bR\adeduped\"\xef\x01\n" +
 	"\x11ChatCommandUpdate\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12*\n" +
 	"\x11client_request_id\x18\x02 \x01(\tR\x0fclientRequestId\x12'\n" +
@@ -4203,7 +4215,9 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x05phase\x18\x04 \x01(\tR\x05phase\x12\x1d\n" +
 	"\n" +
 	"error_code\x18\x05 \x01(\tR\terrorCode\x12\x18\n" +
-	"\amessage\x18\x06 \x01(\tR\amessage\"@\n" +
+	"\amessage\x18\x06 \x01(\tR\amessage\x12\x1f\n" +
+	"\vrun_started\x18\a \x01(\bR\n" +
+	"runStarted\"@\n" +
 	"\x15ChatSubscriptionReset\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\"b\n" +
 	"\x10ChatCancelResult\x12\x0e\n" +

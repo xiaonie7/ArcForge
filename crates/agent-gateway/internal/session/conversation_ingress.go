@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -24,6 +25,12 @@ func (m *Manager) ingestChatEvent(requestID string, event *gatewayv1.ChatEvent) 
 	}
 	now := time.Now()
 	epoch := m.currentSessionEpoch()
+	var presentedFile *durablePresentedFileWrite
+	defer func() {
+		if presentedFile != nil {
+			s.persistPresentedFile(*presentedFile, now)
+		}
+	}()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -67,6 +74,9 @@ func (m *Manager) ingestChatEvent(requestID string, event *gatewayv1.ChatEvent) 
 
 	if stream.runFinishedRecently(runID) {
 		// Late straggler after a forced or duplicate terminal; drop it.
+		return
+	}
+	if _, finishing := s.finishingRuns[runID]; finishing {
 		return
 	}
 
@@ -116,7 +126,62 @@ func (m *Manager) ingestChatEvent(requestID string, event *gatewayv1.ChatEvent) 
 	}
 
 	delete(payload, "seq")
-	s.appendEventLocked(stream, runID, eventType, payload, now)
+	appended := s.appendEventLocked(stream, runID, eventType, payload, now)
+	if eventType == "tool_result" {
+		if payloadJSON, ok := durablePresentFilePayloadJSON(payload); ok {
+			record := s.runRecordLocked(runID, conversationID)
+			if record.clientRequestID != "" {
+				file := ChatCommandPresentedFile{
+					Seq:         appended.Seq,
+					Workdir:     conversationRunWorkdirLocked(stream, runID),
+					PayloadJSON: payloadJSON,
+				}
+				record.presentedFiles = append(record.presentedFiles, file)
+				presentedFile = &durablePresentedFileWrite{
+					clientRequestID: record.clientRequestID,
+					runID:           runID,
+					file:            file,
+				}
+			}
+		}
+	}
+}
+
+type durablePresentedFileWrite struct {
+	clientRequestID string
+	runID           string
+	file            ChatCommandPresentedFile
+}
+
+func durablePresentFilePayloadJSON(payload map[string]any) (string, bool) {
+	if payload == nil {
+		return "", false
+	}
+	name, _ := payload["name"].(string)
+	isError, hasErrorFlag := payload["isError"].(bool)
+	details, hasDetails := payload["details"].(map[string]any)
+	kind, _ := details["kind"].(string)
+	if strings.TrimSpace(name) != "PresentFile" || !hasErrorFlag || isError ||
+		!hasDetails || strings.TrimSpace(kind) != "display_file" {
+		return "", false
+	}
+	data, err := json.Marshal(payload)
+	if err != nil || len(data) == 0 || len(data) > maxDurablePresentedFilesJSON {
+		return "", false
+	}
+	return string(data), true
+}
+
+func (s *conversationStreamStore) persistPresentedFile(write durablePresentedFileWrite, now time.Time) {
+	store, ok := s.commandStore.(chatCommandPresentedFileStore)
+	if !ok {
+		return
+	}
+	if err := store.RecordPresentedFile(
+		write.clientRequestID, write.runID, write.file, now,
+	); err != nil {
+		logChatCommandStoreError("record_presented_file", write.runID, err)
+	}
 }
 
 func (m *Manager) ingestChatControl(requestID string, control *gatewayv1.ChatControlEvent) {
@@ -155,13 +220,28 @@ func (m *Manager) ingestChatControl(requestID string, control *gatewayv1.ChatCon
 	switch controlType {
 	case "started":
 		s.runStartedLocked(stream, runID, "", now)
-	case "completed", "failed", "cancelled":
+	case "completed":
+		extra := map[string]any(nil)
+		if message != "" {
+			extra = map[string]any{"final_text": message}
+		}
+		s.runFinishedLocked(stream, runID, controlType, errorCode, "", extra, now)
+	case "failed", "cancelled":
 		s.runFinishedLocked(stream, runID, controlType, errorCode, message, nil, now)
 	case "queued_in_gui":
 		s.markRunQueuedInGUILocked(stream, runID, now)
 	case "accepted", "delivered", "claimed", "starting":
 		record := s.runRecordLocked(runID, conversationID)
 		s.markRunQueuedLocked(stream, runID, record.clientRequestID, now)
+		if stream.activity != nil && stream.activity.RunID == runID &&
+			stream.activity.State == RunActivityQueued &&
+			s.commandStore != nil && record.clientRequestID != "" {
+			if err := s.markChatCommandLocked(
+				record.clientRequestID, runID, "queued", "accepted", now,
+			); err != nil && !s.chatCommandTerminalLocked(record.clientRequestID, runID) {
+				logChatCommandStoreError("mark_queued", runID, err)
+			}
+		}
 	}
 }
 
@@ -349,13 +429,15 @@ func (s *conversationStreamStore) bindPendingRunLocked(
 		stream, pending.runID, pending.clientRequestID, pending.seeded, now,
 	)
 	record.userMessageSeeded = seededPayloadsIncludeUserMessage(pending.seeded)
-	s.updateChatCommandDedupeLocked(
+	if err := s.updateChatCommandDedupeLocked(
 		pending.clientRequestID,
 		pending.runID,
 		conversationID,
 		acceptedSeq,
 		now,
-	)
+	); err != nil {
+		logChatCommandStoreError("bind_pending", pending.runID, err)
+	}
 	s.fireCommandUpdateLocked(ChatCommandUpdate{
 		RunID:           pending.runID,
 		ClientRequestID: pending.clientRequestID,

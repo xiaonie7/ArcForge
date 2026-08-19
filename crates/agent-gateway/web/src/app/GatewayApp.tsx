@@ -403,6 +403,9 @@ export default function GatewayApp() {
   const pipelineOnQueuedInGuiRef = useRef<
     (update: ChatCommandUpdate, pending: PendingChatCommand) => void
   >(() => undefined);
+  const pipelineOnCompletedRef = useRef<
+    (update: ChatCommandUpdate, pending: PendingChatCommand) => void
+  >(() => undefined);
   const pipelineOnFailedRef = useRef<
     (pending: PendingChatCommand, errorCode: string | null, message: string) => void
   >(() => undefined);
@@ -413,6 +416,7 @@ export default function GatewayApp() {
           transcriptStoreRegistry.get(targetConversationId),
         onBound: (update, pending) => pipelineOnBoundRef.current(update, pending),
         onQueuedInGui: (update, pending) => pipelineOnQueuedInGuiRef.current(update, pending),
+        onCompleted: (update, pending) => pipelineOnCompletedRef.current(update, pending),
         onFailed: (pending, errorCode, message) =>
           pipelineOnFailedRef.current(pending, errorCode, message),
         onPendingChanged: () => setPendingCommandRevision((current) => current + 1),
@@ -1375,6 +1379,18 @@ export default function GatewayApp() {
         { forceFull: true },
       );
     }
+  };
+  pipelineOnCompletedRef.current = (update, pending) => {
+    draftClientRequestsRef.current.delete(pending.clientRequestId);
+    const conversationIdValue = update.conversationId?.trim() || pending.conversationId.trim();
+    if (!conversationIdValue || isLocalDraftConversationId(conversationIdValue)) {
+      return;
+    }
+    // The durable replay may come from a fresh Gateway process whose in-memory
+    // stream is empty. Rehydrate the authoritative transcript from Desktop.
+    void refreshDisplayedConversationHistorySnapshot(conversationIdValue, api, {
+      forceFull: true,
+    });
   };
   pipelineOnFailedRef.current = (pending, _errorCode, message) => {
     draftClientRequestsRef.current.delete(pending.clientRequestId);

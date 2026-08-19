@@ -110,6 +110,26 @@ function claimedCommand(command) {
   };
 }
 
+function channelPermissionProfile(overrides = {}) {
+  return {
+    id: "profile-1",
+    name: "WeCom default",
+    revision: 2,
+    policy: {
+      executionMode: "tools",
+      allowedSkills: ["review"],
+      allowedSystemTools: ["search"],
+      allowedMcpServers: ["docs"],
+      memoryEnabled: false,
+    },
+    policyHash: "hash-2",
+    enabled: true,
+    createdAt: 1,
+    updatedAt: 2,
+    ...overrides,
+  };
+}
+
 function installBrowserGlobals() {
   const previousWindow = globalThis.window;
   const previousDocument = globalThis.document;
@@ -140,7 +160,11 @@ function installBrowserGlobals() {
   };
 }
 
-function createCommandListenerLoader(hookHarness, invoke) {
+function createCommandListenerLoader(
+  hookHarness,
+  invoke,
+  resolveEffectiveProfile = async () => channelPermissionProfile(),
+) {
   return createTsModuleLoader({
     mocks: {
       react: hookHarness.react,
@@ -149,6 +173,9 @@ function createCommandListenerLoader(hookHarness, invoke) {
         async listen() {
           return () => {};
         },
+      },
+      "../../../lib/channelControl": {
+        channelControl: { resolveEffectiveProfile },
       },
       "../../../lib/settings": {
         normalizeChatRuntimeControls(value) {
@@ -423,18 +450,26 @@ test("trusted /compact reaches send with empty text and authenticated principal"
   const invokeCalls = [];
   const sent = [];
   const ensureOptions = [];
+  const permissionResolutions = [];
   let claim = claimedCommand("compact");
 
   try {
-    const loader = createCommandListenerLoader(hookHarness, async (command, payload) => {
-      invokeCalls.push({ command, payload });
-      if (command === "gateway_chat_claim_next") {
-        const next = claim;
-        claim = null;
-        return next;
-      }
-      return undefined;
-    });
+    const loader = createCommandListenerLoader(
+      hookHarness,
+      async (command, payload) => {
+        invokeCalls.push({ command, payload });
+        if (command === "gateway_chat_claim_next") {
+          const next = claim;
+          claim = null;
+          return next;
+        }
+        return undefined;
+      },
+      async (input) => {
+        permissionResolutions.push(input);
+        return channelPermissionProfile();
+      },
+    );
     const { useGatewayBridgeListeners } = loader.loadModule(
       "src/pages/chat/gateway/useGatewayBridgeListeners.ts",
     );
@@ -488,12 +523,163 @@ test("trusted /compact reaches send with empty text and authenticated principal"
       sent[0].gatewayBridgeRequestOverride.principal.externalUserId,
       "user-1",
     );
+    assert.deepEqual(permissionResolutions, [
+      {
+        installationId:
+          '{"bot_id":"bot-1","channel":"wecom","connector_id":"connector-1","tenant_id":"tenant-1"}',
+        userId: "user-1",
+        conversationId: undefined,
+      },
+    ]);
+    const permissionProfile = sent[0].gatewayBridgeRequestOverride.permissionProfile;
+    assert.equal(permissionProfile.id, "profile-1");
+    assert.ok(Object.isFrozen(permissionProfile));
+    assert.ok(Object.isFrozen(permissionProfile.policy));
+    assert.ok(Object.isFrozen(permissionProfile.policy.allowedSkills));
     assert.equal(
       Object.hasOwn(sent[0].gatewayBridgeRequestOverride.principal, "allowedToolNames"),
       false,
     );
     assert.ok(invokeCalls.some((call) => call.command === "gateway_chat_mark_started"));
     assert.ok(invokeCalls.some((call) => call.command === "gateway_chat_complete"));
+  } finally {
+    hookHarness.cleanup();
+    restoreGlobals();
+  }
+});
+
+test("trusted requests without an effective permission profile fail closed", async () => {
+  const restoreGlobals = installBrowserGlobals();
+  const hookHarness = createHookHarness();
+  const invokeCalls = [];
+  let claim = claimedCommand("compact");
+  let sendCalls = 0;
+  let queueCalls = 0;
+
+  try {
+    const loader = createCommandListenerLoader(
+      hookHarness,
+      async (command, payload) => {
+        invokeCalls.push({ command, payload });
+        if (command === "gateway_chat_claim_next") {
+          const next = claim;
+          claim = null;
+          return next;
+        }
+        return undefined;
+      },
+      async () => null,
+    );
+    const { useGatewayBridgeListeners } = loader.loadModule(
+      "src/pages/chat/gateway/useGatewayBridgeListeners.ts",
+    );
+
+    hookHarness.render(() =>
+      useGatewayBridgeListeners({
+        allowWecomGroupMessages: true,
+        currentConversationIdRef: { current: "local-conversation" },
+        conversationRuntimeCacheRef: { current: new Map() },
+        ensureGatewayBridgeConversationReadyRef: { current: async (id) => id },
+        sendActionRef: {
+          current: async () => {
+            sendCalls += 1;
+            return true;
+          },
+        },
+        queueGatewayBridgeEventForRequest() {},
+        shouldQueueGatewayChatRequest() {
+          return true;
+        },
+        async enqueueGatewayChatRequest() {
+          queueCalls += 1;
+          return true;
+        },
+        isConversationRunning() {
+          return false;
+        },
+        getConversationAbortController() {
+          return null;
+        },
+      }),
+    );
+    await waitFor(
+      () => invokeCalls.some((call) => call.command === "gateway_chat_fail"),
+      "timed out waiting for permission rejection",
+    );
+
+    const failure = invokeCalls.find((call) => call.command === "gateway_chat_fail");
+    assert.equal(failure.payload.error_code, "channel_permission_denied");
+    assert.equal(sendCalls, 0);
+    assert.equal(queueCalls, 0);
+    assert.equal(
+      invokeCalls.some((call) => call.command === "gateway_chat_mark_started"),
+      false,
+    );
+  } finally {
+    hookHarness.cleanup();
+    restoreGlobals();
+  }
+});
+
+test("trusted queued requests carry the same frozen permission snapshot", async () => {
+  const restoreGlobals = installBrowserGlobals();
+  const hookHarness = createHookHarness();
+  const invokeCalls = [];
+  const queued = [];
+  let claim = claimedCommand("");
+  claim.request.message = "queued question";
+
+  try {
+    const loader = createCommandListenerLoader(hookHarness, async (command, payload) => {
+      invokeCalls.push({ command, payload });
+      if (command === "gateway_chat_claim_next") {
+        const next = claim;
+        claim = null;
+        return next;
+      }
+      return undefined;
+    });
+    const { useGatewayBridgeListeners } = loader.loadModule(
+      "src/pages/chat/gateway/useGatewayBridgeListeners.ts",
+    );
+
+    hookHarness.render(() =>
+      useGatewayBridgeListeners({
+        allowWecomGroupMessages: true,
+        currentConversationIdRef: { current: "local-conversation" },
+        conversationRuntimeCacheRef: { current: new Map() },
+        ensureGatewayBridgeConversationReadyRef: { current: async (id) => id },
+        sendActionRef: { current: async () => false },
+        queueGatewayBridgeEventForRequest() {},
+        shouldQueueGatewayChatRequest() {
+          return true;
+        },
+        async enqueueGatewayChatRequest(...args) {
+          queued.push(args);
+          return true;
+        },
+        isConversationRunning() {
+          return false;
+        },
+        getConversationAbortController() {
+          return null;
+        },
+      }),
+    );
+    await waitFor(
+      () => invokeCalls.some((call) => call.command === "gateway_chat_mark_queued_in_gui"),
+      "timed out waiting for trusted request queueing",
+    );
+
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0][2].externalUserId, "user-1");
+    assert.equal(queued[0][3].id, "profile-1");
+    assert.ok(Object.isFrozen(queued[0][3]));
+    assert.ok(Object.isFrozen(queued[0][3].policy.allowedSystemTools));
+    assert.equal(
+      invokeCalls.some((call) => call.command === "gateway_chat_mark_started"),
+      false,
+    );
   } finally {
     hookHarness.cleanup();
     restoreGlobals();

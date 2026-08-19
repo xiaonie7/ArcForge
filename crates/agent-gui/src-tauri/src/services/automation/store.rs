@@ -6,6 +6,12 @@ use serde_json::{json, Value};
 use tauri::Emitter;
 use uuid::Uuid;
 
+use crate::services::channel_control::{
+    claim_outbox_for_run_in_connection, enqueue_delivery_in_transaction,
+    mark_delivery_in_transaction, requeue_delivery_in_transaction, resolve_delivery_target,
+    stable_target_id, upsert_delivery_target_in_transaction, ClaimedDelivery, EnqueueDelivery,
+    SaveDeliveryTarget,
+};
 use crate::services::gateway::GatewayController;
 
 use super::db;
@@ -102,7 +108,13 @@ enum CronMutationEffect {
     Changed,
 }
 
+enum PrepareDeliveryError {
+    Rejected(String),
+    Storage(String),
+}
+
 const INTERRUPTED_DELIVERY_ERROR: &str = "WeCom delivery was interrupted by an app restart.";
+const PREPARED_DELIVERY_SCAN_LIMIT: i64 = 64;
 
 pub enum PromptQueueOutcome {
     Queued,
@@ -127,11 +139,86 @@ impl AutomationStore {
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(|e| format!("set test SQLite synchronous mode failed: {e}"))?;
         db::initialize(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             notifier: Mutex::new(None),
         })
+    }
+
+    #[cfg(test)]
+    pub fn configure_wecom_installation_for_test(
+        &self,
+        bot_id: &str,
+        tenant_id: &str,
+        connector_id: &str,
+    ) -> Result<(), String> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO wecom_settings (config_id,bot_id,tenant_id,connector_id,updated_at)
+             VALUES ('default',?1,?2,?3,?4)
+             ON CONFLICT(config_id) DO UPDATE SET bot_id=excluded.bot_id,
+               tenant_id=excluded.tenant_id,connector_id=excluded.connector_id,
+               updated_at=excluded.updated_at",
+            params![bot_id, tenant_id, connector_id, db::now_ms()],
+        )
+        .map_err(|e| format!("configure test WeCom installation failed: {e}"))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn wecom_installation_id_for_test(&self) -> Result<String, String> {
+        let conn = self.lock_conn()?;
+        legacy_delivery_installation_id(&conn, "wecom")
+    }
+
+    #[cfg(test)]
+    pub fn synchronous_mode_for_test(&self) -> Result<i64, String> {
+        let conn = self.lock_conn()?;
+        conn.query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .map_err(|e| format!("read SQLite synchronous mode failed: {e}"))
+    }
+
+    #[cfg(test)]
+    pub fn delivery_outbox_count_for_test(&self) -> Result<usize, String> {
+        let conn = self.lock_conn()?;
+        conn.query_row("SELECT COUNT(*) FROM channel_delivery_outbox", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map(|count| count as usize)
+        .map_err(|e| format!("count test delivery outbox failed: {e}"))
+    }
+
+    #[cfg(test)]
+    pub fn expire_delivery_lease_for_test(&self, outbox_id: &str) -> Result<(), String> {
+        let conn = self.lock_conn()?;
+        let changed = conn
+            .execute(
+                "UPDATE channel_delivery_outbox SET lease_until=?2 WHERE id=?1 AND status='sending'",
+                params![outbox_id, db::now_ms() - 1],
+            )
+            .map_err(|e| format!("expire test delivery lease failed: {e}"))?;
+        if changed != 1 {
+            return Err("test delivery is not sending".to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn make_delivery_retry_ready_for_test(&self, outbox_id: &str) -> Result<(), String> {
+        let conn = self.lock_conn()?;
+        let changed = conn
+            .execute(
+                "UPDATE channel_delivery_outbox SET lease_until=?2 WHERE id=?1 AND status='prepared'",
+                params![outbox_id, db::now_ms() - 1],
+            )
+            .map_err(|e| format!("age test delivery retry failed: {e}"))?;
+        if changed != 1 {
+            return Err("test delivery is not prepared".to_string());
+        }
+        Ok(())
     }
 
     pub fn set_notifier(&self, notifier: AutomationNotifier) {
@@ -389,12 +476,13 @@ impl AutomationStore {
 
     /// Persist a finished bash/http run (or synthesized failure/skip record).
     pub fn record_completed_run(&self, run: CompletedRun) -> Result<String, String> {
-        self.record_completed_run_with_delivery(run, None, None)
+        self.record_completed_run_with_delivery(run, None, None, None)
     }
 
     pub fn record_completed_run_with_delivery(
         &self,
         run: CompletedRun,
+        delivery: Option<DeliveryConfig>,
         delivery_status: Option<DeliveryStatus>,
         delivery_error: Option<&str>,
     ) -> Result<String, String> {
@@ -406,8 +494,28 @@ impl AutomationStore {
             let task_name = db::read_cron_task(&tx, &run.task_id)?
                 .map(|task| task.name)
                 .unwrap_or_else(|| run.task_id.clone());
-            let record =
+            let mut record =
                 insert_finished_run(&tx, &run, RunState::Done, delivery_status, delivery_error)?;
+            if record.delivery_status == Some(DeliveryStatus::Pending) {
+                let config = delivery.as_ref().ok_or_else(|| {
+                    "pending automation delivery is missing its frozen configuration".to_string()
+                })?;
+                enqueue_or_fail_delivery(
+                    &tx,
+                    &DeliveryJob {
+                        execution_id: record.id.clone(),
+                        task_id: run.task_id.clone(),
+                        task_name: task_name.clone(),
+                        success: run.success,
+                        started_at: run.started_at,
+                        duration_ms: run.duration_ms,
+                        output: record.output.clone(),
+                        config: config.clone(),
+                    },
+                )?;
+                record = db::read_run(&tx, &record.id)?
+                    .ok_or_else(|| "completed automation run disappeared".to_string())?;
+            }
             let effect = if run.counted {
                 decrement_remaining(&tx, &run.task_id)?
             } else {
@@ -670,7 +778,7 @@ impl AutomationStore {
                         .map(|task| task.name)
                 })
                 .unwrap_or_else(|| task_id.clone());
-            let (delivery_status, delivery_job) = match prompt_request
+            let (delivery_status, mut delivery_job) = match prompt_request
                 .as_ref()
                 .and_then(|request| request.delivery.clone())
             {
@@ -707,6 +815,11 @@ impl AutomationStore {
             )
             .map_err(|e| format!("写入 prompt 完成结果失败：{e}"))?;
 
+            if let Some(job) = delivery_job.as_ref() {
+                if !enqueue_or_fail_delivery(&tx, job)? {
+                    delivery_job = None;
+                }
+            }
             let effect = if prompt_run_is_counted(request_json.as_deref()) {
                 decrement_remaining(&tx, &task_id)?
             } else {
@@ -763,39 +876,131 @@ impl AutomationStore {
         Ok(expired.len())
     }
 
-    /// A completed run can be committed before its external delivery finishes.
-    /// After a restart there is no in-memory delivery job left to resume, so
-    /// terminate those orphaned states and surface the completed run normally.
+    /// Recover only deliveries which cannot be resumed safely. Prepared
+    /// outbox rows remain eligible for a fresh claim; sending rows are first
+    /// converted to unknown because the external result may be ambiguous.
     pub fn recover_interrupted_deliveries(&self) -> Result<usize, String> {
+        self.recover_delivery_states(true)
+    }
+
+    /// Reconcile leases that expired while this process is still running.
+    /// Once a send was claimed, a lost worker cannot prove whether the
+    /// external side accepted it, so expired in-flight rows become unknown.
+    pub fn recover_expired_deliveries(&self) -> Result<usize, String> {
+        self.recover_delivery_states(false)
+    }
+
+    fn recover_delivery_states(&self, include_unexpired: bool) -> Result<usize, String> {
         let completed = {
             let mut conn = self.lock_conn()?;
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|e| format!("begin interrupted delivery recovery failed: {e}"))?;
+            let now = db::now_ms();
+            tx.execute(
+                "UPDATE channel_delivery_outbox
+                 SET status='unknown', lease_until=NULL,
+                     last_error=COALESCE(last_error, ?1), updated_at=?2
+                 WHERE status='sending' AND (?3 OR lease_until IS NULL OR lease_until<=?2)",
+                params![
+                    "WeCom delivery was interrupted after send became in-flight.",
+                    now,
+                    include_unexpired,
+                ],
+            )
+            .map_err(|e| format!("mark in-flight deliveries unknown failed: {e}"))?;
             let execution_ids = {
                 let mut stmt = tx
                     .prepare(
-                        "SELECT execution_id FROM automation_cron_runs
-                         WHERE state IN ('done', 'expired') AND delivery_status = 'pending'
+                        "SELECT r.execution_id,o.id,o.status,o.last_error,
+                                COALESCE(t.enabled,0),COALESCE(t.validation_status,'missing')
+                         FROM automation_cron_runs r
+                         LEFT JOIN channel_delivery_outbox o ON o.run_id=r.execution_id
+                         LEFT JOIN channel_delivery_targets t ON t.id=o.target_id
+                         WHERE r.state IN ('done', 'expired') AND r.delivery_status = 'pending'
                          ORDER BY started_at ASC, execution_id ASC",
                     )
                     .map_err(|e| format!("prepare interrupted delivery recovery failed: {e}"))?;
                 let rows = stmt
-                    .query_map([], |row| row.get::<_, String>(0))
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, i64>(4)? != 0,
+                            row.get::<_, String>(5)?,
+                        ))
+                    })
                     .map_err(|e| format!("read interrupted deliveries failed: {e}"))?;
                 rows.collect::<Result<Vec<_>, _>>()
                     .map_err(|e| format!("read interrupted delivery row failed: {e}"))?
             };
 
             let mut completed = Vec::with_capacity(execution_ids.len());
-            for execution_id in execution_ids {
+            for (
+                execution_id,
+                outbox_id,
+                outbox_status,
+                outbox_error,
+                target_enabled,
+                target_validation,
+            ) in execution_ids
+            {
+                if outbox_status.as_deref() == Some("sending") {
+                    continue;
+                }
+                if outbox_status.as_deref() == Some("prepared")
+                    && target_enabled
+                    && target_validation == "valid"
+                {
+                    continue;
+                }
+                let invalid_prepared = outbox_status.as_deref() == Some("prepared");
+                if invalid_prepared {
+                    if let Some(outbox_id) = outbox_id.as_deref() {
+                        tx.execute(
+                            "UPDATE channel_delivery_outbox
+                             SET status='failed',lease_until=NULL,
+                                 last_error=COALESCE(last_error,?2),updated_at=?3
+                             WHERE id=?1 AND status='prepared'",
+                            params![
+                                outbox_id,
+                                "Automation delivery target was disabled or invalidated.",
+                                now,
+                            ],
+                        )
+                        .map_err(|e| format!("fail unroutable prepared delivery failed: {e}"))?;
+                    }
+                }
+                let (status, error) = match outbox_status.as_deref() {
+                    Some("sent") => (DeliveryStatus::Sent, None),
+                    Some("unknown") => (
+                        DeliveryStatus::Unknown,
+                        Some(
+                            outbox_error.unwrap_or_else(|| INTERRUPTED_DELIVERY_ERROR.to_string()),
+                        ),
+                    ),
+                    Some("prepared") => (
+                        DeliveryStatus::Failed,
+                        Some(outbox_error.unwrap_or_else(|| {
+                            "Automation delivery target was disabled or invalidated.".to_string()
+                        })),
+                    ),
+                    _ => (
+                        DeliveryStatus::Failed,
+                        Some(
+                            outbox_error.unwrap_or_else(|| INTERRUPTED_DELIVERY_ERROR.to_string()),
+                        ),
+                    ),
+                };
                 let updated = tx
                     .execute(
                         "UPDATE automation_cron_runs
-                         SET delivery_status = 'failed', delivery_error = ?2
+                         SET delivery_status = ?2, delivery_error = ?3
                          WHERE execution_id = ?1 AND state IN ('done', 'expired')
                            AND delivery_status = 'pending'",
-                        params![execution_id, INTERRUPTED_DELIVERY_ERROR],
+                        params![execution_id, status.as_str(), error],
                     )
                     .map_err(|e| format!("fail interrupted delivery failed: {e}"))?;
                 if updated == 0 {
@@ -913,6 +1118,10 @@ impl AutomationStore {
                     ],
                 )
                 .map_err(|e| format!("标记 prompt run 过期失败：{e}"))?;
+                let delivery_prepared = match delivery_job.as_ref() {
+                    Some(job) => enqueue_or_fail_delivery(&tx, job)?,
+                    None => false,
+                };
                 if prompt_run_is_counted(request_json.as_deref())
                     && matches!(
                         decrement_remaining(&tx, &task_id)?,
@@ -927,7 +1136,8 @@ impl AutomationStore {
                 if record.delivery_status != Some(DeliveryStatus::Pending) {
                     completed_runs.push((task_name, record));
                 }
-                if let Some(job) = delivery_job {
+                if delivery_prepared {
+                    let job = delivery_job.expect("prepared delivery has a job");
                     delivery_jobs.push(job);
                 }
                 events.push(PromptExpiredEvent {
@@ -969,43 +1179,90 @@ impl AutomationStore {
         db::read_runs(&conn, task_id, limit)
     }
 
-    pub fn update_run_delivery(
+    pub fn claim_delivery_for_run(
         &self,
         execution_id: &str,
-        status: DeliveryStatus,
+    ) -> Result<Option<ClaimedDelivery>, String> {
+        let mut conn = self.lock_conn()?;
+        claim_outbox_for_run_in_connection(&mut conn, execution_id, 30_000)
+    }
+
+    pub fn prepared_delivery_run_ids(&self) -> Result<Vec<String>, String> {
+        let conn = self.lock_conn()?;
+        let now = db::now_ms();
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT o.run_id
+                 FROM channel_delivery_outbox o
+                 JOIN channel_delivery_targets t ON t.id=o.target_id
+                 JOIN automation_cron_runs r ON r.execution_id=o.run_id
+                 WHERE o.status='prepared' AND (o.lease_until IS NULL OR o.lease_until<=?1)
+                   AND t.enabled=1 AND t.validation_status='valid'
+                   AND r.delivery_status='pending' AND o.run_id IS NOT NULL
+                 ORDER BY o.updated_at,o.created_at,o.run_id
+                 LIMIT ?2",
+            )
+            .map_err(|e| format!("prepare resumable automation deliveries failed: {e}"))?;
+        let run_ids = stmt
+            .query_map(params![now, PREPARED_DELIVERY_SCAN_LIMIT], |row| row.get(0))
+            .map_err(|e| format!("read resumable automation deliveries failed: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("read resumable automation delivery row failed: {e}"))?;
+        Ok(run_ids)
+    }
+
+    pub fn finish_delivery(
+        &self,
+        execution_id: &str,
+        outbox_id: &str,
+        outbox_status: &str,
         error: Option<&str>,
     ) -> Result<(), String> {
-        if !matches!(status, DeliveryStatus::Sent | DeliveryStatus::Failed) {
-            return Err("delivery status update must be sent or failed".to_string());
-        }
+        let run_status = match outbox_status {
+            "sent" => DeliveryStatus::Sent,
+            "unknown" => DeliveryStatus::Unknown,
+            _ => DeliveryStatus::Failed,
+        };
         let error = error.map(|value| summarize_text(value, 500));
         let completed = {
             let mut conn = self.lock_conn()?;
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|e| format!("begin delivery status update failed: {e}"))?;
+                .map_err(|e| format!("begin delivery completion failed: {e}"))?;
+            let bound_run_id: Option<String> = tx
+                .query_row(
+                    "SELECT run_id FROM channel_delivery_outbox WHERE id=?1",
+                    params![outbox_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| format!("read delivery outbox binding failed: {e}"))?;
+            if bound_run_id.as_deref() != Some(execution_id) {
+                return Err("delivery outbox is not bound to the automation run".to_string());
+            }
+            mark_delivery_in_transaction(&tx, outbox_id, outbox_status, error.as_deref())?;
             let updated = tx
                 .execute(
                     "UPDATE automation_cron_runs
-                     SET delivery_status = ?2, delivery_error = ?3
-                     WHERE execution_id = ?1 AND delivery_status = 'pending'",
-                    params![execution_id.trim(), status.as_str(), error],
+                     SET delivery_status=?2,delivery_error=?3
+                     WHERE execution_id=?1 AND delivery_status='pending'",
+                    params![execution_id, run_status.as_str(), error],
                 )
-                .map_err(|e| format!("update run delivery status failed: {e}"))?;
-            let completed = if updated == 0 {
-                None
-            } else {
-                db::read_run(&tx, execution_id.trim())?.map(|run| {
-                    let task_name = db::read_cron_task(&tx, &run.task_id)
-                        .ok()
-                        .flatten()
-                        .map(|task| task.name)
-                        .unwrap_or_else(|| run.task_id.clone());
-                    (task_name, run)
-                })
-            };
+                .map_err(|e| format!("update automation delivery result failed: {e}"))?;
+            if updated != 1 {
+                return Err("automation run is not pending delivery".to_string());
+            }
+            let run = db::read_run(&tx, execution_id)?.ok_or_else(|| {
+                "automation run disappeared while completing delivery".to_string()
+            })?;
+            let task_name = db::read_cron_task(&tx, &run.task_id)
+                .ok()
+                .flatten()
+                .map(|task| task.name)
+                .unwrap_or_else(|| run.task_id.clone());
+            let completed = Some((task_name, run));
             tx.commit()
-                .map_err(|e| format!("commit delivery status update failed: {e}"))?;
+                .map_err(|e| format!("commit delivery completion failed: {e}"))?;
             completed
         };
         if let Some((task_name, run)) = completed {
@@ -1014,14 +1271,58 @@ impl AutomationStore {
         Ok(())
     }
 
+    pub fn requeue_delivery(
+        &self,
+        execution_id: &str,
+        outbox_id: &str,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| format!("begin delivery retry failed: {e}"))?;
+        let bound_run_id: Option<String> = tx
+            .query_row(
+                "SELECT run_id FROM channel_delivery_outbox WHERE id=?1",
+                params![outbox_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("read retry delivery binding failed: {e}"))?;
+        if bound_run_id.as_deref() != Some(execution_id) {
+            return Err("delivery outbox is not bound to the automation run".to_string());
+        }
+        let error = error.map(|value| summarize_text(value, 500));
+        requeue_delivery_in_transaction(&tx, outbox_id, error.as_deref())?;
+        let pending: bool = tx
+            .query_row(
+                "SELECT delivery_status='pending' FROM automation_cron_runs WHERE execution_id=?1",
+                params![execution_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| format!("read retry automation run failed: {e}"))?
+            .unwrap_or(false);
+        if !pending {
+            return Err("automation run is not pending delivery".to_string());
+        }
+        tx.commit()
+            .map_err(|e| format!("commit delivery retry failed: {e}"))?;
+        Ok(())
+    }
+
     pub fn clear_runs(&self, task_id: &str) -> Result<usize, String> {
         let conn = self.lock_conn()?;
-        conn.execute(
-            "DELETE FROM automation_cron_runs
-             WHERE task_id = ?1 AND state IN ('done', 'expired')",
-            params![task_id],
-        )
-        .map_err(|e| format!("清理 automation_cron_runs 失败：{e}"))
+        let deleted = conn
+            .execute(
+                "DELETE FROM automation_cron_runs
+             WHERE task_id = ?1 AND state IN ('done', 'expired')
+               AND COALESCE(delivery_status, '') <> 'pending'",
+                params![task_id],
+            )
+            .map_err(|e| format!("清理 automation_cron_runs 失败：{e}"))?;
+        db::prune_orphaned_delivery_outbox(&conn)?;
+        Ok(deleted)
     }
 
     /// Enabled, non-exhausted tasks for the scheduler's diff reload. Workdirs
@@ -1274,6 +1575,182 @@ fn insert_finished_run(
         output,
         delivery_status,
         delivery_error: delivery_error.map(ToString::to_string),
+    })
+}
+
+fn enqueue_or_fail_delivery(conn: &Connection, job: &DeliveryJob) -> Result<bool, String> {
+    match enqueue_delivery_job(conn, job) {
+        Ok(()) => Ok(true),
+        Err(PrepareDeliveryError::Rejected(error)) => {
+            let error = summarize_text(&error, 500);
+            let changed = conn
+                .execute(
+                    "UPDATE automation_cron_runs
+                     SET delivery_status='failed',delivery_error=?2
+                     WHERE execution_id=?1 AND delivery_status='pending'",
+                    params![job.execution_id, error],
+                )
+                .map_err(|e| format!("record rejected automation delivery failed: {e}"))?;
+            if changed != 1 {
+                return Err("automation run is not pending a rejected delivery".to_string());
+            }
+            Ok(false)
+        }
+        Err(PrepareDeliveryError::Storage(error)) => Err(error),
+    }
+}
+
+fn enqueue_delivery_job(conn: &Connection, job: &DeliveryJob) -> Result<(), PrepareDeliveryError> {
+    let target = resolve_or_migrate_delivery_target(conn, &job.config)?;
+    let body = super::scheduler::format_delivery_markdown(job);
+    enqueue_delivery_in_transaction(
+        conn,
+        &EnqueueDelivery {
+            target_id: target.id,
+            run_id: Some(job.execution_id.clone()),
+            idempotency_key: format!("automation:{}:delivery:v1", job.execution_id),
+            body,
+        },
+    )
+    .map_err(|error| {
+        PrepareDeliveryError::Storage(format!("enqueue automation delivery failed: {error}"))
+    })?;
+    Ok(())
+}
+
+fn resolve_or_migrate_delivery_target(
+    conn: &Connection,
+    config: &DeliveryConfig,
+) -> Result<crate::services::channel_control::DeliveryTarget, PrepareDeliveryError> {
+    let installation_id = current_delivery_installation_id(conn, &config.channel)?;
+    if let Some(target) = resolve_delivery_target(conn, &config.target_id).map_err(|error| {
+        PrepareDeliveryError::Storage(format!("resolve delivery target failed: {error}"))
+    })? {
+        if !target.enabled {
+            return Err(PrepareDeliveryError::Rejected(
+                "automation delivery target is disabled".to_string(),
+            ));
+        }
+        if target.validation_status != "valid" {
+            return Err(PrepareDeliveryError::Rejected(
+                "automation delivery target is not validated".to_string(),
+            ));
+        }
+        if target.channel != config.channel {
+            return Err(PrepareDeliveryError::Rejected(
+                "automation delivery target channel does not match".to_string(),
+            ));
+        }
+        if target.installation_id != installation_id {
+            return Err(PrepareDeliveryError::Rejected(
+                "automation delivery target belongs to a different channel installation"
+                    .to_string(),
+            ));
+        }
+        return Ok(target);
+    }
+    if config.target_id.starts_with("target_") {
+        return Err(PrepareDeliveryError::Rejected(
+            "automation delivery target is not registered".to_string(),
+        ));
+    }
+
+    let expected_id = stable_target_id(
+        &config.channel,
+        &installation_id,
+        "conversation",
+        &config.target_id,
+    );
+    if let Some(target) = resolve_delivery_target(conn, &expected_id).map_err(|error| {
+        PrepareDeliveryError::Storage(format!("resolve delivery target failed: {error}"))
+    })? {
+        if !target.enabled {
+            return Err(PrepareDeliveryError::Rejected(
+                "automation delivery target is disabled".to_string(),
+            ));
+        }
+        if target.validation_status != "valid" {
+            return Err(PrepareDeliveryError::Rejected(
+                "automation delivery target is not validated".to_string(),
+            ));
+        }
+        return Ok(target);
+    }
+    upsert_delivery_target_in_transaction(
+        conn,
+        &SaveDeliveryTarget {
+            channel: config.channel.clone(),
+            installation_id,
+            external_target_id: config.target_id.clone(),
+            target_type: "conversation".to_string(),
+            display_name: String::new(),
+            enabled: true,
+            validation_status: "valid".to_string(),
+        },
+    )
+    .map_err(|error| {
+        PrepareDeliveryError::Storage(format!(
+            "register automation delivery target failed: {error}"
+        ))
+    })
+}
+
+fn legacy_delivery_installation_id(conn: &Connection, channel: &str) -> Result<String, String> {
+    current_delivery_installation_id(conn, channel).map_err(|error| match error {
+        PrepareDeliveryError::Rejected(error) | PrepareDeliveryError::Storage(error) => error,
+    })
+}
+
+fn current_delivery_installation_id(
+    conn: &Connection,
+    channel: &str,
+) -> Result<String, PrepareDeliveryError> {
+    if channel != "wecom" {
+        return Err(PrepareDeliveryError::Rejected(format!(
+            "unsupported automation delivery channel: {channel}"
+        )));
+    }
+    let settings: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT tenant_id,bot_id,connector_id FROM wecom_settings WHERE config_id='default'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| {
+            PrepareDeliveryError::Storage(format!(
+                "read WeCom installation for delivery failed: {e}"
+            ))
+        })?;
+    let (tenant_id, bot_id, connector_id) = settings.ok_or_else(|| {
+        PrepareDeliveryError::Rejected(
+            "WeCom installation is not configured for automation delivery".to_string(),
+        )
+    })?;
+    let bot_id = bot_id.trim();
+    if bot_id.is_empty() {
+        return Err(PrepareDeliveryError::Rejected(
+            "WeCom bot ID is required before automation delivery can be registered".to_string(),
+        ));
+    }
+    let tenant_id = if tenant_id.trim().is_empty() {
+        bot_id
+    } else {
+        tenant_id.trim()
+    };
+    let connector_id = if connector_id.trim().is_empty() {
+        "wecom-desktop"
+    } else {
+        connector_id.trim()
+    };
+    serde_json::to_string(&json!({
+        "bot_id": bot_id,
+        "channel": "wecom",
+        "connector_id": connector_id,
+        "tenant_id": tenant_id,
+    }))
+    .map_err(|e| {
+        PrepareDeliveryError::Storage(format!("serialize WeCom installation id failed: {e}"))
     })
 }
 

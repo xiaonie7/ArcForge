@@ -29,6 +29,19 @@ separately deployed Gateway process. Group messages are disabled unless
 `ARCFORGE_GATEWAY_CHANNEL_ALLOW_GROUP_MESSAGES=true` is set in both the
 connector and Gateway configuration.
 
+The Gateway persists accepted commands and their terminal results in SQLite.
+Its default path is `./arcforge-gateway-state.sqlite3`; production deployments
+must place this file on a persistent volume by setting
+`ARCFORGE_GATEWAY_STATE_DB` (for example, `/var/lib/arcforge/gateway-state.sqlite3`).
+Gateway startup fails if the configured database cannot be created or opened;
+it never silently falls back to volatile command state.
+
+Session mappings and processed callback IDs are stored in
+`~/.arcforge/channel-state/wecom-state.sqlite3`. Override the location with
+`ARCFORGE_CHANNEL_STATE_DB`. The connector refuses to start when a configured
+state database cannot be opened; it does not silently fall back to volatile
+state.
+
 ## Files and images
 
 Incoming `message.file` and `message.image` callbacks are downloaded and
@@ -71,10 +84,17 @@ are never converted into ordinary model prompts. `/help` does not start or
 interrupt a desktop run. Other slash-prefixed text remains a normal user
 message. Sessions are isolated by WeCom user and chat: direct messages use one
 session per user, while group sessions also include the group chat ID. Messages
-for one identity are submitted in arrival order while different identities can
-run concurrently. A failed `/new` keeps the previous session active. Session
-IDs remain stable for the lifetime of the connector process; restarting the
-connector starts fresh sessions.
+for one identity are submitted one at a time across Connector processes that
+share the state database, while different identities can run concurrently.
+Within one Connector process, queued callbacks retain arrival order. A failed
+`/new` keeps the previous session active. Its rotation
+candidate is persisted before Gateway submission, so a canonical retry cannot
+commit a candidate that was never run. Commands accepted before a Gateway
+disconnect are resubmitted with the same external message ID after reconnection
+and reuse the canonical run. Session IDs and completed callback results remain
+stable across Connector restarts. Expired processing leases can be reclaimed
+safely, while claim-token fencing prevents an older worker from replacing the
+newer worker's result.
 
 The desktop receives the authenticated `external_user_id` in the trusted
 principal context for each turn. The identity is used to isolate conversations

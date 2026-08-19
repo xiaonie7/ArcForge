@@ -15,6 +15,7 @@ func TestLoadNormalizesTokenAndTLSPaths(t *testing.T) {
 	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_BOT_ID", " bot-1 ")
 	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_CONNECTOR_ID", " connector-1 ")
 	t.Setenv("ARCFORGE_GATEWAY_CHANNEL_ALLOW_GROUP_MESSAGES", "true")
+	t.Setenv("ARCFORGE_GATEWAY_STATE_DB", " state/gateway.sqlite3 ")
 	t.Setenv("ARCFORGE_GATEWAY_TLS_CERT", " cert.pem ")
 	t.Setenv("ARCFORGE_GATEWAY_TLS_KEY", "\tkey.pem\r\n")
 	resetFlagsForTest(t)
@@ -32,6 +33,20 @@ func TestLoadNormalizesTokenAndTLSPaths(t *testing.T) {
 	}
 	if cfg.TLSKey != "key.pem" {
 		t.Fatalf("TLSKey = %q, want %q", cfg.TLSKey, "key.pem")
+	}
+	if cfg.GatewayStateDB != "state/gateway.sqlite3" {
+		t.Fatalf("GatewayStateDB = %q", cfg.GatewayStateDB)
+	}
+}
+
+func TestLoadEnablesDurableGatewayStateByDefault(t *testing.T) {
+	t.Setenv("ARCFORGE_GATEWAY_TOKEN", "dev-token")
+	t.Setenv("ARCFORGE_GATEWAY_STATE_DB", "")
+	t.Setenv("LIVEAGENT_GATEWAY_STATE_DB", "")
+	resetFlagsForTest(t)
+	cfg := Load()
+	if cfg.GatewayStateDB != "arcforge-gateway-state.sqlite3" {
+		t.Fatalf("GatewayStateDB default = %q", cfg.GatewayStateDB)
 	}
 }
 

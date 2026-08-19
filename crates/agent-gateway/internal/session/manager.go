@@ -76,6 +76,16 @@ type Status struct {
 }
 
 func NewManager() *Manager {
+	return newManager(nil)
+}
+
+// NewManagerWithChatCommandPersistence enables durable command idempotency.
+// The caller owns the store and should close it during process shutdown.
+func NewManagerWithChatCommandPersistence(store *SQLiteChatCommandStore) *Manager {
+	return newManager(store)
+}
+
+func newManager(commandStore chatCommandStore) *Manager {
 	m := &Manager{
 		registry:         newSessionRegistry(),
 		syncHub:          newSyncHub(),
@@ -84,7 +94,7 @@ func NewManager() *Manager {
 		managedProcesses: newManagedProcessHub(),
 		statusSubs:       newStatusSubscriberHub(),
 	}
-	m.convStreams = newConversationStreamStore(m.IsOnline)
+	m.convStreams = newConversationStreamStoreWithPersistence(m.IsOnline, commandStore)
 	go m.tunnelExpirySweepLoop()
 	return m
 }

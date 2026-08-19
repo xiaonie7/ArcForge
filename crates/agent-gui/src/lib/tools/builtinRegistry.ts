@@ -16,6 +16,7 @@ import {
   type SubagentRuntimeConfig,
 } from "../subagents";
 import { createAskUserQuestionTools } from "./askUserQuestionTools";
+import { BUILTIN_TOOL_CATALOG } from "./builtinToolCatalog";
 import type {
   BuiltinToolBundle,
   BuiltinToolExecutionContext,
@@ -50,9 +51,52 @@ export type BuiltinToolRegistry = {
   hasTool: (toolName: string) => boolean;
 };
 
+const permissionIdentifiersByToolName = (() => {
+  const result = new Map<string, string[]>();
+  for (const entry of BUILTIN_TOOL_CATALOG) {
+    result.set(entry.toolName.toLowerCase(), [entry.id, entry.toolName, entry.categoryId]);
+  }
+  return result;
+})();
+
+function normalizePermissionIdentifier(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function isToolAllowedBySystemPolicy(
+  toolName: string,
+  metadata: BuiltinToolMetadata | undefined,
+  allowedSystemTools: readonly string[] | undefined,
+) {
+  if (allowedSystemTools === undefined) return true;
+  // Skills, MCP, and Memory have dedicated policy fields and must not be
+  // accidentally coupled to the generic system-tool allowlist.
+  if (
+    metadata?.groupId === "skill" ||
+    metadata?.groupId === "mcp" ||
+    metadata?.groupId === "memory"
+  ) {
+    return true;
+  }
+
+  const allowed = new Set(allowedSystemTools.map(normalizePermissionIdentifier).filter(Boolean));
+  if (allowed.size === 0) return false;
+  const identifiers = [
+    toolName,
+    metadata?.groupId ?? "",
+    metadata?.displayCategory ?? "",
+    ...(permissionIdentifiersByToolName.get(toolName.toLowerCase()) ?? []),
+  ];
+  return identifiers.some((identifier) => allowed.has(normalizePermissionIdentifier(identifier)));
+}
+
 function createBuiltinToolRegistry(
   bundles: BuiltinToolBundle[],
   principal?: PrincipalContext,
+  allowedSystemTools?: readonly string[],
 ): BuiltinToolRegistry {
   const tools: BuiltinToolBundle["tools"] = [];
   const metadataByName = new Map<string, BuiltinToolMetadata>();
@@ -78,12 +122,15 @@ function createBuiltinToolRegistry(
 
   for (const bundle of bundles) {
     for (const tool of bundle.tools) {
+      const metadata = bundle.metadataByName.get(tool.name);
+      if (!isToolAllowedBySystemPolicy(tool.name, metadata, allowedSystemTools)) {
+        continue;
+      }
       if (executorsByName.has(tool.name)) {
         throw new Error(`Duplicate builtin tool name detected: ${tool.name}`);
       }
       executorsByName.set(tool.name, bundle.executeToolCall);
       registerCanonicalToolName(tool.name);
-      const metadata = bundle.metadataByName.get(tool.name);
       tools.push(tool);
       if (metadata) {
         metadataByName.set(tool.name, metadata);
@@ -160,7 +207,11 @@ type BuildBuiltinBaseToolRegistryParams = {
   applyMcpOps?: (ops: McpSettingsOp[]) => void;
   onMcpLoadError?: (message: string) => void;
   mcpLoadFailureMode?: "continue" | "throw";
+  /** Dedicated Memory capability gate for channel and unattended runs. */
+  memoryEnabled?: boolean;
   memoryToolMode?: "rw" | "ro";
+  /** Frozen system-tool identifiers for this run; undefined preserves local behavior. */
+  allowedSystemTools?: readonly string[];
   remoteWebTunnelsEnabled?: boolean;
   tunnelProjectPathKey?: string;
   tunnelPublicBaseUrl?: string;
@@ -213,7 +264,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
     );
   }
 
-  if (workspaceAccess === "full") {
+  if (workspaceAccess === "full" && !params.principal) {
     baseBundles.push(
       createCronTools({
         currentChatModel: params.currentChatModel,
@@ -229,7 +280,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
     }),
   );
 
-  if (workspaceAccess === "full") {
+  if (workspaceAccess === "full" && !params.principal) {
     baseBundles.push(
       createMcpManagerTools({
         workdir: params.workdir,
@@ -250,11 +301,15 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
   );
 
   if (workspaceAccess === "full") {
+    if (params.memoryEnabled !== false) {
+      baseBundles.push(
+        createMemoryTools({
+          workdir: params.workdir,
+          mode: params.memoryToolMode ?? "rw",
+        }),
+      );
+    }
     baseBundles.push(
-      createMemoryTools({
-        workdir: params.workdir,
-        mode: params.memoryToolMode ?? "rw",
-      }),
       createTunnelManagerTools({
         enabled: params.remoteWebTunnelsEnabled === true && params.runtimeScope === "chat",
         runtimeScope: params.runtimeScope,
@@ -316,10 +371,18 @@ export async function buildBuiltinToolRegistry(
 
   const subagentRuntime = params.subagentRuntime;
   if (!subagentRuntime || params.workspaceAccess === "none") {
-    return createBuiltinToolRegistry([...baseBundles, ...chatBundles], params.principal);
+    return createBuiltinToolRegistry(
+      [...baseBundles, ...chatBundles],
+      params.principal,
+      params.allowedSystemTools,
+    );
   }
 
-  const baseRegistry = createBuiltinToolRegistry(baseBundles, params.principal);
+  const baseRegistry = createBuiltinToolRegistry(
+    baseBundles,
+    params.principal,
+    params.allowedSystemTools,
+  );
   // The Agent tool description embeds the roster, so the store must be
   // hydrated before the bundle is created. Roster load failures degrade to an
   // empty roster instead of blocking the whole registry.
@@ -336,38 +399,43 @@ export async function buildBuiltinToolRegistry(
       })
     : null;
   const parentBundles = parentMessageBundle ? [...baseBundles, parentMessageBundle] : baseBundles;
-  return createBuiltinToolRegistry([
-    ...parentBundles,
-    ...chatBundles,
-    createSubagentTools({
-      providerId: subagentRuntime.providerId,
-      model: subagentRuntime.model,
-      runtime: subagentRuntime.runtime,
-      runtimePlatform: params.runtimePlatform,
-      runtimeEnvironment: params.runtimeEnvironment,
-      workdir: params.workdir,
-      resolveHomeDir,
-      sessionId: subagentRuntime.sessionId,
-      templates: subagentRuntime.templates,
-      store: subagentRuntime.store,
-      scheduler: subagentRuntime.scheduler,
-      baseTools: baseRegistry.tools,
-      executeToolCall: baseRegistry.executeToolCall,
-      metadataByName: baseRegistry.metadataByName,
-      createSubagentToolRegistry: async (workdir) =>
-        createBuiltinToolRegistry(
-          await buildBaseBuiltinToolBundles({
-            ...params,
-            workdir,
-            fileState: createFileToolState(),
-            skillsEnabled: false,
-            applyMcpOps: undefined,
-            selectedSystemToolIds: [],
-            mcpLoadFailureMode: "continue",
-            memoryToolMode: "ro",
-          }),
-          params.principal,
-        ),
-    }),
-  ]);
+  return createBuiltinToolRegistry(
+    [
+      ...parentBundles,
+      ...chatBundles,
+      createSubagentTools({
+        providerId: subagentRuntime.providerId,
+        model: subagentRuntime.model,
+        runtime: subagentRuntime.runtime,
+        runtimePlatform: params.runtimePlatform,
+        runtimeEnvironment: params.runtimeEnvironment,
+        workdir: params.workdir,
+        resolveHomeDir,
+        sessionId: subagentRuntime.sessionId,
+        templates: subagentRuntime.templates,
+        store: subagentRuntime.store,
+        scheduler: subagentRuntime.scheduler,
+        baseTools: baseRegistry.tools,
+        executeToolCall: baseRegistry.executeToolCall,
+        metadataByName: baseRegistry.metadataByName,
+        createSubagentToolRegistry: async (workdir) =>
+          createBuiltinToolRegistry(
+            await buildBaseBuiltinToolBundles({
+              ...params,
+              workdir,
+              fileState: createFileToolState(),
+              skillsEnabled: false,
+              applyMcpOps: undefined,
+              selectedSystemToolIds: [],
+              mcpLoadFailureMode: "continue",
+              memoryToolMode: "ro",
+            }),
+            params.principal,
+            params.allowedSystemTools,
+          ),
+      }),
+    ],
+    params.principal,
+    params.allowedSystemTools,
+  );
 }

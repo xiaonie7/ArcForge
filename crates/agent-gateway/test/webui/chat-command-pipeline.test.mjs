@@ -282,6 +282,67 @@ test("failed update surfaces the gateway error", async () => {
   assert.equal(texts.some((text) => /did not start/.test(text)), true);
 });
 
+test("completed durable replay materializes its final answer without a history refresh", async () => {
+  const { pipeline, stores } = createHarness();
+  await pipeline.submit({
+    conversationId: "conv-1",
+    clientRequestId: "client-1",
+    message: "question",
+    submit: async () => ({ runId: "run-1", conversationId: "conv-1", acceptedSeq: 1 }),
+  });
+  pipeline.handleCommandUpdate({
+    runId: "run-1",
+    clientRequestId: "client-1",
+    conversationId: "conv-1",
+    phase: "completed",
+    errorCode: null,
+    message: "durable final answer",
+    runStarted: false,
+  });
+
+  assert.deepEqual(transcriptTexts(stores.get("conv-1")), ["question", "durable final answer"]);
+  assert.equal(pipeline.hasPending("conv-1"), false);
+});
+
+test("started terminal update preserves the prompt until ordered stream failure arrives", async () => {
+  const { pipeline, stores, outcomes } = createHarness();
+  await pipeline.submit({
+    conversationId: "conv-1",
+    clientRequestId: "client-1",
+    message: "keep this prompt",
+    submit: async () => ({ runId: "run-1", conversationId: "conv-1", acceptedSeq: 1 }),
+  });
+  pipeline.handleCommandUpdate({
+    runId: "run-1",
+    clientRequestId: "client-1",
+    conversationId: "conv-1",
+    phase: "failed",
+    errorCode: "runtime_error",
+    message: "run failed",
+    runStarted: true,
+  });
+
+  const store = stores.get("conv-1");
+  assert.deepEqual(transcriptTexts(store), ["keep this prompt"]);
+  assert.equal(outcomes.failed.length, 1);
+  store.applyEvent({
+    type: "run_started",
+    conversation_id: "conv-1",
+    run_id: "run-1",
+    client_request_id: "client-1",
+    seq: 2,
+  });
+  store.applyEvent({
+    type: "run_finished",
+    conversation_id: "conv-1",
+    run_id: "run-1",
+    seq: 3,
+    status: "failed",
+    message: "run failed",
+  });
+  assert.deepEqual(transcriptTexts(store), ["keep this prompt", "run failed"]);
+});
+
 test("run signals settle only on strict identity (runId or own clientRequestId)", async () => {
   const { pipeline } = createHarness();
   let releaseAccept;

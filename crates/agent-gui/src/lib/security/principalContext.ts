@@ -24,8 +24,14 @@ export type TrustedChannelOrigin = {
   requestId: string;
 };
 
+export type ChannelInstallationIdentity = Pick<
+  TrustedChannelOrigin,
+  "botId" | "channel" | "connectorId" | "tenantId"
+>;
+
 export type PrincipalContext = Readonly<{
   principalId: string;
+  installationId: string;
   channel: "wecom" | string;
   tenantId: string;
   botId: string;
@@ -42,6 +48,24 @@ export type PrincipalContext = Readonly<{
 
 const MAX_ID_LENGTH = 512;
 const MAX_CHANNEL_SESSION_ID_LENGTH = 128;
+
+/**
+ * Cross-language installation identity shared with the Connector. Keep both
+ * the snake_case keys and their insertion order aligned with Python's compact
+ * JSON serialization contract.
+ */
+export function buildChannelInstallationId(input: ChannelInstallationIdentity) {
+  const botId = requiredId(input.botId, "bot_id");
+  const channel = requiredId(input.channel, "channel").toLowerCase();
+  const connectorId = requiredId(input.connectorId, "connector_id");
+  const tenantId = requiredId(input.tenantId, "tenant_id");
+  return JSON.stringify({
+    bot_id: botId,
+    channel,
+    connector_id: connectorId,
+    tenant_id: tenantId,
+  });
+}
 
 function requiredId(value: unknown, field: string, maxLength = MAX_ID_LENGTH) {
   if (typeof value !== "string") {
@@ -155,9 +179,7 @@ function identityKey(origin: TrustedChannelOrigin) {
   // A private chat is one conversation per WeCom user. A group chat adds the
   // chat id before the user id, so members never share a transcript.
   return [
-    origin.channel,
-    origin.tenantId,
-    origin.botId,
+    buildChannelInstallationId(origin),
     origin.chatType,
     origin.chatType === "group" ? origin.chatId : "direct",
     origin.externalUserId,
@@ -172,10 +194,12 @@ export async function resolvePrincipalContext(
   expectedRequestId?: string,
 ): Promise<PrincipalContext> {
   const origin = normalizeTrustedChannelOrigin(originValue, expectedRequestId);
+  const installationId = buildChannelInstallationId(origin);
   const key = identityKey(origin);
   const principalId = `wecom:${await sha256Hex(`principal|${key}`)}`;
   return Object.freeze({
     principalId,
+    installationId,
     channel: origin.channel,
     tenantId: origin.tenantId,
     botId: origin.botId,
@@ -194,9 +218,7 @@ export async function resolvePrincipalContext(
 /** Stable owner-scoped id. The Gateway-provided conversation id is ignored. */
 export async function derivePrincipalConversationId(principal: PrincipalContext) {
   const key = [
-    principal.channel,
-    principal.tenantId,
-    principal.botId,
+    principal.installationId,
     principal.chatType,
     principal.chatType === "group" ? principal.chatId : "direct",
     principal.externalUserId,

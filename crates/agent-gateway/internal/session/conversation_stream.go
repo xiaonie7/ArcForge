@@ -1,6 +1,9 @@
 package session
 
 import (
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +39,7 @@ const (
 	conversationSubscriberBuffer  = 256
 	pendingChatRunRetention       = 5 * time.Minute
 	chatCommandDedupeRetention    = 24 * time.Hour
+	chatCommandRecoveryGrace      = 30 * time.Second
 	// conversationRunReportLostTimeout is the grace window before a run absent
 	// from the desktop's run reports is finalized as lost.
 	conversationRunReportLostTimeout = 15 * time.Second
@@ -118,14 +122,15 @@ type ConversationActivityEvent struct {
 }
 
 // ChatCommandUpdate notifies the connection that issued a chat command about
-// pre-stream outcomes.
+// dispatch progress and terminal outcomes.
 type ChatCommandUpdate struct {
 	RunID           string
 	ClientRequestID string
 	ConversationID  string
-	Phase           string // "bound" | "queued_in_gui" | "failed"
+	Phase           string // dispatch phase or completed | failed | cancelled | unknown
 	ErrorCode       string
 	Message         string
+	RunStarted      bool
 }
 
 type streamSubscriber struct {
@@ -180,6 +185,9 @@ type chatRunRecord struct {
 	// the agent's ref-bearing user_message, so a reconnect replay of the same
 	// event cannot seed a second truncation.
 	rebaseSeeded bool
+	// presentedFiles mirrors durable PresentFile metadata collected while the
+	// run is live. The SQLite store remains authoritative after a restart.
+	presentedFiles []ChatCommandPresentedFile
 }
 
 // chatCommandDedupeRecord is the process-local idempotency key for WebUI chat
@@ -187,10 +195,27 @@ type chatRunRecord struct {
 // long enough to cover WebSocket reconnect/retry windows without keeping full
 // transcript state alive.
 type chatCommandDedupeRecord struct {
-	runID          string
-	conversationID string
-	acceptedSeq    int64
-	createdAt      time.Time
+	clientRequestID     string
+	runID               string
+	conversationID      string
+	acceptedSeq         int64
+	createdAt           time.Time
+	state               string
+	dispatchPhase       string
+	terminalStatus      string
+	terminalErrorCode   string
+	terminalMessage     string
+	terminalPayloadJSON string
+	presentedFiles      []ChatCommandPresentedFile
+}
+
+// ChatCommandPresentedFile is the bounded, validated-on-replay descriptor for
+// one PresentFile tool result. PayloadJSON contains metadata only; file bytes
+// are re-read from the Desktop with file-id/size/mtime fencing when replayed.
+type ChatCommandPresentedFile struct {
+	Seq         int64  `json:"seq"`
+	Workdir     string `json:"workdir"`
+	PayloadJSON string `json:"payload_json"`
 }
 
 // chatCommandUpdateRecord carries the latest pre-stream update for a run with
@@ -203,6 +228,24 @@ type chatCommandUpdateRecord struct {
 	at     time.Time
 }
 
+type pendingChatCommandFinish struct {
+	clientRequestID string
+	runID           string
+	status          string
+	errorCode       string
+	message         string
+	payload         map[string]any
+	createdAt       time.Time
+}
+
+type pendingChatCommandBind struct {
+	clientRequestID string
+	runID           string
+	conversationID  string
+	acceptedSeq     int64
+	createdAt       time.Time
+}
+
 type pendingChatRun struct {
 	runID           string
 	clientRequestID string
@@ -212,14 +255,23 @@ type pendingChatRun struct {
 }
 
 type conversationStreamStore struct {
-	mu              sync.Mutex
+	mu sync.Mutex
+	// recoveryMu serializes Desktop-ledger reconciliation with durable lease
+	// expiry. Both paths release mu around SQLite, but only one may choose the
+	// canonical terminal result for a recovering run.
+	recoveryMu      sync.Mutex
 	streams         map[string]*conversationStream
 	pendingRuns     map[string]*pendingChatRun
 	runs            map[string]*chatRunRecord
 	commandDedup    map[string]*chatCommandDedupeRecord
 	commandWatchers map[string][]chan ChatCommandUpdate
 	commandUpdates  map[string]chatCommandUpdateRecord
+	recoveringRuns  map[string]*chatCommandDedupeRecord
+	finishingRuns   map[string]struct{}
+	finishRetries   map[string]*pendingChatCommandFinish
+	bindRetries     map[string]*pendingChatCommandBind
 	nextSubID       int
+	commandStore    chatCommandStore
 
 	activityHub *chatActivityHub
 
@@ -238,13 +290,25 @@ type conversationStreamStore struct {
 }
 
 func newConversationStreamStore(isOnline func() bool) *conversationStreamStore {
-	return &conversationStreamStore{
+	return newConversationStreamStoreWithPersistence(isOnline, nil)
+}
+
+func newConversationStreamStoreWithPersistence(
+	isOnline func() bool,
+	commandStore chatCommandStore,
+) *conversationStreamStore {
+	s := &conversationStreamStore{
 		streams:              make(map[string]*conversationStream),
 		pendingRuns:          make(map[string]*pendingChatRun),
 		runs:                 make(map[string]*chatRunRecord),
 		commandDedup:         make(map[string]*chatCommandDedupeRecord),
 		commandWatchers:      make(map[string][]chan ChatCommandUpdate),
 		commandUpdates:       make(map[string]chatCommandUpdateRecord),
+		recoveringRuns:       make(map[string]*chatCommandDedupeRecord),
+		finishingRuns:        make(map[string]struct{}),
+		finishRetries:        make(map[string]*pendingChatCommandFinish),
+		bindRetries:          make(map[string]*pendingChatCommandBind),
+		commandStore:         commandStore,
 		activityHub:          newChatActivityHub(),
 		isOnline:             isOnline,
 		eventRetention:       conversationEventRetention,
@@ -256,6 +320,36 @@ func newConversationStreamStore(isOnline func() bool) *conversationStreamStore {
 		runReportLostTimeout: conversationRunReportLostTimeout,
 		reaperInterval:       conversationReaperInterval,
 	}
+	if commandStore != nil {
+		records, err := commandStore.Recoverable(time.Now())
+		if err != nil {
+			logChatCommandStoreError("load_recoverable", "", err)
+		} else {
+			for _, record := range records {
+				if record == nil || record.runID == "" || record.clientRequestID == "" {
+					continue
+				}
+				s.commandDedup[record.clientRequestID] = record
+				s.recoveringRuns[record.runID] = record
+			}
+			if len(s.recoveringRuns) > 0 {
+				s.startReaper()
+				s.scheduleRecoveryExpiry()
+			}
+		}
+	}
+	return s
+}
+
+func logChatCommandStoreError(operation string, runID string, err error) {
+	if err == nil {
+		return
+	}
+	slog.Error("chat_command_persistence_failed",
+		"operation", strings.TrimSpace(operation),
+		"run_id", strings.TrimSpace(runID),
+		"error", err,
+	)
 }
 
 func (s *conversationStreamStore) streamLocked(conversationID string, now time.Time) *conversationStream {
@@ -451,24 +545,32 @@ func (m *Manager) ConversationRunWorkdir(conversationID string, runID string) (s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stream := s.streams[conversationID]
-	if stream == nil || stream.activity == nil || stream.activity.RunID != runID {
+	workdir := conversationRunWorkdirLocked(stream, runID)
+	if workdir == "" {
 		return "", false
+	}
+	return workdir, true
+}
+
+func conversationRunWorkdirLocked(stream *conversationStream, runID string) string {
+	if stream == nil || stream.activity == nil || stream.activity.RunID != runID {
+		return ""
 	}
 	// A runtime snapshot belongs to this exact run and is authoritative. The
 	// conversation and queued activity workdirs may still contain the previous
 	// run's sticky workspace when a channel command starts with an empty cwd.
 	if snapshot := stream.latestSnapshot; snapshot != nil && snapshot.RunID == runID {
 		if workdir := strings.TrimSpace(snapshot.Workdir); workdir != "" {
-			return workdir, true
+			return workdir
 		}
 	}
 	if workdir := strings.TrimSpace(stream.activity.Workdir); workdir != "" {
-		return workdir, true
+		return workdir
 	}
 	if workdir := strings.TrimSpace(stream.workdir); workdir != "" {
-		return workdir, true
+		return workdir
 	}
-	return "", false
+	return ""
 }
 
 // appendEventLocked assigns the next seq, freezes the payload, stores the
@@ -577,6 +679,16 @@ func (s *conversationStreamStore) runStartedLocked(
 	workdir string,
 	now time.Time,
 ) {
+	s.runStartedWithPersistenceLocked(stream, runID, workdir, now, true)
+}
+
+func (s *conversationStreamStore) runStartedWithPersistenceLocked(
+	stream *conversationStream,
+	runID string,
+	workdir string,
+	now time.Time,
+	persist bool,
+) {
 	if runID == "" || stream.runFinishedRecently(runID) {
 		return
 	}
@@ -597,7 +709,15 @@ func (s *conversationStreamStore) runStartedLocked(
 			s.appendEventLocked(stream, runID, StreamEventRunStarted, payload, now)
 			stream.activity.State = RunActivityRunning
 			stream.activity.UpdatedAt = now
+			clientRequestID := stream.activity.ClientRequestID
 			s.publishActivityLocked(stream, now)
+			if persist && s.commandStore != nil && clientRequestID != "" {
+				if err := s.markChatCommandLocked(
+					clientRequestID, runID, "running", "started", now,
+				); err != nil {
+					logChatCommandStoreError("mark_started", runID, err)
+				}
+			}
 		case RunActivityCancelling:
 			// A cancel is in flight; keep the cancelling state.
 		}
@@ -610,6 +730,12 @@ func (s *conversationStreamStore) runStartedLocked(
 		s.runFinishedLocked(stream, stream.activity.RunID, "completed", "", "", map[string]any{
 			"reason": "superseded",
 		}, now)
+		// Finish releases mu for its durable write after clearing the old
+		// activity. A newer start may win during that window; do not append a
+		// duplicate or supersede that newer observation when we resume.
+		if stream.runFinishedRecently(runID) || stream.activity != nil {
+			return
+		}
 	}
 	if workdir = strings.TrimSpace(workdir); workdir != "" {
 		stream.workdir = workdir
@@ -641,6 +767,11 @@ func (s *conversationStreamStore) runStartedLocked(
 		UpdatedAt:       now,
 	}
 	s.publishActivityLocked(stream, now)
+	if persist && s.commandStore != nil && record.clientRequestID != "" {
+		if err := s.markChatCommandLocked(record.clientRequestID, runID, "running", "started", now); err != nil {
+			logChatCommandStoreError("mark_started", runID, err)
+		}
+	}
 }
 
 // runFinishedLocked appends run_finished exactly once per run and clears the
@@ -654,20 +785,46 @@ func (s *conversationStreamStore) runFinishedLocked(
 	extra map[string]any,
 	now time.Time,
 ) {
+	s.runFinishedWithPersistenceLocked(
+		stream, runID, status, errorCode, message, extra, now, true,
+	)
+}
+
+func (s *conversationStreamStore) runFinishedWithPersistenceLocked(
+	stream *conversationStream,
+	runID string,
+	status string,
+	errorCode string,
+	message string,
+	extra map[string]any,
+	now time.Time,
+	persist bool,
+) {
 	if runID == "" || stream.runFinishedRecently(runID) {
 		return
 	}
+	if _, finishing := s.finishingRuns[runID]; finishing {
+		return
+	}
+	s.finishingRuns[runID] = struct{}{}
+	defer delete(s.finishingRuns, runID)
+	runStarted := stream.activity != nil && stream.activity.RunID == runID &&
+		stream.activity.State != RunActivityQueued
 	if stream.activity == nil || stream.activity.RunID != runID {
 		// Terminal signal for a run this stream never started (e.g. the
 		// gateway restarted mid-run). Synthesize the start so clients see a
 		// coherent pair, unless another run is currently active — then the
 		// stray terminal is recorded without touching the active run.
 		if stream.activity == nil {
-			s.runStartedLocked(stream, runID, "", now)
+			// This synthetic start is immediately followed by the terminal event;
+			// persisting an intermediate running phase would only add an unlock
+			// window in which the pair could be reordered.
+			s.runStartedWithPersistenceLocked(stream, runID, "", now, false)
 		}
 	}
 	payload := map[string]any{
-		"status": status,
+		"status":      status,
+		"run_started": runStarted,
 	}
 	if errorCode != "" {
 		payload["error_code"] = errorCode
@@ -676,14 +833,50 @@ func (s *conversationStreamStore) runFinishedLocked(
 		payload["message"] = message
 	}
 	for key, value := range extra {
-		if _, exists := payload[key]; !exists {
+		if key == "run_started" {
+			payload[key] = value
+		} else if _, exists := payload[key]; !exists {
 			payload[key] = value
 		}
 	}
-	if record := s.runs[runID]; record != nil && record.clientRequestID != "" {
-		payload["client_request_id"] = record.clientRequestID
+	if persistedRunStarted, ok := payload["run_started"].(bool); ok {
+		runStarted = persistedRunStarted
+	}
+	clientRequestID := ""
+	if record := s.runs[runID]; record != nil {
+		clientRequestID = record.clientRequestID
+		if clientRequestID != "" {
+			payload["client_request_id"] = clientRequestID
+		}
 	}
 	s.appendEventLocked(stream, runID, StreamEventRunFinished, payload, now)
+	if clientRequestID != "" {
+		phase := strings.ToLower(strings.TrimSpace(status))
+		switch phase {
+		case "completed", "failed", "cancelled", "unknown":
+		default:
+			phase = "unknown"
+		}
+		terminalMessage := message
+		if phase == "completed" {
+			if finalText, ok := payload["final_text"].(string); ok && strings.TrimSpace(finalText) != "" {
+				terminalMessage = finalText
+			}
+		}
+		s.cacheChatCommandTerminalLocked(
+			clientRequestID, runID, stream.conversationID,
+			status, errorCode, message, payload, now,
+		)
+		s.publishCommandUpdateLocked(ChatCommandUpdate{
+			RunID:           runID,
+			ClientRequestID: clientRequestID,
+			ConversationID:  stream.conversationID,
+			Phase:           phase,
+			ErrorCode:       errorCode,
+			Message:         terminalMessage,
+			RunStarted:      runStarted,
+		}, now)
+	}
 	stream.finishedRuns = append(stream.finishedRuns, runID)
 	if len(stream.finishedRuns) > conversationFinishedRunMemory {
 		evicted := stream.finishedRuns[0]
@@ -698,6 +891,14 @@ func (s *conversationStreamStore) runFinishedLocked(
 		stream.runNeedsSnapshot = false
 		stream.snapshotDirty = false
 		s.publishActivityLocked(stream, now)
+	}
+	// All in-memory state is terminal before SQLite is entered. Callers that
+	// arrive while Finish blocks therefore observe a coherent stream, and a
+	// late Mark cannot publish a pre-terminal command update afterward.
+	if persist && clientRequestID != "" {
+		s.persistChatCommandFinishLocked(
+			clientRequestID, runID, status, errorCode, message, payload, now,
+		)
 	}
 }
 
@@ -797,27 +998,239 @@ func (s *conversationStreamStore) fireCommandUpdateLocked(update ChatCommandUpda
 	if strings.TrimSpace(update.RunID) == "" {
 		return
 	}
-	s.commandUpdates[update.RunID] = chatCommandUpdateRecord{update: update, at: time.Now()}
+	now := time.Now()
+	clientRequestID := strings.TrimSpace(update.ClientRequestID)
+	if update.Phase == "failed" {
+		payload := map[string]any{
+			"status":      "failed",
+			"run_started": update.RunStarted,
+		}
+		if update.ErrorCode != "" {
+			payload["error_code"] = update.ErrorCode
+		}
+		if update.Message != "" {
+			payload["message"] = update.Message
+		}
+		if clientRequestID != "" {
+			payload["client_request_id"] = clientRequestID
+			s.cacheChatCommandTerminalLocked(
+				clientRequestID, update.RunID, update.ConversationID,
+				"failed", update.ErrorCode, update.Message, payload, now,
+			)
+		}
+		s.publishCommandUpdateLocked(update, now)
+		if s.commandStore != nil && clientRequestID != "" {
+			s.persistChatCommandFinishLocked(
+				clientRequestID, update.RunID, "failed", update.ErrorCode, update.Message, payload, now,
+			)
+		}
+		return
+	}
+	// Publish while the state observed by the caller is still current. If a
+	// terminal transition races the SQLite Mark below, it will overwrite this
+	// update; the late Mark result is never allowed to publish afterward.
+	if !s.publishCommandUpdateLocked(update, now) {
+		return
+	}
+	if s.commandStore != nil && clientRequestID != "" {
+		state := "dispatching"
+		if update.Phase == "queued_in_gui" {
+			state = "queued"
+		}
+		if err := s.markChatCommandLocked(
+			clientRequestID, update.RunID, state, update.Phase, now,
+		); err != nil && !s.chatCommandTerminalLocked(clientRequestID, update.RunID) {
+			logChatCommandStoreError("mark_"+update.Phase, update.RunID, err)
+		}
+	}
+}
+
+// markChatCommandLocked performs potentially blocking SQLite work without the
+// conversation-store mutex. Callers enter and leave with s.mu held.
+func (s *conversationStreamStore) markChatCommandLocked(
+	clientRequestID, runID, state, phase string,
+	now time.Time,
+) error {
+	store := s.commandStore
+	if store == nil {
+		return nil
+	}
+	s.mu.Unlock()
+	err := store.Mark(clientRequestID, runID, state, phase, now)
+	s.mu.Lock()
+	return err
+}
+
+func (s *conversationStreamStore) persistChatCommandFinishLocked(
+	clientRequestID string,
+	runID string,
+	status string,
+	errorCode string,
+	message string,
+	payload map[string]any,
+	now time.Time,
+) {
+	if s.commandStore == nil || strings.TrimSpace(runID) == "" {
+		return
+	}
+	store := s.commandStore
+	retryBefore := s.finishRetries[runID]
+	s.mu.Unlock()
+	err := store.Finish(
+		clientRequestID, runID, status, errorCode, message, payload, now,
+	)
+	s.mu.Lock()
+	if err != nil {
+		logChatCommandStoreError("finish", runID, err)
+		clonedPayload := make(map[string]any, len(payload))
+		for key, value := range payload {
+			clonedPayload[key] = value
+		}
+		if current := s.finishRetries[runID]; current != retryBefore && current != nil {
+			return
+		}
+		s.finishRetries[runID] = &pendingChatCommandFinish{
+			clientRequestID: clientRequestID,
+			runID:           runID,
+			status:          status,
+			errorCode:       errorCode,
+			message:         message,
+			payload:         clonedPayload,
+			createdAt:       now,
+		}
+		return
+	}
+	if s.finishRetries[runID] == retryBefore {
+		delete(s.finishRetries, runID)
+	}
+}
+
+// publishCommandUpdateLocked updates the in-memory replay/watch surface only.
+// Once a terminal update is present, later dispatch updates are ignored.
+func (s *conversationStreamStore) publishCommandUpdateLocked(
+	update ChatCommandUpdate,
+	now time.Time,
+) bool {
+	if strings.TrimSpace(update.RunID) == "" {
+		return false
+	}
+	terminal := isTerminalChatCommandPhase(update.Phase)
+	if existing, ok := s.commandUpdates[update.RunID]; ok &&
+		isTerminalChatCommandPhase(existing.update.Phase) {
+		return false
+	}
+	if !terminal && s.chatCommandTerminalLocked(update.ClientRequestID, update.RunID) {
+		return false
+	}
+	s.commandUpdates[update.RunID] = chatCommandUpdateRecord{update: update, at: now}
 	for _, watcher := range s.commandWatchers[update.RunID] {
 		select {
 		case watcher <- update:
 		default:
 		}
 	}
+	return true
+}
+
+func isTerminalChatCommandPhase(phase string) bool {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "completed", "failed", "cancelled", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *conversationStreamStore) chatCommandTerminalLocked(clientRequestID, runID string) bool {
+	clientRequestID = strings.TrimSpace(clientRequestID)
+	runID = strings.TrimSpace(runID)
+	if clientRequestID != "" {
+		if record := s.commandDedup[clientRequestID]; record != nil &&
+			record.runID == runID && record.state == "terminal" {
+			return true
+		}
+	}
+	if update, ok := s.commandUpdates[runID]; ok {
+		return isTerminalChatCommandPhase(update.update.Phase)
+	}
+	return false
+}
+
+func (s *conversationStreamStore) cacheChatCommandTerminalLocked(
+	clientRequestID string,
+	runID string,
+	conversationID string,
+	status string,
+	errorCode string,
+	message string,
+	payload map[string]any,
+	now time.Time,
+) {
+	clientRequestID = strings.TrimSpace(clientRequestID)
+	runID = strings.TrimSpace(runID)
+	if clientRequestID == "" || runID == "" {
+		return
+	}
+	record := s.commandDedup[clientRequestID]
+	if record != nil && record.runID != runID {
+		return
+	}
+	if record == nil {
+		record = &chatCommandDedupeRecord{
+			clientRequestID: clientRequestID,
+			runID:           runID,
+			createdAt:       now,
+			state:           "accepted",
+			dispatchPhase:   "accepted",
+		}
+		s.commandDedup[clientRequestID] = record
+	}
+	if record.state == "terminal" {
+		return
+	}
+	if conversationID = strings.TrimSpace(conversationID); conversationID != "" {
+		record.conversationID = conversationID
+	}
+	record.state = "terminal"
+	record.dispatchPhase = "finished"
+	record.terminalStatus = strings.ToLower(strings.TrimSpace(status))
+	record.terminalErrorCode = strings.TrimSpace(errorCode)
+	record.terminalMessage = message
+	if encoded, err := json.Marshal(payload); err == nil {
+		record.terminalPayloadJSON = string(encoded)
+	}
+	if runRecord := s.runs[runID]; runRecord != nil {
+		record.presentedFiles = append(
+			[]ChatCommandPresentedFile(nil), runRecord.presentedFiles...,
+		)
+	}
 }
 
 // ChatCommandStart is the accepted-command result returned to the transport.
 type ChatCommandStart struct {
-	RunID          string
-	ConversationID string
-	AcceptedSeq    int64
-	Deduped        bool
+	RunID            string
+	ConversationID   string
+	AcceptedSeq      int64
+	Deduped          bool
+	Terminal         *ChatCommandTerminal
+	Recovering       bool
+	PersistenceError string
+}
+
+// ChatCommandTerminal is the durable terminal result available when a
+// connector retries after the Gateway has restarted and the event buffer is
+// no longer present.
+type ChatCommandTerminal struct {
+	Status         string
+	ErrorCode      string
+	Message        string
+	PayloadJSON    string
+	PresentedFiles []ChatCommandPresentedFile
 }
 
 // LookupChatCommand returns the canonical run already assigned to a
-// client_request_id. The lookup and StartChatCommand share the same store mutex;
-// callers may use this as a fast path, while StartChatCommand remains the
-// authoritative atomic check for concurrent submissions.
+// client_request_id. Callers may use this as a fast path; StartChatCommand's
+// durable Claim remains the authoritative atomic check for concurrent submits.
 func (m *Manager) LookupChatCommand(clientRequestID string) (ChatCommandStart, bool) {
 	s := m.convStreams
 	clientRequestID = strings.TrimSpace(clientRequestID)
@@ -826,22 +1239,110 @@ func (m *Manager) LookupChatCommand(clientRequestID string) (ChatCommandStart, b
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.lookupChatCommandLocked(clientRequestID)
+	start, ok, _ := s.lookupChatCommandLocked(clientRequestID)
+	return start, ok
 }
 
 func (s *conversationStreamStore) lookupChatCommandLocked(
 	clientRequestID string,
-) (ChatCommandStart, bool) {
-	record := s.commandDedup[clientRequestID]
-	if record == nil || strings.TrimSpace(record.runID) == "" {
-		return ChatCommandStart{}, false
+) (ChatCommandStart, bool, error) {
+	var record *chatCommandDedupeRecord
+	if s.commandStore != nil {
+		store := s.commandStore
+		cachedBefore := s.commandDedup[clientRequestID]
+		s.mu.Unlock()
+		persisted, err := store.Lookup(clientRequestID, time.Now())
+		s.mu.Lock()
+		if err != nil {
+			return ChatCommandStart{}, false, err
+		}
+		if persisted == nil {
+			// A Claim may have completed while Lookup was outside mu. Only
+			// remove the cache entry we actually observed before the query.
+			if s.commandDedup[clientRequestID] == cachedBefore {
+				delete(s.commandDedup, clientRequestID)
+			}
+			record = s.commandDedup[clientRequestID]
+		} else {
+			record = s.mergeChatCommandRecordLocked(clientRequestID, persisted)
+		}
+	} else {
+		record = s.commandDedup[clientRequestID]
 	}
-	return ChatCommandStart{
+	if record == nil || strings.TrimSpace(record.runID) == "" {
+		return ChatCommandStart{}, false, nil
+	}
+	return chatCommandStartFromRecord(record, true), true, nil
+}
+
+func chatCommandStartFromRecord(record *chatCommandDedupeRecord, deduped bool) ChatCommandStart {
+	if record == nil {
+		return ChatCommandStart{Deduped: deduped}
+	}
+	start := ChatCommandStart{
 		RunID:          record.runID,
 		ConversationID: record.conversationID,
 		AcceptedSeq:    record.acceptedSeq,
-		Deduped:        true,
-	}, true
+		Deduped:        deduped,
+		Recovering:     record.state == "recovering",
+	}
+	if record.state == "terminal" {
+		start.Terminal = &ChatCommandTerminal{
+			Status:         record.terminalStatus,
+			ErrorCode:      record.terminalErrorCode,
+			Message:        record.terminalMessage,
+			PayloadJSON:    record.terminalPayloadJSON,
+			PresentedFiles: append([]ChatCommandPresentedFile(nil), record.presentedFiles...),
+		}
+	}
+	return start
+}
+
+func cloneChatCommandRecord(record *chatCommandDedupeRecord) *chatCommandDedupeRecord {
+	if record == nil {
+		return nil
+	}
+	cloned := *record
+	cloned.presentedFiles = append([]ChatCommandPresentedFile(nil), record.presentedFiles...)
+	return &cloned
+}
+
+func (s *conversationStreamStore) mergeChatCommandRecordLocked(
+	clientRequestID string,
+	persisted *chatCommandDedupeRecord,
+) *chatCommandDedupeRecord {
+	if persisted == nil {
+		return s.commandDedup[clientRequestID]
+	}
+	merged := cloneChatCommandRecord(persisted)
+	merged.clientRequestID = strings.TrimSpace(clientRequestID)
+	current := s.commandDedup[clientRequestID]
+	if current != nil && current.runID == merged.runID {
+		if merged.conversationID == "" {
+			merged.conversationID = current.conversationID
+		}
+		if merged.acceptedSeq < current.acceptedSeq {
+			merged.acceptedSeq = current.acceptedSeq
+		}
+		if len(merged.presentedFiles) == 0 && len(current.presentedFiles) > 0 {
+			merged.presentedFiles = append(
+				[]ChatCommandPresentedFile(nil), current.presentedFiles...,
+			)
+		}
+		// A Lookup that started before the local terminal transition may
+		// return an older durable phase. Keep the monotonic in-memory result;
+		// a durable terminal response remains authoritative when present.
+		if current.state == "terminal" && merged.state != "terminal" {
+			merged.state = current.state
+			merged.dispatchPhase = current.dispatchPhase
+			merged.terminalStatus = current.terminalStatus
+			merged.terminalErrorCode = current.terminalErrorCode
+			merged.terminalMessage = current.terminalMessage
+			merged.terminalPayloadJSON = current.terminalPayloadJSON
+		}
+	}
+	s.commandDedup[clientRequestID] = merged
+	return merged
 }
 
 func (s *conversationStreamStore) updateChatCommandDedupeLocked(
@@ -850,21 +1351,25 @@ func (s *conversationStreamStore) updateChatCommandDedupeLocked(
 	conversationID string,
 	acceptedSeq int64,
 	now time.Time,
-) {
+) error {
 	clientRequestID = strings.TrimSpace(clientRequestID)
 	if clientRequestID == "" || strings.TrimSpace(runID) == "" {
-		return
+		return nil
 	}
+	runID = strings.TrimSpace(runID)
 	record := s.commandDedup[clientRequestID]
+	if record != nil && record.runID != runID {
+		return errors.New("chat command cache disagrees with the canonical run")
+	}
 	if record == nil {
 		record = &chatCommandDedupeRecord{
-			runID:     strings.TrimSpace(runID),
-			createdAt: now,
+			clientRequestID: clientRequestID,
+			runID:           runID,
+			createdAt:       now,
+			state:           "accepted",
+			dispatchPhase:   "accepted",
 		}
 		s.commandDedup[clientRequestID] = record
-	}
-	if record.runID != strings.TrimSpace(runID) {
-		return
 	}
 	if conversationID = strings.TrimSpace(conversationID); conversationID != "" {
 		record.conversationID = conversationID
@@ -872,6 +1377,47 @@ func (s *conversationStreamStore) updateChatCommandDedupeLocked(
 	if acceptedSeq > record.acceptedSeq {
 		record.acceptedSeq = acceptedSeq
 	}
+	if s.commandStore == nil {
+		return nil
+	}
+	return s.persistChatCommandBindLocked(
+		clientRequestID, runID, record.conversationID, record.acceptedSeq, now,
+	)
+}
+
+func (s *conversationStreamStore) persistChatCommandBindLocked(
+	clientRequestID string,
+	runID string,
+	conversationID string,
+	acceptedSeq int64,
+	now time.Time,
+) error {
+	if s.commandStore == nil {
+		return nil
+	}
+	store := s.commandStore
+	retryBefore := s.bindRetries[runID]
+	s.mu.Unlock()
+	err := store.Bind(clientRequestID, runID, conversationID, acceptedSeq, now)
+	s.mu.Lock()
+	if err == nil {
+		if s.bindRetries[runID] == retryBefore {
+			delete(s.bindRetries, runID)
+		}
+		return nil
+	}
+	logChatCommandStoreError("bind", runID, err)
+	if current := s.bindRetries[runID]; current != retryBefore && current != nil {
+		return err
+	}
+	s.bindRetries[runID] = &pendingChatCommandBind{
+		clientRequestID: clientRequestID,
+		runID:           runID,
+		conversationID:  conversationID,
+		acceptedSeq:     acceptedSeq,
+		createdAt:       now,
+	}
+	return err
 }
 
 // StartChatCommand registers a webui-issued chat command. For a known
@@ -894,10 +1440,38 @@ func (m *Manager) StartChatCommand(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing, ok := s.lookupChatCommandLocked(clientRequestID); ok {
-		return existing
+	initialAcceptedSeq := s.initialChatCommandClaimSeqLocked(conversationID)
+	if s.commandStore != nil && clientRequestID != "" {
+		store := s.commandStore
+		s.mu.Unlock()
+		persisted, deduped, err := store.Claim(
+			clientRequestID, runID, conversationID, initialAcceptedSeq, now,
+		)
+		s.mu.Lock()
+		if err != nil {
+			return ChatCommandStart{RunID: runID, Deduped: true, PersistenceError: err.Error()}
+		}
+		if persisted == nil || strings.TrimSpace(persisted.runID) == "" {
+			return ChatCommandStart{
+				RunID:            runID,
+				Deduped:          true,
+				PersistenceError: "durable chat command claim returned no canonical run",
+			}
+		}
+		persisted = s.mergeChatCommandRecordLocked(clientRequestID, persisted)
+		if deduped || persisted.runID != runID {
+			return chatCommandStartFromRecord(persisted, true)
+		}
+	} else {
+		if existing := s.commandDedup[clientRequestID]; clientRequestID != "" && existing != nil && existing.runID != "" {
+			return chatCommandStartFromRecord(existing, true)
+		}
+		if err := s.updateChatCommandDedupeLocked(
+			clientRequestID, runID, conversationID, initialAcceptedSeq, now,
+		); err != nil {
+			return ChatCommandStart{RunID: runID, Deduped: true, PersistenceError: err.Error()}
+		}
 	}
-	s.updateChatCommandDedupeLocked(clientRequestID, runID, conversationID, 0, now)
 	s.startReaper()
 
 	if conversationID == "" {
@@ -931,9 +1505,15 @@ func (m *Manager) StartChatCommand(
 			ConversationID: conversationID,
 			AcceptedSeq:    stream.lastSeq,
 		}
-		s.updateChatCommandDedupeLocked(
-			clientRequestID, start.RunID, start.ConversationID, start.AcceptedSeq, now,
-		)
+		if err := s.updateChatCommandDedupeLocked(
+			clientRequestID, runID, conversationID, start.AcceptedSeq, now,
+		); err != nil {
+			// Claim already established the durable canonical run. A later Bind
+			// failure only delays richer conversation/sequence metadata and is
+			// retried by the reaper; blocking dispatch here would strand the
+			// canonical row because the next request is necessarily deduplicated.
+			logChatCommandStoreError("bind_after_claim", runID, err)
+		}
 		return start
 	}
 
@@ -947,9 +1527,22 @@ func (m *Manager) StartChatCommand(
 		ConversationID: conversationID,
 		AcceptedSeq:    acceptedSeq,
 	}
-	s.updateChatCommandDedupeLocked(
-		clientRequestID, start.RunID, start.ConversationID, start.AcceptedSeq, now,
-	)
+	if err := s.updateChatCommandDedupeLocked(
+		clientRequestID, runID, conversationID, acceptedSeq, now,
+	); err != nil {
+		// The durable Claim succeeded before local seeding. Keep dispatching and
+		// let bindRetries reconcile the newer accepted sequence asynchronously.
+		logChatCommandStoreError("bind_after_claim", runID, err)
+	}
+	if stream.activity != nil && stream.activity.RunID == runID &&
+		stream.activity.State == RunActivityQueued &&
+		!stream.runFinishedRecently(runID) && s.commandStore != nil && clientRequestID != "" {
+		if err := s.markChatCommandLocked(
+			clientRequestID, runID, "queued", "accepted", now,
+		); err != nil && !s.chatCommandTerminalLocked(clientRequestID, runID) {
+			logChatCommandStoreError("mark_queued", runID, err)
+		}
+	}
 	return start
 }
 
@@ -1010,6 +1603,21 @@ func seededPayloadsIncludeUserMessage(seededPayloads []map[string]any) bool {
 		}
 	}
 	return false
+}
+
+func (s *conversationStreamStore) initialChatCommandClaimSeqLocked(conversationID string) int64 {
+	if conversationID == "" {
+		return 0
+	}
+	stream := s.streams[conversationID]
+	if stream == nil {
+		return 0
+	}
+	// Claim runs without mu. Seeded events are deliberately excluded because
+	// another run can become active before Claim returns, causing those seeds
+	// to be deferred. The actual accepted seq is bound after the in-memory
+	// transition; a conservative value can never make a retry skip an event.
+	return stream.lastSeq
 }
 
 // FailChatCommand fails a command that never produced a bound run (agent
@@ -1130,17 +1738,20 @@ func (m *Manager) ForceFinishRun(runID string, status string, errorCode string, 
 // nothing has vouched for it within the grace window. Every vouch bumps
 // activity.UpdatedAt, so its staleness measures continuous absence.
 func (s *conversationStreamStore) onRuntimeStatus(event *gatewayv1.RuntimeStatusEvent, now time.Time) {
+	s.recoveryMu.Lock()
+	defer s.recoveryMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	activeSet := make(map[string]bool, len(event.GetActiveRuns()))
+	activeSet := make(map[string]*gatewayv1.ChatRunReport, len(event.GetActiveRuns()))
 	for _, report := range event.GetActiveRuns() {
-		activeSet[report.GetRunId()] = true
+		activeSet[report.GetRunId()] = report
 	}
 	finished := make(map[string]*gatewayv1.ChatRunReport, len(event.GetFinishedRuns()))
 	for _, report := range event.GetFinishedRuns() {
 		finished[report.GetRunId()] = report
 	}
+	s.reconcileRecoveringRunsLocked(activeSet, finished, now)
 
 	// Reconcile only tracked activities; finished reports never resurrect a
 	// stream for a run this store is not tracking.
@@ -1154,7 +1765,7 @@ func (s *conversationStreamStore) onRuntimeStatus(event *gatewayv1.RuntimeStatus
 			// the desktop may not know the run yet.
 			continue
 		}
-		if activeSet[runID] {
+		if activeSet[runID] != nil {
 			stream.activity.UpdatedAt = now
 			continue
 		}
@@ -1167,8 +1778,13 @@ func (s *conversationStreamStore) onRuntimeStatus(event *gatewayv1.RuntimeStatus
 				state = "failed"
 				errorCode = "desktop_run_lost"
 			}
-			s.runFinishedLocked(stream, runID, state, errorCode, report.GetMessage(),
-				map[string]any{"reason": "desktop_reported"}, now)
+			extra := map[string]any{"reason": "desktop_reported"}
+			message := report.GetMessage()
+			if state == "completed" && strings.TrimSpace(message) != "" {
+				extra["final_text"] = message
+				message = ""
+			}
+			s.runFinishedLocked(stream, runID, state, errorCode, message, extra, now)
 			continue
 		}
 		// Stream events vouch too: never finalize a run whose events are still
@@ -1179,6 +1795,118 @@ func (s *conversationStreamStore) onRuntimeStatus(event *gatewayv1.RuntimeStatus
 			s.runFinishedLocked(stream, runID, "failed", "desktop_run_lost",
 				"The desktop runtime stopped reporting this run.", nil, now)
 		}
+	}
+}
+
+func (s *conversationStreamStore) reconcileRecoveringRunsLocked(
+	active map[string]*gatewayv1.ChatRunReport,
+	finished map[string]*gatewayv1.ChatRunReport,
+	now time.Time,
+) {
+	for runID, recovered := range s.recoveringRuns {
+		if recovered == nil {
+			delete(s.recoveringRuns, runID)
+			continue
+		}
+		if report := finished[runID]; report != nil {
+			status := strings.ToLower(strings.TrimSpace(report.GetState()))
+			errorCode := strings.TrimSpace(report.GetErrorCode())
+			switch status {
+			case "completed", "failed", "cancelled":
+			default:
+				status = "failed"
+				errorCode = "desktop_run_lost"
+			}
+			conversationID := strings.TrimSpace(report.GetConversationId())
+			if conversationID == "" {
+				conversationID = recovered.conversationID
+			}
+			payload := map[string]any{
+				"status":      status,
+				"reason":      "desktop_reconciled_after_restart",
+				"run_started": true,
+			}
+			if errorCode != "" {
+				payload["error_code"] = errorCode
+			}
+			reportMessage := strings.TrimSpace(report.GetMessage())
+			terminalMessage := reportMessage
+			if reportMessage != "" {
+				if status == "completed" {
+					payload["final_text"] = reportMessage
+					terminalMessage = ""
+				} else {
+					payload["message"] = reportMessage
+				}
+			}
+			if recovered.clientRequestID != "" {
+				payload["client_request_id"] = recovered.clientRequestID
+			}
+			if conversationID == "" {
+				s.cacheChatCommandTerminalLocked(
+					recovered.clientRequestID, runID, "", status, errorCode,
+					terminalMessage, payload, now,
+				)
+				s.publishCommandUpdateLocked(ChatCommandUpdate{
+					RunID:           runID,
+					ClientRequestID: recovered.clientRequestID,
+					Phase:           status,
+					ErrorCode:       errorCode,
+					Message:         reportMessage,
+					RunStarted:      true,
+				}, now)
+				delete(s.recoveringRuns, runID)
+				s.persistChatCommandFinishLocked(
+					recovered.clientRequestID, runID, status, errorCode,
+					terminalMessage, payload, now,
+				)
+				continue
+			}
+			s.bindRecoveredRunLocked(recovered, conversationID, now)
+			stream := s.streamLocked(conversationID, now)
+			s.runFinishedLocked(
+				stream, runID, status, errorCode, terminalMessage,
+				payload, now,
+			)
+			delete(s.recoveringRuns, runID)
+			continue
+		}
+
+		report := active[runID]
+		if report == nil {
+			continue
+		}
+		conversationID := strings.TrimSpace(report.GetConversationId())
+		if conversationID == "" {
+			conversationID = recovered.conversationID
+		}
+		if conversationID == "" {
+			continue
+		}
+		s.bindRecoveredRunLocked(recovered, conversationID, now)
+		stream := s.streamLocked(conversationID, now)
+		s.runStartedLocked(stream, runID, "", now)
+		delete(s.recoveringRuns, runID)
+	}
+}
+
+func (s *conversationStreamStore) bindRecoveredRunLocked(
+	recovered *chatCommandDedupeRecord,
+	conversationID string,
+	now time.Time,
+) {
+	conversationID = strings.TrimSpace(conversationID)
+	if recovered == nil || conversationID == "" {
+		return
+	}
+	recovered.conversationID = conversationID
+	record := s.runRecordLocked(recovered.runID, conversationID)
+	record.clientRequestID = recovered.clientRequestID
+	s.commandDedup[recovered.clientRequestID] = recovered
+	if s.commandStore != nil {
+		_ = s.persistChatCommandBindLocked(
+			recovered.clientRequestID, recovered.runID, conversationID, recovered.acceptedSeq, now,
+		)
 	}
 }
 
@@ -1198,7 +1926,18 @@ func (s *conversationStreamStore) startReaper() {
 	})
 }
 
+func (s *conversationStreamStore) scheduleRecoveryExpiry() {
+	// The regular maintenance sweep is intentionally coarse. A one-shot sweep
+	// at the durable recovery deadline ensures a deduplicated browser/channel
+	// retry observes the terminal "unknown" result before its watcher expires.
+	time.AfterFunc(chatCommandRecoveryGrace, func() {
+		s.reap(time.Now())
+	})
+}
+
 func (s *conversationStreamStore) reap(now time.Time) {
+	s.recoveryMu.Lock()
+	defer s.recoveryMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1247,6 +1986,78 @@ func (s *conversationStreamStore) reap(now time.Time) {
 			delete(s.commandDedup, clientRequestID)
 		}
 	}
+	if s.commandStore != nil {
+		store := s.commandStore
+		s.mu.Unlock()
+		expired, err := store.ExpireRecovering(now)
+		s.mu.Lock()
+		if err != nil {
+			logChatCommandStoreError("expire_recovering", "", err)
+		} else {
+			for _, record := range expired {
+				s.publishExpiredRecoveringRunLocked(record, now)
+			}
+		}
+		finishRetries := make([]*pendingChatCommandFinish, 0, len(s.finishRetries))
+		for runID, pending := range s.finishRetries {
+			if pending == nil || now.Sub(pending.createdAt) > chatCommandDedupeRetention {
+				delete(s.finishRetries, runID)
+				continue
+			}
+			finishRetries = append(finishRetries, pending)
+		}
+		for _, pending := range finishRetries {
+			if s.finishRetries[pending.runID] != pending {
+				continue
+			}
+			s.mu.Unlock()
+			err := store.Finish(
+				pending.clientRequestID, pending.runID, pending.status, pending.errorCode,
+				pending.message, pending.payload, now,
+			)
+			s.mu.Lock()
+			if s.finishRetries[pending.runID] != pending {
+				continue
+			}
+			if err != nil {
+				logChatCommandStoreError("retry_finish", pending.runID, err)
+				continue
+			}
+			delete(s.finishRetries, pending.runID)
+		}
+		bindRetries := make([]*pendingChatCommandBind, 0, len(s.bindRetries))
+		for runID, pending := range s.bindRetries {
+			if pending == nil || now.Sub(pending.createdAt) > chatCommandDedupeRetention {
+				delete(s.bindRetries, runID)
+				continue
+			}
+			bindRetries = append(bindRetries, pending)
+		}
+		for _, pending := range bindRetries {
+			if s.bindRetries[pending.runID] != pending {
+				continue
+			}
+			s.mu.Unlock()
+			err := store.Bind(
+				pending.clientRequestID, pending.runID, pending.conversationID, pending.acceptedSeq, now,
+			)
+			s.mu.Lock()
+			if s.bindRetries[pending.runID] != pending {
+				continue
+			}
+			if err != nil {
+				logChatCommandStoreError("retry_bind", pending.runID, err)
+				continue
+			}
+			delete(s.bindRetries, pending.runID)
+		}
+		s.mu.Unlock()
+		err = store.Reap(now)
+		s.mu.Lock()
+		if err != nil {
+			logChatCommandStoreError("reap", "", err)
+		}
+	}
 
 	// Swept by their own timestamp: update entries exist for runs without a
 	// dedupe record in this process (post-restart replays, parked runs), so
@@ -1256,4 +2067,39 @@ func (s *conversationStreamStore) reap(now time.Time) {
 			delete(s.commandUpdates, runID)
 		}
 	}
+}
+
+func (s *conversationStreamStore) publishExpiredRecoveringRunLocked(
+	record *chatCommandDedupeRecord,
+	now time.Time,
+) {
+	if record == nil || strings.TrimSpace(record.runID) == "" {
+		return
+	}
+	s.commandDedup[record.clientRequestID] = record
+	delete(s.recoveringRuns, record.runID)
+	if record.conversationID == "" {
+		s.publishCommandUpdateLocked(ChatCommandUpdate{
+			RunID:           record.runID,
+			ClientRequestID: record.clientRequestID,
+			Phase:           "unknown",
+			ErrorCode:       record.terminalErrorCode,
+			Message:         record.terminalMessage,
+			RunStarted:      true,
+		}, now)
+		return
+	}
+	runRecord := s.runRecordLocked(record.runID, record.conversationID)
+	runRecord.clientRequestID = record.clientRequestID
+	stream := s.streamLocked(record.conversationID, now)
+	s.runFinishedWithPersistenceLocked(
+		stream,
+		record.runID,
+		"unknown",
+		record.terminalErrorCode,
+		record.terminalMessage,
+		map[string]any{"reason": "restart_reconciliation_timeout", "run_started": true},
+		now,
+		false,
+	)
 }

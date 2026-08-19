@@ -163,7 +163,7 @@ export type AutomationSnapshot = {
 
 export type CronRunState = "pending" | "leased" | "done" | "expired";
 
-export type DeliveryStatus = "pending" | "sent" | "skipped" | "failed";
+export type DeliveryStatus = "pending" | "sent" | "skipped" | "failed" | "unknown";
 
 export type CronRunNowResponse = {
   startedAt: number;

@@ -18,7 +18,12 @@ import {
 } from "./bashTimeoutPolicy";
 import { type BuiltinToolBundle, createBuiltinMetadataMap } from "./builtinTypes";
 import { formatResolvedTarget, type ResolvedPath, ToolPathResolver } from "./pathUtils";
-import { assertSkillPathAllowedByPolicy, type SkillAccessPolicy } from "./skillAccessPolicy";
+import {
+  assertSkillMutationAllowed,
+  assertSkillPathAllowedByPolicy,
+  isSkillAccessPolicyRestrictive,
+  type SkillAccessPolicy,
+} from "./skillAccessPolicy";
 
 type ShellRunResponse = {
   exit_code: number;
@@ -672,7 +677,21 @@ export function createShellTools(params: {
     );
   }
 
-  function validateBashSkillAccess(params: { cwd: ResolvedPath; command: string }) {
+  function assertShellSkillMutationPolicy(operation: string, path: string | undefined) {
+    if (
+      !isSkillAccessPolicyRestrictive(skillAccessPolicy) ||
+      skillAccessPolicy?.allowSkillMutation === true
+    ) {
+      return;
+    }
+    assertSkillMutationAllowed(skillAccessPolicy, operation, path);
+  }
+
+  function validateShellSkillAccess(params: {
+    operation: "Bash" | "ManagedProcess";
+    cwd: ResolvedPath;
+    command: string;
+  }) {
     if (params.cwd.scope === "skill") {
       if (commandReferencesFixedSkillsRoot(params.command)) {
         throw new Error(
@@ -689,6 +708,7 @@ export function createShellTools(params: {
           "Bash with a Skill cwd cannot use .. or cd .. to move outside the enabled Skill directory.",
         );
       }
+      assertShellSkillMutationPolicy(`${params.operation} command`, params.cwd.relativePath);
       return;
     }
 
@@ -716,7 +736,8 @@ export function createShellTools(params: {
         );
       }
       for (const baseDir of referencedSkills) {
-        assertSkillPathAllowedByPolicy(skillAccessPolicy, `${baseDir}/`, "Bash");
+        assertSkillPathAllowedByPolicy(skillAccessPolicy, `${baseDir}/`, params.operation);
+        assertShellSkillMutationPolicy(`${params.operation} command`, `${baseDir}/`);
       }
       // All referenced Skills are enabled — allow the absolute path through.
     }
@@ -966,6 +987,11 @@ export function createShellTools(params: {
           required: false,
           allowExternal: true,
         });
+        validateShellSkillAccess({
+          operation: "ManagedProcess",
+          cwd: cwdResolved,
+          command,
+        });
         const cwd = backendCwd(cwdResolved);
         const label =
           typeof toolCall.arguments?.label === "string"
@@ -1181,7 +1207,7 @@ export function createShellTools(params: {
     }
 
     try {
-      validateBashSkillAccess({ cwd: cwdResolved, command });
+      validateShellSkillAccess({ operation: "Bash", cwd: cwdResolved, command });
     } catch (err) {
       return {
         role: "toolResult",

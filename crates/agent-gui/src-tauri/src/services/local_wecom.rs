@@ -18,6 +18,7 @@ use crate::commands::settings::{
     load_remote_settings, load_wecom_runtime_settings, open_db, RemoteSettingsPayload,
     RuntimeWecomSettings, WecomGatewayMode,
 };
+use crate::runtime::app_paths::app_storage_dir;
 use crate::runtime::process::{kill_child_process_tree_best_effort, terminate_child_process_tree};
 use crate::services::gateway::GatewayController;
 
@@ -337,6 +338,7 @@ struct PendingSend {
 
 struct ActiveConnectorControl {
     generation: u64,
+    installation_id: String,
     writer: Arc<Mutex<ChildStdin>>,
     ready: Arc<AtomicBool>,
 }
@@ -378,6 +380,30 @@ impl RuntimeConfig {
                 }
             }
     }
+}
+
+fn runtime_installation_id(settings: &RuntimeWecomSettings) -> Result<String, String> {
+    let bot_id = settings.bot_id.trim();
+    if bot_id.is_empty() {
+        return Err("WeCom bot ID is required for the runtime installation".to_string());
+    }
+    let tenant_id = if settings.tenant_id.trim().is_empty() {
+        bot_id
+    } else {
+        settings.tenant_id.trim()
+    };
+    let connector_id = if settings.connector_id.trim().is_empty() {
+        "wecom-desktop"
+    } else {
+        settings.connector_id.trim()
+    };
+    serde_json::to_string(&serde_json::json!({
+        "bot_id": bot_id,
+        "channel": "wecom",
+        "connector_id": connector_id,
+        "tenant_id": tenant_id,
+    }))
+    .map_err(|error| format!("serialize WeCom runtime installation id failed: {error}"))
 }
 
 #[derive(Default)]
@@ -598,7 +624,21 @@ impl LocalWecomSupervisor {
     ) -> Result<LocalWecomSendReceipt, String> {
         let shared = Arc::clone(&self.shared);
         tauri::async_runtime::spawn_blocking(move || {
-            send_markdown_blocking(&shared, chat_id, content)
+            send_markdown_blocking(&shared, None, chat_id, content)
+        })
+        .await
+        .map_err(|error| format!("send WeCom message task failed: {error}"))?
+    }
+
+    pub async fn send_markdown_for_installation(
+        self: &Arc<Self>,
+        installation_id: String,
+        chat_id: String,
+        content: String,
+    ) -> Result<LocalWecomSendReceipt, String> {
+        let shared = Arc::clone(&self.shared);
+        tauri::async_runtime::spawn_blocking(move || {
+            send_markdown_blocking(&shared, Some(&installation_id), chat_id, content)
         })
         .await
         .map_err(|error| format!("send WeCom message task failed: {error}"))?
@@ -619,6 +659,7 @@ impl LocalWecomSupervisor {
 
 fn send_markdown_blocking(
     shared: &Arc<SupervisorShared>,
+    expected_installation_id: Option<&str>,
     chat_id: String,
     content: String,
 ) -> Result<LocalWecomSendReceipt, String> {
@@ -644,6 +685,11 @@ fn send_markdown_blocking(
             .connector
             .as_ref()
             .ok_or_else(|| "WeCom Connector is not running".to_string())?;
+        if expected_installation_id.is_some_and(|expected| connector.installation_id != expected) {
+            return Err(
+                "WeCom Connector installation does not match the delivery target".to_string(),
+            );
+        }
         if !connector.ready.load(Ordering::Acquire) {
             return Err("WeCom Connector is not authenticated".to_string());
         }
@@ -748,6 +794,7 @@ fn cancel_pending_send(shared: &SupervisorShared, generation: u64, request_id: &
 
 fn install_connector_control(
     shared: &Arc<SupervisorShared>,
+    installation_id: String,
     writer: ChildStdin,
     ready: Arc<AtomicBool>,
 ) -> Result<ConnectorControlLifecycle, String> {
@@ -765,6 +812,7 @@ fn install_connector_control(
             .collect::<Vec<_>>();
         outbound.connector = Some(ActiveConnectorControl {
             generation,
+            installation_id,
             writer: Arc::new(Mutex::new(writer)),
             ready,
         });
@@ -1517,6 +1565,24 @@ fn gateway_health(client: &reqwest::blocking::Client, gateway_url: &str) -> bool
         .is_ok_and(|response| response.status().is_success())
 }
 
+struct ChannelStatePaths {
+    app_home: PathBuf,
+    connector: PathBuf,
+    gateway: PathBuf,
+}
+
+fn channel_state_paths() -> Result<ChannelStatePaths, String> {
+    let app_home = app_storage_dir()?;
+    let state_dir = app_home.join("channel-state");
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|error| format!("create Channel state directory failed: {error}"))?;
+    Ok(ChannelStatePaths {
+        app_home,
+        connector: state_dir.join("wecom-state.sqlite3"),
+        gateway: state_dir.join("gateway-state.sqlite3"),
+    })
+}
+
 fn spawn_gateway(
     config: &RuntimeConfig,
     agent_token: &str,
@@ -1525,6 +1591,7 @@ fn spawn_gateway(
     child_job: &ChildProcessJob,
 ) -> Result<RunningChild, String> {
     let program = resolve_gateway_program()?;
+    let state_paths = channel_state_paths()?;
     let mut command = Command::new(&program.program);
     command
         .args(&program.arguments)
@@ -1537,6 +1604,8 @@ fn spawn_gateway(
         )
         .env("ARCFORGE_GATEWAY_TOKEN", agent_token)
         .env("ARCFORGE_GATEWAY_CHANNEL_TOKEN", channel_token)
+        .env("ARCFORGE_HOME", &state_paths.app_home)
+        .env("ARCFORGE_GATEWAY_STATE_DB", &state_paths.gateway)
         .env(
             "ARCFORGE_GATEWAY_CHANNEL_TENANT_ID",
             &config.wecom.tenant_id,
@@ -1592,6 +1661,7 @@ fn spawn_connector(
     child_job: &ChildProcessJob,
 ) -> Result<RunningChild, String> {
     let program = resolve_connector_program()?;
+    let state_paths = channel_state_paths()?;
     let (gateway_url, channel_token) = match config.wecom.gateway_mode {
         WecomGatewayMode::Local => (config.local_gateway_url(), local_channel_token),
         WecomGatewayMode::External => (
@@ -1611,6 +1681,8 @@ fn spawn_connector(
         .stderr(Stdio::piped())
         .env("WECOM_AIBOT_BOT_ID", &config.wecom.bot_id)
         .env("WECOM_AIBOT_SECRET", &config.wecom.secret)
+        .env("ARCFORGE_HOME", &state_paths.app_home)
+        .env("ARCFORGE_CHANNEL_STATE_DB", &state_paths.connector)
         .env("ARCFORGE_GATEWAY_URL", &gateway_url)
         .env("ARCFORGE_GATEWAY_CHANNEL_URL", &gateway_url)
         .env("ARCFORGE_GATEWAY_CHANNEL_TOKEN", channel_token)
@@ -1645,14 +1717,16 @@ fn spawn_connector(
         kill_child_process_tree_best_effort(&mut child);
         "WeCom Connector stdin pipe is unavailable".to_string()
     })?;
+    let installation_id = runtime_installation_id(&config.wecom)?;
     let ready = Arc::new(AtomicBool::new(false));
-    let connector_control = match install_connector_control(&shared, stdin, Arc::clone(&ready)) {
-        Ok(control) => control,
-        Err(error) => {
-            kill_child_process_tree_best_effort(&mut child);
-            return Err(error);
-        }
-    };
+    let connector_control =
+        match install_connector_control(&shared, installation_id, stdin, Arc::clone(&ready)) {
+            Ok(control) => control,
+            Err(error) => {
+                kill_child_process_tree_best_effort(&mut child);
+                return Err(error);
+            }
+        };
     let control_generation = connector_control.generation;
     attach_log_readers(
         &mut child,
@@ -1962,6 +2036,25 @@ mod tests {
         assert_ne!(agent, channel);
         assert!(agent.starts_with("arcforge_agent_"));
         assert!(channel.starts_with("arcforge_channel_"));
+    }
+
+    #[test]
+    fn runtime_installation_id_matches_channel_scope_contract() {
+        let settings = RuntimeWecomSettings {
+            enabled: true,
+            gateway_mode: WecomGatewayMode::Local,
+            local_gateway_port: 18780,
+            bot_id: "bot-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            connector_id: "wecom-desktop".to_string(),
+            allow_group_messages: false,
+            secret: "secret".to_string(),
+            channel_token: String::new(),
+        };
+        assert_eq!(
+            runtime_installation_id(&settings).expect("installation id"),
+            r#"{"bot_id":"bot-1","channel":"wecom","connector_id":"wecom-desktop","tenant_id":"tenant-1"}"#
+        );
     }
 
     #[test]

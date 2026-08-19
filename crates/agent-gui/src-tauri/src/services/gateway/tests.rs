@@ -556,6 +556,30 @@ fn set_disconnected_status_resets_runtime_fields_for_new_config() {
 }
 
 #[test]
+fn gui_queued_request_is_only_reclaimable_by_a_new_webview_worker() {
+    let now = Instant::now();
+    let mut queued = remote_chat_record(
+        gateway_chat_request("request-1", "client-1", "conversation-1", "first"),
+        "queued_in_gui",
+        false,
+        now,
+    );
+    queued.lease_owner = Some("worker-old".to_string());
+    queued.lease_expires_at = None;
+
+    assert!(!GatewayController::remote_chat_record_is_claimable(
+        &queued,
+        "worker-old",
+        now,
+    ));
+    assert!(GatewayController::remote_chat_record_is_claimable(
+        &queued,
+        "worker-new",
+        now,
+    ));
+}
+
+#[test]
 fn runner_restart_clears_stale_online_status_before_reauthentication() {
     let config = RemoteSettingsPayload {
         enabled: true,

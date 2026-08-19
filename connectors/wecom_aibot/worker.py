@@ -15,17 +15,30 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from aibot import WSClient, WSClientOptions, generate_req_id
 
-from .channel_client import ChannelClient, ChannelResponseFile, make_inbound
-from .commands import SessionSequencer, SessionStore, parse_command
+from .channel_client import (
+    ChannelClient,
+    ChannelResponseFile,
+    ChannelSubmitInterrupted,
+    make_inbound,
+)
+from .commands import (
+    SessionKey,
+    SessionLeaseLost,
+    SessionSequencer,
+    SessionStore,
+    parse_command,
+)
 from .config import ConnectorConfig, load_config
 from .dedupe import DedupeStore
 from .interactions import InteractionCoordinator
 from .protocol import ChannelInboundFile
+from .state_store import SQLiteStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +128,34 @@ def _external_message_id(frame: dict[str, Any]) -> str:
         or headers.get("req_id")
         or ""
     ).strip()
+
+
+def _dedupe_payload(body: dict[str, Any]) -> str:
+    """Canonical callback body used to detect message ID reuse."""
+
+    return json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _installation_id(config: ConnectorConfig) -> str:
+    """Build an unambiguous installation scope across channel identities."""
+
+    return json.dumps(
+        {
+            "bot_id": config.bot_id,
+            "channel": "wecom",
+            "connector_id": config.connector_id,
+            "tenant_id": config.tenant_id,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _text(frame: dict[str, Any]) -> str:
@@ -299,7 +340,9 @@ async def _wait_for_wecom_authentication(
     return True
 
 
-def _wecom_transport_unavailable(client: Any, authenticated: asyncio.Event | None) -> bool:
+def _wecom_transport_unavailable(
+    client: Any, authenticated: asyncio.Event | None
+) -> bool:
     if authenticated is not None and not authenticated.is_set():
         return True
     connected = getattr(client, "is_connected", None)
@@ -323,10 +366,14 @@ async def _reply_final(
             authenticated,
             timeout=max(0.0, deadline - time.monotonic()),
         ):
-            raise TimeoutError("WeCom authentication did not recover before final reply")
+            raise TimeoutError(
+                "WeCom authentication did not recover before final reply"
+            )
 
         try:
-            acknowledgement = await client.reply_stream(frame, stream_id, chunks[0], True)
+            acknowledgement = await client.reply_stream(
+                frame, stream_id, chunks[0], True
+            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -469,6 +516,10 @@ class _MediaInputError(RuntimeError):
         self.retryable = retryable
 
 
+class _DedupeLeaseLost(RuntimeError):
+    pass
+
+
 def _safe_file_name(value: object, fallback: str) -> str:
     raw_value = value if isinstance(value, str) else ""
     candidate = (
@@ -552,8 +603,10 @@ async def _download_inbound_media(
         raise _MediaInputError(f"文件过大，请发送不超过 {limit_mb} MB 的文件。")
 
     detected_image = _sniff_image(content) if media_kind == "image" else None
-    fallback = detected_image[0] if detected_image else (
-        "image.bin" if media_kind == "image" else "attachment.bin"
+    fallback = (
+        detected_image[0]
+        if detected_image
+        else ("image.bin" if media_kind == "image" else "attachment.bin")
     )
     file_name = _safe_file_name(
         downloaded_name or media.get("filename") or media.get("file_name"),
@@ -709,17 +762,35 @@ async def _send_response_files(
     frame: dict[str, Any],
     target_id: str,
     files: list[ChannelResponseFile],
+    *,
+    renew_claim: Callable[[], bool | Awaitable[bool]] | None = None,
 ) -> tuple[int, int]:
+    async def still_owns_claim() -> bool:
+        if renew_claim is None:
+            return True
+        renewed = renew_claim()
+        if inspect.isawaitable(renewed):
+            renewed = await renewed
+        return bool(renewed)
+
     delivered = 0
     failed = 0
     for file in files:
         if file.error_code or not isinstance(file.content, bytes):
             failed += 1
             continue
+        if not await still_owns_claim():
+            raise _DedupeLeaseLost("WeCom message lease changed before file upload")
         try:
             media_id = await _upload_wecom_file(client, file)
+            if not await still_owns_claim():
+                raise _DedupeLeaseLost(
+                    "WeCom message lease changed before file delivery"
+                )
             await _deliver_wecom_file(client, frame, target_id, media_id)
         except asyncio.CancelledError:
+            raise
+        except _DedupeLeaseLost:
             raise
         except Exception:
             failed += 1
@@ -727,6 +798,28 @@ async def _send_response_files(
         else:
             delivered += 1
     return delivered, failed
+
+
+async def _maintain_dedupe_lease(
+    dedupe: DedupeStore,
+    session_key: SessionKey,
+    external_message_id: str,
+    *,
+    interval_seconds: float,
+    stop: asyncio.Event,
+) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            if not await dedupe.renew_async(session_key, external_message_id):
+                logger.warning("WeCom message lease was lost while processing")
+                return
+        except Exception:
+            logger.warning("WeCom message lease renewal failed")
 
 
 async def _handle_message(
@@ -781,8 +874,16 @@ async def _handle_message(
         chat_id=chat_id,
         external_user_id=user_id,
     )
-    claimed, existing = dedupe.claim(session_key, external_id)
+    claimed, existing = await dedupe.claim_async(
+        session_key,
+        external_id,
+        payload=_dedupe_payload(body),
+    )
     if not claimed:
+        if existing and existing.status == "payload_mismatch":
+            logger.warning(
+                "WeCom callback message ID was reused with a different payload"
+            )
         if existing and existing.completed:
             await reply_immediately(existing.text)
         return
@@ -794,13 +895,14 @@ async def _handle_message(
             channel=channel,
         )
         if interaction_reply is not None:
-            dedupe.complete(
+            owns_claim = await dedupe.complete_async(
                 session_key,
                 external_id,
                 text=interaction_reply,
                 status="completed",
             )
-            await reply_immediately(interaction_reply)
+            if owns_claim:
+                await reply_immediately(interaction_reply)
             return
 
     command = parse_command(text) if not media_kind else ""
@@ -808,14 +910,35 @@ async def _handle_message(
     failure_message = "处理失败，请稍后重试。"
 
     if command == "help":
-        dedupe.complete(
+        owns_claim = await dedupe.complete_async(
             session_key,
             external_id,
             text=_HELP_TEXT,
             status="completed",
         )
-        await reply_immediately(_HELP_TEXT, stream_id)
+        if owns_claim:
+            await reply_immediately(_HELP_TEXT, stream_id)
         return
+
+    dedupe_lease_stop = asyncio.Event()
+    dedupe_lease_task: asyncio.Task[None] | None = None
+    lease_renew_interval = dedupe.lease_renew_interval_seconds
+    if lease_renew_interval is not None:
+        dedupe_lease_task = asyncio.create_task(
+            _maintain_dedupe_lease(
+                dedupe,
+                session_key,
+                external_id,
+                interval_seconds=lease_renew_interval,
+                stop=dedupe_lease_stop,
+            ),
+            name="arcforge-wecom-dedupe-lease",
+        )
+
+    async def stop_dedupe_lease() -> None:
+        dedupe_lease_stop.set()
+        if dedupe_lease_task is not None:
+            await dedupe_lease_task
 
     # Acknowledge before waiting behind a previous turn so WeCom does not time
     # out while preserving per-user delivery order into the desktop runtime.
@@ -885,31 +1008,50 @@ async def _handle_message(
                 await _download_inbound_media(wecom, frame, media_kind, config)
             )
         except asyncio.CancelledError:
+            await stop_dedupe_lease()
             await stop_stream_keepalive()
             raise
         except _MediaInputError as exc:
             answer = str(exc)
+            await stop_dedupe_lease()
             if exc.retryable:
-                dedupe.forget(session_key, external_id)
+                owns_claim = await dedupe.forget_async(session_key, external_id)
             else:
-                dedupe.complete(
+                owns_claim = await dedupe.complete_async(
                     session_key,
                     external_id,
                     text=answer,
                     status="failed",
                 )
             logger.warning("WeCom inbound media was rejected")
-            with contextlib.suppress(Exception):
-                await deliver_final(answer)
+            if owns_claim:
+                with contextlib.suppress(Exception):
+                    await deliver_final(answer)
             return
+        except Exception:
+            await stop_dedupe_lease()
+            await dedupe.forget_async(session_key, external_id)
+            await stop_stream_keepalive()
+            raise
 
     async def submit_in_order() -> None:
         rotation = None
+        rotation_matches_canonical_retry = False
         if command == "new":
-            rotation = sessions.reserve_rotation(session_key)
+            rotation = await dedupe.load_rotation_async(session_key, external_id)
+            if rotation is None:
+                proposed = await sessions.reserve_rotation_async(session_key)
+                rotation, created = await dedupe.save_rotation_async(
+                    session_key,
+                    external_id,
+                    proposed,
+                )
+                rotation_matches_canonical_retry = not created
+            else:
+                rotation_matches_canonical_retry = True
             channel_session_id = rotation.candidate_session_id
         else:
-            channel_session_id = sessions.get_for_key(session_key)
+            channel_session_id = await sessions.get_for_key_async(session_key)
 
         inbound = make_inbound(
             external_message_id=external_id,
@@ -964,29 +1106,86 @@ async def _handle_message(
         else:
             answer = result.text.strip()
             response_files = list(getattr(result, "files", ()) or ())
+            if not await dedupe.renew_async(session_key, external_id):
+                logger.warning("WeCom message lease changed before final side effects")
+                return
             file_target_id = chat_id if chat_type == "group" else (chat_id or user_id)
-            delivered, failed = await _send_response_files(
-                wecom,
-                frame,
-                file_target_id,
-                response_files,
-            )
+            delivered = 0
+            failed = 0
+            file_delivery_status = ""
+            if response_files:
+                (
+                    should_send_files,
+                    file_delivery_status,
+                ) = await dedupe.begin_response_files_async(session_key, external_id)
+                if should_send_files:
+                    delivered, failed = await _send_response_files(
+                        wecom,
+                        frame,
+                        file_target_id,
+                        response_files,
+                        renew_claim=lambda: dedupe.renew_async(
+                            session_key, external_id
+                        ),
+                    )
+                    file_delivery_status = "sent" if failed == 0 else "failed"
+                    if not await dedupe.finish_response_files_async(
+                        session_key,
+                        external_id,
+                        status=file_delivery_status,
+                    ):
+                        logger.warning(
+                            "WeCom message lease changed after file delivery"
+                        )
+                        return
+                elif file_delivery_status == "sent":
+                    delivered = len(response_files)
+                else:
+                    failed = len(response_files)
             if not answer and delivered:
                 answer = "文件已发送。"
+            elif not answer and file_delivery_status == "unknown":
+                answer = "文件投递结果未知，为避免重复发送未自动重试。"
             elif not answer and response_files:
                 answer = "文件发送失败，请稍后重试。"
             elif not answer:
                 raise RuntimeError("ArcForge channel completed without response text")
-            if failed and answer != "文件发送失败，请稍后重试。":
+            if file_delivery_status == "unknown" and not answer.endswith(
+                "为避免重复发送未自动重试。"
+            ):
+                answer += "\n\n有文件投递结果未知，为避免重复发送未自动重试。"
+            elif failed and answer != "文件发送失败，请稍后重试。":
                 answer += "\n\n有文件未能发送，请稍后重试。"
-            if rotation is not None and not sessions.commit_rotation(rotation):
-                raise RuntimeError("WeCom session changed while /new was running")
-        dedupe.complete(
+            if rotation is not None:
+                if not await dedupe.renew_async(session_key, external_id):
+                    logger.warning(
+                        "WeCom message lease changed before session rotation"
+                    )
+                    return
+                canonical_started_here = bool(
+                    getattr(result, "canonical_started", False)
+                )
+                if not getattr(result, "deduped", False) or (
+                    rotation_matches_canonical_retry or canonical_started_here
+                ):
+                    if not await sessions.commit_rotation_async(rotation):
+                        raise RuntimeError(
+                            "WeCom session changed while /new was running"
+                        )
+                else:
+                    logger.warning(
+                        "WeCom skipped an unverified session rotation for a canonical replay"
+                    )
+        await stop_dedupe_lease()
+        owns_claim = await dedupe.complete_async(
             session_key,
             external_id,
             text=answer,
             status=result.status or "failed",
         )
+        if not owns_claim:
+            logger.warning("WeCom message lease changed before final reply")
+            return
         try:
             await deliver_final(answer)
         except Exception:
@@ -1000,20 +1199,37 @@ async def _handle_message(
         else:
             async with sequencer.lock_for(session_key):
                 await submit_in_order()
+    except ChannelSubmitInterrupted:
+        await stop_dedupe_lease()
+        owns_claim = await dedupe.release_async(session_key, external_id)
+        logger.warning(
+            "ArcForge channel disconnected after accepting the WeCom message"
+        )
+        if not owns_claim:
+            logger.warning("WeCom message lease changed before retry release")
+    except SessionLeaseLost:
+        await stop_dedupe_lease()
+        owns_claim = await dedupe.release_async(session_key, external_id)
+        logger.warning("WeCom session lease was lost while processing")
+        if not owns_claim:
+            logger.warning("WeCom message lease changed before session retry release")
     except Exception:
+        await stop_dedupe_lease()
         if command:
-            dedupe.complete(
+            owns_claim = await dedupe.complete_async(
                 session_key,
                 external_id,
                 text=failure_message,
                 status="failed",
             )
         else:
-            dedupe.forget(session_key, external_id)
+            owns_claim = await dedupe.forget_async(session_key, external_id)
         logger.exception("WeCom message processing failed")
-        with contextlib.suppress(Exception):
-            await deliver_final(failure_message)
+        if owns_claim:
+            with contextlib.suppress(Exception):
+                await deliver_final(failure_message)
     finally:
+        await stop_dedupe_lease()
         await stop_stream_keepalive()
 
 
@@ -1342,9 +1558,9 @@ async def _handle_control_line(
             chat_id,
             {"msgtype": "markdown", "markdown": {"content": content}},
         )
-        if (
-            isinstance(acknowledgement, dict)
-            and acknowledgement.get("errcode") not in (None, 0)
+        if isinstance(acknowledgement, dict) and acknowledgement.get("errcode") not in (
+            None,
+            0,
         ):
             raise RuntimeError("WeCom rejected the message")
     except asyncio.CancelledError:
@@ -1612,9 +1828,18 @@ async def _maintain_channel(
 async def run(config: ConnectorConfig | None = None) -> None:
     config = config or load_config()
     channel = ChannelClient(config)
-    dedupe = DedupeStore(config.dedupe_ttl_seconds)
-    sessions = SessionStore()
-    sequencer = SessionSequencer()
+    state_store = None
+    if config.state_db_path:
+        state_store = SQLiteStateStore(
+            config.state_db_path,
+            installation_id=_installation_id(config),
+        )
+    dedupe = DedupeStore(
+        config.dedupe_ttl_seconds,
+        state_store=state_store,
+    )
+    sessions = SessionStore(state_store=state_store)
+    sequencer = SessionSequencer(state_store=state_store)
     wecom = WSClient(
         WSClientOptions(
             bot_id=config.bot_id,
@@ -1676,12 +1901,18 @@ async def run(config: ConnectorConfig | None = None) -> None:
         channel_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await channel_task
-        await channel.close()
-        await _disconnect_wecom(wecom)
+        try:
+            await channel.close()
+            await _disconnect_wecom(wecom)
+        finally:
+            if state_store is not None:
+                await state_store.close_async()
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     try:
         asyncio.run(run())
     except KeyboardInterrupt:

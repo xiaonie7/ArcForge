@@ -832,6 +832,44 @@ func TestSendRunFileErrorUsesStablePublicError(t *testing.T) {
 	}
 }
 
+func TestChannelTerminalReplayIncludesDurablePresentedFile(t *testing.T) {
+	core := wscore.NewConn(nil, wscore.Config{QueueSize: 4, CtrlQueueSize: 1})
+	c := &channelConn{core: core}
+	payload := `{"name":"PresentFile","isError":false,"details":{"kind":"display_file","files":[{` +
+		`"relativePath":"reports/result.pdf","fileName":"result.pdf","mimeType":"application/pdf",` +
+		`"fileId":"artifact-1","sizeBytes":4,"mtimeMs":1234}]}}`
+	c.subscribeRun("request-1", "message-1", session.ChatCommandStart{
+		RunID:          "run-1",
+		ConversationID: "conversation-1",
+		Deduped:        true,
+		Terminal: &session.ChatCommandTerminal{
+			Status:      "completed",
+			PayloadJSON: `{"final_text":"done"}`,
+			PresentedFiles: []session.ChatCommandPresentedFile{{
+				Seq:         7,
+				Workdir:     "",
+				PayloadJSON: payload,
+			}},
+		},
+	})
+
+	fileFrame := <-core.Outbox
+	deltaFrame := <-core.Outbox
+	finalFrame := <-core.Outbox
+	if fileFrame.Kind != "channel_file" || deltaFrame.Kind != "channel_delta" || finalFrame.Kind != "channel_final" {
+		t.Fatalf("terminal replay frames = %q, %q, %q", fileFrame.Kind, deltaFrame.Kind, finalFrame.Kind)
+	}
+	var decoded gatewayv2.ChannelServerFrame
+	if err := proto.Unmarshal(fileFrame.Data, &decoded); err != nil {
+		t.Fatalf("decode replayed file: %v", err)
+	}
+	file := decoded.GetFile()
+	if file.GetRunId() != "run-1" || file.GetSeq() != 7 || file.GetFileName() != "result.pdf" ||
+		file.GetErrorCode() != "file_unavailable" {
+		t.Fatalf("replayed durable file = %#v", file)
+	}
+}
+
 func TestChannelRequestIDIncludesBinding(t *testing.T) {
 	inbound := &gatewayv2.ChannelInboundMessage{
 		ExternalMessageId: "message-1",

@@ -20,7 +20,11 @@ import {
 import { answerAskUserQuestion } from "../../../lib/tools/askUserQuestionTools";
 import type { ChatQueueTurnPreview } from "../components/ChatComposerBar";
 import { createTextComposerDraft } from "../composer/composerDraftText";
-import type { ActiveGatewayBridgeRequest, SendChatAction } from "../gateway/gatewayBridgeTypes";
+import type {
+  ActiveGatewayBridgeRequest,
+  ChannelPermissionProfileSnapshot,
+  SendChatAction,
+} from "../gateway/gatewayBridgeTypes";
 import {
   type GatewayChatClaimedRequest,
   normalizeGatewayExecutionMode,
@@ -384,6 +388,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
               workdirOverride: queuedTurn.workdir,
               selectedSystemToolIdsOverride: queuedTurn.selectedSystemToolIds,
               principal: gatewayRequest.principal,
+              permissionProfile: gatewayRequest.permissionProfile,
             }
           : null;
         const markGatewayStarted =
@@ -562,12 +567,14 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     claimed: GatewayChatClaimedRequest,
     conversationId: string,
     principal?: PrincipalContext,
+    permissionProfile?: ChannelPermissionProfileSnapshot,
   ) {
     const payload = claimed.request;
     const requestId = payload.requestId.trim();
     const targetConversationId = conversationId.trim();
     const message = payload.message ?? "";
     const uploadedFiles = Array.isArray(payload.uploadedFiles) ? payload.uploadedFiles : [];
+    const trustedPolicy = principal ? permissionProfile?.policy : undefined;
     const queueDisplayMessage = buildQueuedGatewayDisplayMessage(
       message,
       principal?.channelCommand,
@@ -575,27 +582,33 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     if (
       !requestId ||
       !targetConversationId ||
+      (principal && !trustedPolicy) ||
       (!queueDisplayMessage && uploadedFiles.length === 0)
     ) {
       return false;
     }
 
-    const executionMode = principal
-      ? settings.system.executionMode
+    const executionMode = trustedPolicy
+      ? trustedPolicy.executionMode
       : (normalizeGatewayExecutionMode(payload.executionMode) ?? settings.system.executionMode);
-    const workdir = resolveGatewayQueuedTurnWorkdir({
-      requestedWorkdir: principal ? undefined : normalizeGatewayWorkdir(payload.workdir),
-      conversationWorkdir: conversationRuntimeCacheRef.current.get(targetConversationId)?.workdir,
-      displayedWorkdir: displayedConversationWorkdir,
-      defaultWorkdir: settings.system.workdir,
-    });
+    const workdir = trustedPolicy
+      ? trustedPolicy.workdir
+      : resolveGatewayQueuedTurnWorkdir({
+          requestedWorkdir: normalizeGatewayWorkdir(payload.workdir),
+          conversationWorkdir:
+            conversationRuntimeCacheRef.current.get(targetConversationId)?.workdir,
+          displayedWorkdir: displayedConversationWorkdir,
+          defaultWorkdir: settings.system.workdir,
+        });
     const runtimeControls =
       !principal && payload.runtimeControls
         ? normalizeChatRuntimeControls(payload.runtimeControls)
         : settings.chatRuntimeControls;
-    const selectedSystemToolIds = principal
-      ? settings.system.selectedSystemTools
-      : normalizeSystemToolSelection(payload.selectedSystemTools);
+    const selectedSystemToolIds = trustedPolicy
+      ? normalizeSystemToolSelection(trustedPolicy.allowedSystemTools)
+      : Array.isArray(payload.selectedSystemTools)
+        ? normalizeSystemToolSelection(payload.selectedSystemTools)
+        : settings.system.selectedSystemTools;
     const queuedTurn = createQueuedChatTurn({
       id: `gateway-${requestId}`,
       conversationId: targetConversationId,
@@ -607,11 +620,10 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       executionMode,
       workdir: isAgentExecutionMode(executionMode) ? workdir : "",
       allowEmptyWorkdir:
-        isAgentExecutionMode(executionMode) && workdir.length === 0 && allowEmptyAgentWorkdir,
-      selectedSystemToolIds:
-        selectedSystemToolIds.length > 0
-          ? selectedSystemToolIds
-          : settings.system.selectedSystemTools,
+        isAgentExecutionMode(executionMode) &&
+        workdir.length === 0 &&
+        (trustedPolicy ? trustedPolicy.allowEmptyWorkdir : allowEmptyAgentWorkdir),
+      selectedSystemToolIds,
       runtimeControls,
       gatewayRequest: {
         requestId,
@@ -625,6 +637,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         selectedModel: principal ? undefined : payload.selectedModel,
         runtimeControls: principal ? undefined : payload.runtimeControls,
         principal,
+        permissionProfile,
       },
     });
 

@@ -24,6 +24,7 @@ type Config struct {
 	ChannelBotID              string
 	ChannelConnectorID        string
 	ChannelAllowGroupMessages bool
+	GatewayStateDB            string
 	HTTPAddr                  string
 	TLSCert                   string
 	TLSKey                    string
@@ -60,6 +61,7 @@ func Load() *Config {
 	flag.StringVar(&cfg.ChannelBotID, "channel-bot-id", getenv("ARCFORGE_GATEWAY_CHANNEL_BOT_ID", ""), "optional bot binding for channel connectors")
 	flag.StringVar(&cfg.ChannelConnectorID, "channel-connector-id", getenv("ARCFORGE_GATEWAY_CHANNEL_CONNECTOR_ID", ""), "optional connector binding for channel connectors")
 	flag.BoolVar(&cfg.ChannelAllowGroupMessages, "channel-allow-group-messages", getenvBool("ARCFORGE_GATEWAY_CHANNEL_ALLOW_GROUP_MESSAGES", false), "allow restricted channel group messages")
+	flag.StringVar(&cfg.GatewayStateDB, "gateway-state-db", getenv("ARCFORGE_GATEWAY_STATE_DB", defaultGatewayStateDB()), "SQLite path for durable channel command idempotency")
 	flag.StringVar(&cfg.GRPCAddr, "grpc-addr", getenv("ARCFORGE_GATEWAY_GRPC_ADDR", ""), "deprecated, no-op (v1 gRPC removed; kept for startup-script compatibility)")
 	flag.StringVar(&cfg.HTTPAddr, "http-addr", getenv("ARCFORGE_GATEWAY_HTTP_ADDR", defaultHTTPAddr()), "HTTP listen address")
 	flag.StringVar(&cfg.TLSCert, "tls-cert", getenv("ARCFORGE_GATEWAY_TLS_CERT", ""), "TLS certificate path")
@@ -84,6 +86,7 @@ func Load() *Config {
 	cfg.ChannelTenantID = strings.TrimSpace(cfg.ChannelTenantID)
 	cfg.ChannelBotID = strings.TrimSpace(cfg.ChannelBotID)
 	cfg.ChannelConnectorID = strings.TrimSpace(cfg.ChannelConnectorID)
+	cfg.GatewayStateDB = strings.TrimSpace(cfg.GatewayStateDB)
 	cfg.TLSCert = strings.TrimSpace(cfg.TLSCert)
 	cfg.TLSKey = strings.TrimSpace(cfg.TLSKey)
 
@@ -157,6 +160,10 @@ func defaultHTTPAddr() string {
 		return port
 	}
 	return ":" + port
+}
+
+func defaultGatewayStateDB() string {
+	return "arcforge-gateway-state.sqlite3"
 }
 
 func getenvDuration(key string, fallback time.Duration) time.Duration {

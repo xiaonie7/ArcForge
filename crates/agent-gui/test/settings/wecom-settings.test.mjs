@@ -199,6 +199,24 @@ test("WeCom settings do not expose a per-user permission editor", () => {
   assert.doesNotMatch(i18nSource, /settings\.wecomAccessControl|settings\.wecomAddAccessRule/);
 });
 
+test("WeCom activation persists an immutable installation default before enabling", () => {
+  assert.match(
+    wecomSectionSource,
+    /await ensureInstallationDefaultForCurrentSettings\(\)[\s\S]*updateWecomSettings\(setSettings, \{ enabled: true \}\)/,
+  );
+  assert.match(wecomSectionSource, /if \(activatingRef\.current\) return;/);
+  assert.match(wecomSectionSource, /disabled=\{activating\}/);
+  assert.match(wecomSectionSource, /setActivationError/);
+  assert.match(wecomSectionSource, /defaultProfileEnsuredRef/);
+  assert.match(
+    wecomSectionSource,
+    /!settings\.wecom\.enabled[\s\S]*defaultProfileEnsuredRef\.current[\s\S]*ensureInstallationDefaultForCurrentSettings/,
+  );
+  assert.match(appSource, /if \(!settingsReady \|\| !settings\.wecom\.enabled/);
+  assert.match(appSource, /ensureWecomInstallationDefault\(settings\)/);
+  assert.match(appSource, /ensuredWecomInstallationRef\.current === installationId/);
+});
+
 test("WeCom autosave waits for Remote Gateway settings before validating WeCom", async () => {
   const events = [];
   let finishRemoteSave;

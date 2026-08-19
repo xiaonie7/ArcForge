@@ -3,6 +3,8 @@ import type { RetryAttemptRecord } from "../liveTranscriptStore";
 
 type QueueEventOptions = {
   allowAfterClose?: boolean;
+  /** Internal: only assistant token events participate in fallback tracking. */
+  tracksForwardedText?: boolean;
 };
 
 type QueueUserMessageOptions = {
@@ -32,6 +34,8 @@ type GatewayBridgeEventControllerParams = {
   requestId: string;
   workerId?: string;
   enabled: boolean;
+  /** Maximum assistant/output text code points forwarded for this run. */
+  maxOutputChars?: number;
   sendEvent: (
     requestId: string,
     event: Record<string, unknown>,
@@ -55,7 +59,10 @@ export type GatewayBridgeEventController = {
   queueToolStatus: (status: string | null, isCompaction?: boolean) => void;
   queueRetryAttempts: (attempts: readonly RetryAttemptRecord[]) => void;
   queueCheckpoint: (state: ConversationViewState) => void;
-  emitError: (message: string, conversationIdOverride?: string) => void;
+  emitError: (
+    message: string,
+    conversationIdOverride?: string,
+  ) => GatewayBridgeSendResult;
   close: () => void;
   hasForwardedText: () => boolean;
   isClosed: () => boolean;
@@ -70,11 +77,45 @@ export function createGatewayBridgeEventController(
   let lastToolStatus: string | null = null;
   let lastToolStatusIsCompaction = false;
   let lastRetryAttemptsKey = "[]";
+  const maxOutputChars =
+    Number.isFinite(params.maxOutputChars) && (params.maxOutputChars as number) >= 0
+      ? Math.floor(params.maxOutputChars as number)
+      : undefined;
+  let remainingOutputChars = maxOutputChars;
+
+  const truncateCodePoints = (value: string, maximum: number) => {
+    if (maximum <= 0) return "";
+    const codePoints = Array.from(value);
+    return codePoints.length <= maximum ? value : codePoints.slice(0, maximum).join("");
+  };
+
+  const limitOutputEvent = (event: Record<string, unknown>) => {
+    if (maxOutputChars === undefined) return event;
+    if (event.type === "token" && typeof event.text === "string") {
+      const text = truncateCodePoints(event.text, remainingOutputChars ?? 0);
+      remainingOutputChars = Math.max(0, (remainingOutputChars ?? 0) - Array.from(text).length);
+      return text === event.text ? event : { ...event, text };
+    }
+    if (event.type === "done" && typeof event.final_text === "string") {
+      const finalText = truncateCodePoints(event.final_text, maxOutputChars);
+      return finalText === event.final_text ? event : { ...event, final_text: finalText };
+    }
+    return event;
+  };
 
   const queueEvent = (event: Record<string, unknown>, options?: QueueEventOptions) => {
     if (!params.enabled) return;
     if (streamClosed && !options?.allowAfterClose) return;
-    return params.sendEvent(params.requestId, event, { workerId: params.workerId });
+    const limitedEvent = limitOutputEvent(event);
+    if (
+      options?.tracksForwardedText &&
+      limitedEvent.type === "token" &&
+      typeof limitedEvent.text === "string" &&
+      limitedEvent.text.length > 0
+    ) {
+      forwardedText = true;
+    }
+    return params.sendEvent(params.requestId, limitedEvent, { workerId: params.workerId });
   };
 
   const queueToolStatus = (status: string | null, isCompaction = false) => {
@@ -135,15 +176,15 @@ export function createGatewayBridgeEventController(
     },
     queueToken(delta: string, extra?: Record<string, unknown>) {
       if (delta.length === 0 && !extra) return;
-      if (delta.length > 0) {
-        forwardedText = true;
-      }
-      queueEvent({
-        type: "token",
-        text: delta,
-        conversation_id: params.conversationId,
-        ...extra,
-      });
+      queueEvent(
+        {
+          type: "token",
+          text: delta,
+          conversation_id: params.conversationId,
+          ...extra,
+        },
+        { tracksForwardedText: true },
+      );
     },
     queueTitle(nextTitle: string, allowAfterClose = false) {
       const title = nextTitle.trim();
@@ -188,7 +229,7 @@ export function createGatewayBridgeEventController(
       });
     },
     emitError(message: string, conversationIdOverride?: string) {
-      queueEvent({
+      return queueEvent({
         type: "error",
         message,
         conversation_id:

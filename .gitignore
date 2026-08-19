@@ -1,14 +1,18 @@
 .idea/
+/.agents/
 grok-build/
 /docs/*
 !/docs/features/
 /docs/features/*
 !/docs/features/playbooks-and-delivery.md
+!/docs/features/channel-state-persistence.md
 
 # Build outputs
 target/
 node_modules/
 dist/
+.tmp/
+/outputs/
 
 # Package manager stores
 .pnpm-store/
@@ -21,6 +25,7 @@ venv/
 .office-runtime-venv/
 .wecom-connector-venv/
 .ruff_cache/
+.claude/settings.local.json
 
 # Logs
 *.log

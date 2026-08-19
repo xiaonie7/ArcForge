@@ -47,6 +47,7 @@ export type ChatCommandPipelineHooks = {
   // A draft conversation got its real id: re-key stores/subscriptions.
   onBound?(update: ChatCommandUpdate, pending: PendingChatCommand): void;
   onQueuedInGui?(update: ChatCommandUpdate, pending: PendingChatCommand): void;
+  onCompleted?(update: ChatCommandUpdate, pending: PendingChatCommand): void;
   onFailed?(pending: PendingChatCommand, errorCode: string | null, message: string): void;
   onPendingChanged?(): void;
 };
@@ -139,14 +140,7 @@ export class ChatCommandPipeline {
     }
     switch (update.phase) {
       case "bound": {
-        if (update.conversationId && update.conversationId !== pending.conversationId) {
-          // Draft conversation materialized: the app re-keys stores and
-          // subscriptions, then the pending command follows the real id.
-          const previousConversationId = pending.conversationId;
-          pending.conversationId = update.conversationId;
-          this.movePending(previousConversationId, update.conversationId, pending);
-          this.hooks.onBound?.(update, pending);
-        }
+        this.bindPendingConversation(update, pending);
         return;
       }
       case "queued_in_gui": {
@@ -168,11 +162,79 @@ export class ChatCommandPipeline {
         this.hooks.onQueuedInGui?.(update, pending);
         return;
       }
-      case "failed": {
-        this.fail(pending, update.errorCode, update.message ?? "chat command failed");
+      case "completed": {
+        this.bindPendingConversation(update, pending);
+        if (update.runStarted !== true) {
+          this.applyCompletedReplay(update, pending);
+        }
+        this.settledOutcomes.set(pending, { kind: "settled" });
+        this.clearPending(pending);
+        this.hooks.onCompleted?.(update, pending);
+        return;
+      }
+      case "failed":
+      case "cancelled":
+      case "unknown": {
+        this.bindPendingConversation(update, pending);
+        const fallback =
+          update.phase === "cancelled"
+            ? "The command was cancelled."
+            : update.phase === "unknown"
+              ? "The command outcome is unknown."
+              : "chat command failed";
+        const message = update.message ?? fallback;
+        if (update.runStarted === true) {
+          // A priority command update can overtake run_started/run_finished on
+          // the ordered conversation stream. The run really executed, so the
+          // optimistic prompt is authoritative and must not be compensated
+          // away. The stream will render the terminal error when it catches up.
+          const outcome = { kind: "failed" as const, errorCode: update.errorCode, message };
+          this.settledOutcomes.set(pending, outcome);
+          this.clearPending(pending);
+          this.hooks.onFailed?.(pending, update.errorCode, message);
+          return;
+        }
+        this.fail(pending, update.errorCode, message);
         return;
       }
     }
+  }
+
+  private applyCompletedReplay(update: ChatCommandUpdate, pending: PendingChatCommand): void {
+    const text = update.message?.trim() ?? "";
+    if (!text) {
+      return;
+    }
+    const conversationId = update.conversationId?.trim() || pending.conversationId;
+    const store = this.hooks.getTranscriptStore(conversationId);
+    const identity = {
+      conversation_id: conversationId,
+      run_id: update.runId,
+      seq: 0,
+    };
+    // A durable terminal replay may be the only remaining copy of the answer:
+    // synthesize a seq-less turn so it cannot advance or conflict with the
+    // resumable conversation cursor. The client_request_id adopts the existing
+    // optimistic user turn instead of creating a second prompt bubble.
+    store.applyEvent({
+      ...identity,
+      type: "run_started",
+      client_request_id: pending.clientRequestId,
+    });
+    store.applyEvent({ ...identity, type: "token", text });
+    store.applyEvent({ ...identity, type: "run_finished", status: "completed" });
+  }
+
+  private bindPendingConversation(update: ChatCommandUpdate, pending: PendingChatCommand): void {
+    if (!update.conversationId || update.conversationId === pending.conversationId) {
+      return;
+    }
+    // Draft conversation materialized: the app re-keys stores and
+    // subscriptions, then the pending command follows the real id.
+    const previousConversationId = pending.conversationId;
+    pending.conversationId = update.conversationId;
+    this.movePending(previousConversationId, update.conversationId, pending);
+    this.hooks.onBound?.(update, pending);
   }
 
   // Stream/activity signals that settle the pending command: the run started

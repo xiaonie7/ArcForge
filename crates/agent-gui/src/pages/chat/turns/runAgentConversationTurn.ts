@@ -232,6 +232,7 @@ export type RunAgentConversationTurnParams = {
   }) => void | Promise<void>;
   agentTemplates: AppSettings["agents"];
   selectedSystemToolIds: SystemToolId[];
+  allowedSystemTools?: readonly string[];
   getMcpSettings: () => AppSettings["mcp"];
   applyMcpOps?: (ops: McpSettingsOp[]) => void;
   remoteWebTunnelsEnabled?: boolean;
@@ -302,6 +303,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     onManagedSkillsChanged,
     agentTemplates,
     selectedSystemToolIds,
+    allowedSystemTools,
     getMcpSettings,
     applyMcpOps,
     remoteWebTunnelsEnabled,
@@ -437,8 +439,10 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     runtimeScope: "chat",
     currentChatModel: selectedModel,
     selectedSystemToolIds,
+    allowedSystemTools,
     getMcpSettings,
     applyMcpOps,
+    memoryEnabled,
     remoteWebTunnelsEnabled,
     tunnelProjectPathKey: workspaceProjectPathKey(effectiveWorkdir),
     tunnelPublicBaseUrl,

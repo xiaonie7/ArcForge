@@ -32,6 +32,10 @@ import {
   type GatewaySettingsSyncPayload,
 } from "./lib/settings/sync";
 import { applyStoredGlobalShortcuts } from "./lib/shortcuts/globalShortcuts";
+import {
+  buildWecomInstallationDefaultInput,
+  ensureWecomInstallationDefault,
+} from "./lib/wecomPermissionProfile";
 import { ChatPage } from "./pages/ChatPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import type { SectionId } from "./pages/settings/types";
@@ -144,6 +148,7 @@ export default function App() {
   const saveSequenceRef = useRef(0);
   const saveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const defaultWorkdirRef = useRef("");
+  const ensuredWecomInstallationRef = useRef("");
   // Mirrors `settings` so setSettings/queueSettingsSave can read the latest value
   // synchronously without passing a (side-effecting) function into setSettingsState —
   // React 18 StrictMode double-invokes functional state updaters in development,
@@ -178,6 +183,25 @@ export default function App() {
       // Ignore non-Tauri and older desktop shells.
     });
   }, [settingsReady, settings.closeWindowBehavior]);
+
+  useEffect(() => {
+    if (!settingsReady || !settings.wecom.enabled || !settings.wecom.botId.trim()) return;
+    let installationId: string;
+    try {
+      installationId = buildWecomInstallationDefaultInput(settings).installationId;
+    } catch (error) {
+      console.warn("Failed to build the WeCom installation permission default", error);
+      return;
+    }
+    if (ensuredWecomInstallationRef.current === installationId) return;
+    ensuredWecomInstallationRef.current = installationId;
+    void ensureWecomInstallationDefault(settings).catch((error) => {
+      if (ensuredWecomInstallationRef.current === installationId) {
+        ensuredWecomInstallationRef.current = "";
+      }
+      console.warn("Failed to ensure the WeCom installation permission default", error);
+    });
+  }, [settings, settingsReady]);
 
   // 启动时恢复本机保存的全局快捷键（桌面端专属，非 Tauri 环境内部自动忽略）。
   useEffect(() => {

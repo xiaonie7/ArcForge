@@ -3,9 +3,11 @@ import type { PendingUploadedFile } from "../../../lib/chat/messages/uploadedFil
 import type { PrincipalContext } from "../../../lib/security/principalContext";
 import type { ChatRuntimeControls, ExecutionMode, SystemToolId } from "../../../lib/settings";
 import type {
+  ChannelPermissionProfileSnapshot,
   GatewayChatRuntimeControlsEvent,
   GatewaySelectedModelEvent,
 } from "../gateway/gatewayBridgeTypes";
+import { freezeChannelPermissionProfile } from "../gateway/gatewayBridgeTypes";
 
 export type QueuedGatewayChatRequest = {
   requestId: string;
@@ -15,6 +17,7 @@ export type QueuedGatewayChatRequest = {
   selectedModel?: GatewaySelectedModelEvent;
   runtimeControls?: GatewayChatRuntimeControlsEvent;
   principal?: PrincipalContext;
+  permissionProfile?: ChannelPermissionProfileSnapshot;
 };
 
 export type QueuedChatTurn = {
@@ -80,7 +83,10 @@ export function createQueuedChatTurn(input: QueuedChatTurnInput): QueuedChatTurn
       ? {
           ...input.gatewayRequest,
           principal: input.gatewayRequest.principal
-            ? { ...input.gatewayRequest.principal }
+            ? Object.freeze({ ...input.gatewayRequest.principal })
+            : undefined,
+          permissionProfile: input.gatewayRequest.permissionProfile
+            ? freezeChannelPermissionProfile(input.gatewayRequest.permissionProfile)
             : undefined,
         }
       : undefined,

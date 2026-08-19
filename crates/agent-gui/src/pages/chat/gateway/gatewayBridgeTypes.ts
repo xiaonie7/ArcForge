@@ -1,5 +1,10 @@
 import type { MutableRefObject } from "react";
 import type { MentionComposerDraft } from "../../../components/chat/MentionComposer";
+import type {
+  ChannelPermissionPolicy,
+  ChannelPermissionProfile,
+} from "../../../lib/channelControl";
+import { normalizeChannelPermissionPolicy } from "../../../lib/channelPermissionPolicy";
 import type { HistoryMessageRef } from "../../../lib/chat/conversation/conversationState";
 import type { PendingUploadedFile } from "../../../lib/chat/messages/uploadedFiles";
 import type {
@@ -70,6 +75,50 @@ export type GatewayChatCancelEvent = {
   conversationId: string;
 };
 
+export type ChannelPermissionPolicySnapshot = Readonly<
+  Omit<
+    Required<ChannelPermissionPolicy>,
+    "allowedSkills" | "allowedSystemTools" | "allowedMcpServers"
+  > & {
+    allowedSkills: readonly string[];
+    allowedSystemTools: readonly string[];
+    allowedMcpServers: readonly string[];
+  }
+>;
+
+export type ChannelPermissionProfileSnapshot = Readonly<
+  Pick<ChannelPermissionProfile, "id" | "revision" | "policyHash"> & {
+    policy: ChannelPermissionPolicySnapshot;
+  }
+>;
+
+/** Copy and deeply freeze the authorization decision captured for one run. */
+export function freezeChannelPermissionProfile(
+  profile: ChannelPermissionProfile | ChannelPermissionProfileSnapshot,
+): ChannelPermissionProfileSnapshot {
+  const normalized = normalizeChannelPermissionPolicy({
+    ...profile.policy,
+    allowedSkills: profile.policy.allowedSkills?.slice(),
+    allowedSystemTools: profile.policy.allowedSystemTools?.slice(),
+    allowedMcpServers: profile.policy.allowedMcpServers?.slice(),
+  });
+  const allowedSkills = Object.freeze(normalized.allowedSkills.slice());
+  const allowedSystemTools = Object.freeze(normalized.allowedSystemTools.slice());
+  const allowedMcpServers = Object.freeze(normalized.allowedMcpServers.slice());
+  const policy = Object.freeze({
+    ...normalized,
+    allowedSkills,
+    allowedSystemTools,
+    allowedMcpServers,
+  }) as ChannelPermissionPolicySnapshot;
+  return Object.freeze({
+    id: profile.id,
+    revision: profile.revision,
+    policyHash: profile.policyHash,
+    policy,
+  });
+}
+
 export type ActiveGatewayBridgeRequest = {
   requestId: string;
   conversationId: string;
@@ -82,6 +131,7 @@ export type ActiveGatewayBridgeRequest = {
   workdirOverride?: string;
   selectedSystemToolIdsOverride?: SystemToolId[];
   principal?: PrincipalContext;
+  permissionProfile?: ChannelPermissionProfileSnapshot;
 };
 
 export type SendChatAction = (overrides?: {

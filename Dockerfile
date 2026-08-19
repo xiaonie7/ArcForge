@@ -40,7 +40,8 @@ COPY --from=gateway-builder /out/arcforge-gateway /usr/local/bin/arcforge-gatewa
 
 USER arcforge
 
-ENV PORT=8080
+ENV PORT=8080 \
+    ARCFORGE_GATEWAY_STATE_DB=/var/lib/arcforge/gateway-state.sqlite3
 
 EXPOSE 8080
 

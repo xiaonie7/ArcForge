@@ -16,16 +16,26 @@ from connectors.wecom_aibot.channel_client import (
     ChannelClient,
     ChannelResponse,
     ChannelResponseFile,
+    ChannelSubmitInterrupted,
     make_inbound,
 )
-from connectors.wecom_aibot.commands import SessionSequencer, SessionStore, parse_command
+from connectors.wecom_aibot.commands import (
+    SessionLeaseLost,
+    SessionSequencer,
+    SessionStore,
+    parse_command,
+)
 from connectors.wecom_aibot.config import ConnectorConfig, _channel_url, load_config
 from connectors.wecom_aibot.dedupe import DedupeKey, DedupeStore
 from connectors.wecom_aibot.interactions import InteractionCoordinator
+from connectors.wecom_aibot.state_store import SQLiteStateStore
 from connectors.wecom_aibot.protocol import (
     CHANNEL_ROLE,
+    ChannelAccepted,
     ChannelClientFrame,
+    ChannelDelta,
     ChannelFile,
+    ChannelFinal,
     ChannelInboundFile,
     ChannelInboundMessage,
     ChannelServerFrame,
@@ -39,11 +49,13 @@ from connectors.wecom_aibot.worker import (
     _RedactingSdkLogger,
     _WecomConnectionState,
     _download_inbound_media,
+    _dedupe_payload,
     _deliver_wecom_file,
     _external_message_id,
     _handle_media,
     _handle_text,
     _handle_control_line,
+    _installation_id,
     _maintain_reply_stream,
     _register_connection_handlers,
     _reply_final,
@@ -97,7 +109,9 @@ class _FrameSocket:
 class RoutingTests(unittest.TestCase):
     def test_single_and_group_routing(self):
         self.assertEqual(
-            _routing({"chatid": "ignored", "from": {"userid": "alice"}, "chattype": "1"}),
+            _routing(
+                {"chatid": "ignored", "from": {"userid": "alice"}, "chattype": "1"}
+            ),
             ("ignored", "alice", "single"),
         )
         self.assertEqual(
@@ -237,7 +251,9 @@ class ReplyChunkingTests(unittest.IsolatedAsyncioTestCase):
 
         wecom.send_message.assert_not_awaited()
 
-    async def test_transport_disconnect_retries_final_after_authentication_recovers(self):
+    async def test_transport_disconnect_retries_final_after_authentication_recovers(
+        self,
+    ):
         authenticated = asyncio.Event()
         authenticated.set()
         attempts = 0
@@ -422,7 +438,9 @@ class SessionStoreTests(unittest.TestCase):
         store = SessionStore()
 
         def get_session(_index):
-            return store.get(chat_type="group", chat_id="room-1", external_user_id="alice")
+            return store.get(
+                chat_type="group", chat_id="room-1", external_user_id="alice"
+            )
 
         with ThreadPoolExecutor(max_workers=16) as executor:
             sessions = list(executor.map(get_session, range(200)))
@@ -442,39 +460,880 @@ class DedupeTests(unittest.TestCase):
         claimed, existing = store.claim(session_key, "message-1")
         self.assertFalse(claimed)
         self.assertFalse(existing.completed)
-        store.complete(
-            session_key,
-            "message-1",
-            text="answer",
-            status="completed",
+        self.assertTrue(
+            store.complete(
+                session_key,
+                "message-1",
+                text="answer",
+                status="completed",
+            )
         )
         claimed, existing = store.claim(session_key, "message-1")
         self.assertFalse(claimed)
         self.assertEqual(existing.text, "answer")
-        store._items[dedupe_key] = (time.monotonic() - 1, existing)
+        store._items[dedupe_key.external_message_id] = (
+            time.monotonic() - 1,
+            dedupe_key,
+            existing,
+        )
         claimed, existing = store.claim(session_key, "message-1")
         self.assertTrue(claimed)
         self.assertIsNone(existing)
 
-    def test_same_message_id_is_isolated_by_user_and_chat(self):
+    def test_same_message_id_cannot_be_reclaimed_under_another_identity(self):
         store = DedupeStore()
         alice = SessionStore.key(
             chat_type="single", chat_id="", external_user_id="alice"
         )
-        bob = SessionStore.key(
-            chat_type="single", chat_id="", external_user_id="bob"
-        )
+        bob = SessionStore.key(chat_type="single", chat_id="", external_user_id="bob")
         alice_group = SessionStore.key(
             chat_type="group", chat_id="room-1", external_user_id="alice"
         )
 
         self.assertTrue(store.claim(alice, "message-1")[0])
-        self.assertTrue(store.claim(bob, "message-1")[0])
-        self.assertTrue(store.claim(alice_group, "message-1")[0])
+        self.assertEqual(store.claim(bob, "message-1")[1].status, "identity_mismatch")
+        self.assertEqual(
+            store.claim(alice_group, "message-1")[1].status,
+            "identity_mismatch",
+        )
         self.assertFalse(store.claim(alice, "message-1")[0])
 
 
+class PersistentStateStoreTests(unittest.TestCase):
+    def test_schema_uses_wal_and_does_not_key_inbox_by_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            backend = SQLiteStateStore(path, installation_id="installation")
+            columns = backend._db.execute("PRAGMA table_info(channel_inbox)").fetchall()
+            names = {str(column[1]) for column in columns}
+            primary_key = [
+                str(column[1])
+                for column in sorted(columns, key=lambda column: int(column[5]))
+                if int(column[5]) > 0
+            ]
+            self.assertNotIn("channel_session_id", names)
+            self.assertEqual(
+                primary_key,
+                ["installation_id", "external_message_id"],
+            )
+            self.assertEqual(
+                backend._db.execute("PRAGMA journal_mode").fetchone()[0],
+                "wal",
+            )
+            self.assertEqual(
+                backend._db.execute("PRAGMA synchronous").fetchone()[0],
+                2,
+            )
+            backend.close()
+
+    def test_legacy_identity_scoped_inbox_is_migrated_to_message_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            connection = sqlite3.connect(path)
+            connection.execute(
+                """CREATE TABLE channel_inbox (
+                    installation_id TEXT NOT NULL,
+                    chat_type TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    external_user_id TEXT NOT NULL,
+                    external_message_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL DEFAULT '',
+                    state TEXT NOT NULL,
+                    claim_token TEXT,
+                    lease_until_ms INTEGER,
+                    attempt_count INTEGER NOT NULL DEFAULT 1,
+                    response_text TEXT NOT NULL DEFAULT '',
+                    response_status TEXT NOT NULL DEFAULT '',
+                    received_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    expires_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (
+                        installation_id, chat_type, chat_id,
+                        external_user_id, external_message_id
+                    )
+                )"""
+            )
+            rows = [
+                (
+                    "installation",
+                    "single",
+                    "direct",
+                    "alice",
+                    "message-1",
+                    "hash",
+                    "processing",
+                    "claim",
+                    1,
+                    1,
+                    "",
+                    "",
+                    1,
+                    1,
+                    1000,
+                ),
+                (
+                    "installation",
+                    "single",
+                    "direct",
+                    "bob",
+                    "message-1",
+                    "hash",
+                    "completed",
+                    None,
+                    None,
+                    2,
+                    "canonical",
+                    "completed",
+                    1,
+                    2,
+                    1000,
+                ),
+            ]
+            connection.executemany(
+                "INSERT INTO channel_inbox VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                rows,
+            )
+            connection.commit()
+            connection.close()
+
+            backend = SQLiteStateStore(path, installation_id="installation")
+            columns = backend._db.execute("PRAGMA table_info(channel_inbox)").fetchall()
+            primary_key = [
+                str(column[1])
+                for column in sorted(columns, key=lambda column: int(column[5]))
+                if int(column[5]) > 0
+            ]
+            self.assertEqual(primary_key, ["installation_id", "external_message_id"])
+            migrated = backend._db.execute(
+                "SELECT external_user_id,state,response_text FROM channel_inbox"
+            ).fetchall()
+            self.assertEqual(
+                [tuple(row) for row in migrated],
+                [("bob", "completed", "canonical")],
+            )
+            backend.close()
+
+    def test_durable_message_id_reuse_under_another_identity_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            backend = SQLiteStateStore(path, installation_id="installation")
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            alice = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            bob = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="bob"
+            )
+            self.assertTrue(dedupe.claim(alice, "message-1", payload="same")[0])
+            claimed, result = dedupe.claim(bob, "message-1", payload="same")
+            self.assertFalse(claimed)
+            self.assertEqual(result.status, "identity_mismatch")
+            backend.close()
+
+    def test_sessions_and_completed_inbox_survive_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            backend = SQLiteStateStore(path, installation_id="tenant:bot:connector")
+            sessions = SessionStore(id_factory=lambda: "session-1", state_store=backend)
+            key = sessions.key(chat_type="single", chat_id="", external_user_id="alice")
+            self.assertEqual(sessions.get_for_key(key), "session-1")
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            self.assertTrue(dedupe.claim(key, "message-1")[0])
+            dedupe.complete(
+                key, "message-1", text="persisted answer", status="completed"
+            )
+            backend.close()
+
+            reopened = SQLiteStateStore(path, installation_id="tenant:bot:connector")
+            restarted_sessions = SessionStore(
+                id_factory=lambda: "unexpected", state_store=reopened
+            )
+            restarted_dedupe = DedupeStore(ttl_seconds=60, state_store=reopened)
+            self.assertEqual(restarted_sessions.get_for_key(key), "session-1")
+            claimed, result = restarted_dedupe.claim(key, "message-1")
+            self.assertFalse(claimed)
+            self.assertTrue(result.completed)
+            self.assertEqual(result.text, "persisted answer")
+            reopened.close()
+
+    def test_only_one_store_claims_a_message_concurrently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            stores = [
+                SQLiteStateStore(path, installation_id="installation") for _ in range(8)
+            ]
+            key = SessionStore.key(
+                chat_type="group", chat_id="room-1", external_user_id="alice"
+            )
+
+            def claim(index):
+                return DedupeStore(ttl_seconds=60, state_store=stores[index]).claim(
+                    key, "message-1"
+                )[0]
+
+            with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+                claims = list(executor.map(claim, range(len(stores))))
+            self.assertEqual(claims.count(True), 1)
+            for store in stores:
+                store.close()
+
+    def test_expired_processing_lease_can_be_reclaimed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=60
+            )
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            self.assertTrue(dedupe.claim(key, "message-1")[0])
+            self.assertFalse(dedupe.claim(key, "message-1")[0])
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE channel_inbox SET lease_until_ms=0 "
+                    "WHERE external_message_id='message-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            self.assertTrue(dedupe.claim(key, "message-1")[0])
+            backend.close()
+
+    def test_short_ttl_cleanup_preserves_an_active_processing_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=120
+            )
+            second_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=120
+            )
+            first = DedupeStore(ttl_seconds=1, state_store=first_backend)
+            second = DedupeStore(ttl_seconds=1, state_store=second_backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(first.claim(key, "message-1")[0])
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE channel_inbox SET expires_at_ms=0 "
+                    "WHERE external_message_id='message-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            self.assertFalse(second.claim(key, "message-1")[0])
+            first_backend.close()
+            second_backend.close()
+
+    def test_claim_owner_can_renew_before_lease_takeover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=1
+            )
+            second_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=1
+            )
+            first = DedupeStore(ttl_seconds=1, state_store=first_backend)
+            second = DedupeStore(ttl_seconds=1, state_store=second_backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(first.claim(key, "message-1")[0])
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE channel_inbox SET lease_until_ms=0 "
+                    "WHERE external_message_id='message-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            self.assertTrue(first.renew(key, "message-1"))
+            self.assertFalse(second.claim(key, "message-1")[0])
+            first_backend.close()
+            second_backend.close()
+
+    def test_only_one_store_reclaims_an_expired_processing_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            stores = [
+                SQLiteStateStore(path, installation_id="installation") for _ in range(8)
+            ]
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            first = DedupeStore(ttl_seconds=60, state_store=stores[0])
+            self.assertTrue(first.claim(key, "message-1")[0])
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE channel_inbox SET lease_until_ms=0 "
+                    "WHERE external_message_id='message-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            def reclaim(index):
+                return DedupeStore(ttl_seconds=60, state_store=stores[index]).claim(
+                    key, "message-1"
+                )[0]
+
+            with ThreadPoolExecutor(max_workers=len(stores)) as executor:
+                claims = list(executor.map(reclaim, range(len(stores))))
+            self.assertEqual(claims.count(True), 1)
+            for store in stores:
+                store.close()
+
+    def test_expired_inbox_entry_can_be_claimed_as_new(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            backend = SQLiteStateStore(path, installation_id="installation")
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            self.assertTrue(dedupe.claim(key, "message-1")[0])
+            dedupe.complete(key, "message-1", text="old", status="completed")
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE channel_inbox SET expires_at_ms=0 "
+                    "WHERE external_message_id='message-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            claimed, result = dedupe.claim(key, "message-1")
+            self.assertTrue(claimed)
+            self.assertIsNone(result)
+            backend.close()
+
+    def test_session_rotation_uses_cross_process_cas(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(path, installation_id="installation")
+            second_backend = SQLiteStateStore(path, installation_id="installation")
+            ids = iter(("session-1", "candidate-1"))
+            first = SessionStore(
+                id_factory=lambda: next(ids), state_store=first_backend
+            )
+            second = SessionStore(
+                id_factory=lambda: "candidate-2", state_store=second_backend
+            )
+            key = first.key(chat_type="single", chat_id="", external_user_id="alice")
+            self.assertEqual(first.get_for_key(key), "session-1")
+            first_rotation = first.reserve_rotation(key)
+            second_rotation = second.reserve_rotation(key)
+            self.assertTrue(second.commit_rotation(second_rotation))
+            self.assertFalse(first.commit_rotation(first_rotation))
+            self.assertEqual(first.get_for_key(key), "candidate-2")
+            first_backend.close()
+            second_backend.close()
+
+    def test_session_rotation_commit_is_idempotent_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            ids = iter(("session-1", "candidate-1"))
+            sessions = SessionStore(
+                id_factory=lambda: next(ids),
+                state_store=backend,
+            )
+            key = sessions.key(chat_type="single", chat_id="", external_user_id="alice")
+            rotation = sessions.reserve_rotation(key)
+            self.assertTrue(sessions.commit_rotation(rotation))
+            self.assertTrue(sessions.commit_rotation(rotation))
+            backend.close()
+
+    def test_session_rotation_generation_prevents_aba_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(path, installation_id="installation")
+            second_backend = SQLiteStateStore(path, installation_id="installation")
+            first_ids = iter(("session-a", "candidate-stale"))
+            second_ids = iter(("session-b", "session-a"))
+            first = SessionStore(
+                id_factory=lambda: next(first_ids), state_store=first_backend
+            )
+            second = SessionStore(
+                id_factory=lambda: next(second_ids), state_store=second_backend
+            )
+            key = first.key(chat_type="single", chat_id="", external_user_id="alice")
+            self.assertEqual(first.get_for_key(key), "session-a")
+            stale_rotation = first.reserve_rotation(key)
+
+            first_change = second.reserve_rotation(key)
+            self.assertTrue(second.commit_rotation(first_change))
+            second_change = second.reserve_rotation(key)
+            self.assertTrue(second.commit_rotation(second_change))
+            self.assertEqual(first.get_for_key(key), "session-a")
+
+            self.assertFalse(first.commit_rotation(stale_rotation))
+            self.assertEqual(first.get_for_key(key), "session-a")
+            first_backend.close()
+            second_backend.close()
+
+    def test_expired_claim_owner_cannot_overwrite_new_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(path, installation_id="installation")
+            second_backend = SQLiteStateStore(path, installation_id="installation")
+            first = DedupeStore(ttl_seconds=60, state_store=first_backend)
+            second = DedupeStore(ttl_seconds=60, state_store=second_backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(first.claim(key, "message-1")[0])
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE channel_inbox SET lease_until_ms=0 "
+                    "WHERE external_message_id='message-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            self.assertTrue(second.claim(key, "message-1")[0])
+            self.assertFalse(
+                first.complete(key, "message-1", text="stale", status="completed")
+            )
+            self.assertTrue(
+                second.complete(key, "message-1", text="current", status="completed")
+            )
+
+            claimed, result = first.claim(key, "message-1")
+            self.assertFalse(claimed)
+            self.assertEqual(result.text, "current")
+            first_backend.close()
+            second_backend.close()
+
+    def test_interrupted_file_delivery_becomes_unknown_instead_of_resending(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(path, installation_id="installation")
+            second_backend = SQLiteStateStore(path, installation_id="installation")
+            first = DedupeStore(ttl_seconds=60, state_store=first_backend)
+            second = DedupeStore(ttl_seconds=60, state_store=second_backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(first.claim(key, "message-1")[0])
+            self.assertEqual(
+                first.begin_response_files(key, "message-1"),
+                (True, "sending"),
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE channel_inbox SET lease_until_ms=0 "
+                    "WHERE external_message_id='message-1'"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            self.assertTrue(second.claim(key, "message-1")[0])
+            self.assertEqual(
+                second.begin_response_files(key, "message-1"),
+                (False, "unknown"),
+            )
+            self.assertFalse(
+                first.finish_response_files(key, "message-1", status="sent")
+            )
+            first_backend.close()
+            second_backend.close()
+
+    def test_completed_file_delivery_is_not_sent_again_after_reclaim(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            backend = SQLiteStateStore(path, installation_id="installation")
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(dedupe.claim(key, "message-1")[0])
+            self.assertEqual(
+                dedupe.begin_response_files(key, "message-1"),
+                (True, "sending"),
+            )
+            self.assertTrue(
+                dedupe.finish_response_files(key, "message-1", status="sent")
+            )
+            self.assertTrue(dedupe.release(key, "message-1"))
+            self.assertTrue(dedupe.claim(key, "message-1")[0])
+            self.assertEqual(
+                dedupe.begin_response_files(key, "message-1"),
+                (False, "sent"),
+            )
+            backend.close()
+
+    def test_reused_message_id_with_different_payload_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            backend = SQLiteStateStore(path, installation_id="installation")
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(dedupe.claim(key, "message-1", payload="original")[0])
+            claimed, result = dedupe.claim(key, "message-1", payload="modified")
+            self.assertFalse(claimed)
+            self.assertEqual(result.status, "payload_mismatch")
+            backend.close()
+
+    def test_failed_terminal_transition_keeps_claim_token_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(dedupe.claim(key, "message-1")[0])
+
+            with patch.object(
+                backend,
+                "complete_inbox",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ):
+                with self.assertRaises(sqlite3.OperationalError):
+                    dedupe.complete(
+                        key,
+                        "message-1",
+                        text="answer",
+                        status="completed",
+                    )
+
+            self.assertTrue(
+                dedupe.complete(
+                    key,
+                    "message-1",
+                    text="answer",
+                    status="completed",
+                )
+            )
+            backend.close()
+
+    def test_durable_inbox_honors_max_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            dedupe = DedupeStore(
+                ttl_seconds=60,
+                max_entries=2,
+                state_store=backend,
+            )
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            for index in range(5):
+                message_id = f"message-{index}"
+                self.assertTrue(dedupe.claim(key, message_id)[0])
+                self.assertTrue(
+                    dedupe.complete(
+                        key,
+                        message_id,
+                        text=f"answer-{index}",
+                        status="completed",
+                    )
+                )
+
+            count = backend._db.execute(
+                "SELECT COUNT(*) FROM channel_inbox WHERE installation_id=?",
+                ("installation",),
+            ).fetchone()[0]
+            self.assertLessEqual(count, 2)
+            backend.close()
+
+    def test_expired_inbox_cleanup_is_batched(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            with backend._db:
+                backend._db.executemany(
+                    "INSERT INTO channel_inbox(installation_id,chat_type,chat_id,"
+                    "external_user_id,external_message_id,payload_hash,state,"
+                    "received_at_ms,updated_at_ms,expires_at_ms) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        (
+                            "installation",
+                            "single",
+                            "direct",
+                            "alice",
+                            f"expired-{index}",
+                            "hash",
+                            "completed",
+                            0,
+                            index,
+                            0,
+                        )
+                        for index in range(300)
+                    ],
+                )
+            dedupe = DedupeStore(
+                ttl_seconds=60,
+                max_entries=1000,
+                state_store=backend,
+            )
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertTrue(dedupe.claim(key, "current-message")[0])
+            count = backend._db.execute(
+                "SELECT COUNT(*) FROM channel_inbox WHERE installation_id=?",
+                ("installation",),
+            ).fetchone()[0]
+            self.assertEqual(count, 45)
+            backend.close()
+
+    def test_released_claim_preserves_new_session_candidate_across_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(path, installation_id="installation")
+            first_sessions = SessionStore(
+                id_factory=iter(("session-1", "candidate-1")).__next__,
+                state_store=first_backend,
+            )
+            key = first_sessions.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertEqual(first_sessions.get_for_key(key), "session-1")
+            first_dedupe = DedupeStore(ttl_seconds=60, state_store=first_backend)
+            self.assertTrue(first_dedupe.claim(key, "message-1")[0])
+            rotation, created = first_dedupe.save_rotation(
+                key,
+                "message-1",
+                first_sessions.reserve_rotation(key),
+            )
+            self.assertTrue(created)
+            self.assertTrue(first_dedupe.release(key, "message-1"))
+            first_backend.close()
+
+            second_backend = SQLiteStateStore(path, installation_id="installation")
+            second_dedupe = DedupeStore(ttl_seconds=60, state_store=second_backend)
+            self.assertTrue(second_dedupe.claim(key, "message-1")[0])
+            self.assertEqual(second_dedupe.load_rotation(key, "message-1"), rotation)
+            second_backend.close()
+
+
+class PersistentStateAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_sqlite_claim_does_not_block_event_loop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            original = backend.claim_inbox
+
+            def slow_claim(*args, **kwargs):
+                time.sleep(0.15)
+                return original(*args, **kwargs)
+
+            with patch.object(backend, "claim_inbox", side_effect=slow_claim):
+                started = time.monotonic()
+                claim = asyncio.create_task(dedupe.claim_async(key, "message-1"))
+                await asyncio.sleep(0.02)
+                self.assertLess(time.monotonic() - started, 0.1)
+                self.assertTrue((await claim)[0])
+            await backend.close_async()
+
+    async def test_session_sequencer_serializes_across_store_instances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=1
+            )
+            second_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=1
+            )
+            first = SessionSequencer(state_store=first_backend)
+            second = SessionSequencer(state_store=second_backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            first_entered = asyncio.Event()
+            release_first = asyncio.Event()
+            second_entered = asyncio.Event()
+
+            async def hold_first():
+                async with first.lock_for(key):
+                    first_entered.set()
+                    await release_first.wait()
+
+            async def enter_second():
+                async with second.lock_for(key):
+                    second_entered.set()
+
+            first_task = asyncio.create_task(hold_first())
+            await first_entered.wait()
+            second_task = asyncio.create_task(enter_second())
+            await asyncio.sleep(0.1)
+            self.assertFalse(second_entered.is_set())
+            release_first.set()
+            await asyncio.gather(first_task, second_task)
+            self.assertTrue(second_entered.is_set())
+            await first_backend.close_async()
+            await second_backend.close_async()
+
+    async def test_false_session_lease_renewal_interrupts_holder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+                lease_seconds=1,
+            )
+            sequencer = SessionSequencer(state_store=backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+
+            with patch.object(backend, "renew_session_lease", return_value=False):
+                with self.assertRaises(SessionLeaseLost):
+                    async with sequencer.lock_for(key):
+                        await asyncio.Event().wait()
+
+            remaining = backend._db.execute(
+                "SELECT COUNT(*) FROM channel_session_leases"
+            ).fetchone()[0]
+            self.assertEqual(remaining, 0)
+            await backend.close_async()
+
+    async def test_renewal_errors_fence_holder_before_second_store_enters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=1
+            )
+            second_backend = SQLiteStateStore(
+                path, installation_id="installation", lease_seconds=1
+            )
+            first = SessionSequencer(state_store=first_backend)
+            second = SessionSequencer(state_store=second_backend)
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            first_entered = asyncio.Event()
+            first_stopped = asyncio.Event()
+            second_entered = asyncio.Event()
+
+            async def hold_first():
+                try:
+                    async with first.lock_for(key):
+                        first_entered.set()
+                        await asyncio.Event().wait()
+                except SessionLeaseLost:
+                    first_stopped.set()
+
+            async def enter_second():
+                async with second.lock_for(key):
+                    self.assertTrue(first_stopped.is_set())
+                    second_entered.set()
+
+            with patch.object(
+                first_backend,
+                "renew_session_lease",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ):
+                first_task = asyncio.create_task(hold_first())
+                await first_entered.wait()
+                second_task = asyncio.create_task(enter_second())
+                await asyncio.wait_for(
+                    asyncio.gather(first_task, second_task),
+                    timeout=2,
+                )
+
+            self.assertTrue(first_stopped.is_set())
+            self.assertTrue(second_entered.is_set())
+            await first_backend.close_async()
+            await second_backend.close_async()
+
+    async def test_state_store_close_is_strictly_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            async_backend = SQLiteStateStore(
+                os.path.join(directory, "async.sqlite3"),
+                installation_id="installation",
+            )
+            await asyncio.gather(
+                async_backend.close_async(),
+                async_backend.close_async(),
+            )
+            await async_backend.close_async()
+            async_backend.close()
+            self.assertIsNone(async_backend._db)
+            self.assertIsNone(async_backend._executor)
+            with self.assertRaisesRegex(RuntimeError, "closed"):
+                await async_backend.run_async(lambda: None)
+
+            sync_backend = SQLiteStateStore(
+                os.path.join(directory, "sync.sqlite3"),
+                installation_id="installation",
+            )
+            sync_backend.close()
+            sync_backend.close()
+            await sync_backend.close_async()
+            self.assertIsNone(sync_backend._db)
+            self.assertIsNone(sync_backend._executor)
+
+    async def test_cancelled_close_does_not_cancel_shared_database_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "cancelled.sqlite3"),
+                installation_id="installation",
+            )
+            operation_started = asyncio.Event()
+            loop = asyncio.get_running_loop()
+
+            def slow_operation():
+                loop.call_soon_threadsafe(operation_started.set)
+                time.sleep(0.1)
+
+            operation = asyncio.create_task(backend.run_async(slow_operation))
+            await operation_started.wait()
+            closing = asyncio.create_task(backend.close_async())
+            await asyncio.sleep(0)
+            closing.cancel()
+
+            with self.assertRaises(asyncio.CancelledError):
+                await closing
+            await operation
+            await backend.close_async()
+            self.assertIsNone(backend._db)
+            self.assertIsNone(backend._executor)
+
+
 class ConfigTests(unittest.TestCase):
+    def test_installation_scope_includes_channel_tenant_bot_and_connector(self):
+        scope = json.loads(_installation_id(_config()))
+        self.assertEqual(
+            scope,
+            {
+                "bot_id": "bot-1",
+                "channel": "wecom",
+                "connector_id": "wecom-desktop",
+                "tenant_id": "tenant-1",
+            },
+        )
+
     def test_channel_url_normalization(self):
         self.assertEqual(
             _channel_url("https://gateway.example/root/"),
@@ -514,6 +1373,37 @@ class ConfigTests(unittest.TestCase):
                 config = load_config()
         self.assertEqual(config.bot_id, "env-bot")
 
+    def test_state_database_path_can_be_configured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = os.path.join(directory, "custom-state.sqlite3")
+            env = {
+                "WECOM_AIBOT_BOT_ID": "env-bot",
+                "WECOM_AIBOT_SECRET": "env-secret",
+                "ARCFORGE_GATEWAY_CHANNEL_TOKEN": "env-token",
+                "ARCFORGE_GATEWAY_URL": "https://gateway.example",
+                "ARCFORGE_CHANNEL_STATE_DB": state_path,
+            }
+            with patch.dict(os.environ, env, clear=False):
+                config = load_config()
+        self.assertEqual(config.state_db_path, state_path)
+
+    def test_state_database_defaults_below_arcforge_channel_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            env = {
+                "ARCFORGE_HOME": directory,
+                "ARCFORGE_CHANNEL_STATE_DB": "",
+                "WECOM_AIBOT_BOT_ID": "env-bot",
+                "WECOM_AIBOT_SECRET": "env-secret",
+                "ARCFORGE_GATEWAY_CHANNEL_TOKEN": "env-token",
+                "ARCFORGE_GATEWAY_URL": "https://gateway.example",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                config = load_config()
+        self.assertEqual(
+            config.state_db_path,
+            os.path.join(directory, "channel-state", "wecom-state.sqlite3"),
+        )
+
     def test_disabled_desktop_connector_is_rejected_without_environment_override(self):
         with tempfile.TemporaryDirectory() as directory:
             db_path = os.path.join(directory, "config.sqlite")
@@ -529,7 +1419,16 @@ class ConfigTests(unittest.TestCase):
                 )
                 connection.execute(
                     "INSERT INTO wecom_settings VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    ("default", 0, "bot-1", "tenant-1", "wecom-desktop", 0, "secret", "token"),
+                    (
+                        "default",
+                        0,
+                        "bot-1",
+                        "tenant-1",
+                        "wecom-desktop",
+                        0,
+                        "secret",
+                        "token",
+                    ),
                 )
             connection.close()
             env = {
@@ -561,9 +1460,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(decoded.hello.role, CHANNEL_ROLE)
 
     def test_v1_error_response_wire_shape(self):
-        frame = ChannelServerFrame(local_error=ErrorResponse(code=17, message="bad request"))
+        frame = ChannelServerFrame(
+            local_error=ErrorResponse(code=17, message="bad request")
+        )
         decoded = ChannelServerFrame.FromString(frame.SerializeToString())
-        self.assertEqual(decoded.local_error.DESCRIPTOR.full_name, "liveagent.gateway.v1.ErrorResponse")
+        self.assertEqual(
+            decoded.local_error.DESCRIPTOR.full_name,
+            "liveagent.gateway.v1.ErrorResponse",
+        )
         self.assertEqual(decoded.local_error.code, 17)
         self.assertEqual(decoded.local_error.message, "bad request")
 
@@ -582,7 +1486,9 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(decoded.command, "compact")
         self.assertEqual(decoded.channel_session_id, "session-1")
         self.assertEqual(decoded.DESCRIPTOR.fields_by_name["command"].number, 7)
-        self.assertEqual(decoded.DESCRIPTOR.fields_by_name["channel_session_id"].number, 8)
+        self.assertEqual(
+            decoded.DESCRIPTOR.fields_by_name["channel_session_id"].number, 8
+        )
 
     def test_file_frames_round_trip_with_canonical_field_numbers(self):
         inbound = make_inbound(
@@ -717,6 +1623,75 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/compact", help_reply[2])
         self.assertTrue(help_reply[3])
 
+    async def test_stale_lease_owner_does_not_send_a_final_reply(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            first_backend = SQLiteStateStore(path, installation_id="installation")
+            second_backend = SQLiteStateStore(path, installation_id="installation")
+            first = DedupeStore(ttl_seconds=60, state_store=first_backend)
+            second = DedupeStore(ttl_seconds=60, state_store=second_backend)
+            session_ids = iter(("session-1", "session-2"))
+            sessions = SessionStore(id_factory=lambda: next(session_ids))
+            frame = self._frame("message-1", "/new")
+            key = sessions.key(chat_type="single", chat_id="", external_user_id="alice")
+            self.assertEqual(sessions.get_for_key(key), "session-1")
+
+            async def submit(_inbound):
+                connection = sqlite3.connect(path)
+                try:
+                    connection.execute(
+                        "UPDATE channel_inbox SET lease_until_ms=0 "
+                        "WHERE external_message_id='message-1'"
+                    )
+                    connection.commit()
+                finally:
+                    connection.close()
+                self.assertTrue(
+                    second.claim(
+                        key,
+                        "message-1",
+                        payload=_dedupe_payload(frame["body"]),
+                    )[0]
+                )
+                return SimpleNamespace(
+                    status="completed",
+                    text="stale",
+                    message="",
+                    files=[
+                        ChannelResponseFile(
+                            file_name="stale.txt",
+                            content=b"stale",
+                            size_bytes=5,
+                        )
+                    ],
+                )
+
+            wecom = SimpleNamespace(
+                reply_stream=AsyncMock(),
+                upload_media=AsyncMock(return_value={"media_id": "media-1"}),
+                send_message=AsyncMock(return_value={"errcode": 0}),
+            )
+            channel = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+            with patch("connectors.wecom_aibot.worker.logger.warning"):
+                await _handle_text(
+                    wecom,
+                    channel,
+                    first,
+                    sessions,
+                    _config(),
+                    frame,
+                )
+
+            final_replies = [
+                call for call in wecom.reply_stream.await_args_list if call.args[3]
+            ]
+            self.assertEqual(final_replies, [])
+            wecom.upload_media.assert_not_awaited()
+            wecom.send_message.assert_not_awaited()
+            self.assertEqual(sessions.get_for_key(key), "session-1")
+            first_backend.close()
+            second_backend.close()
+
     async def test_failed_new_retry_does_not_rotate_again(self):
         ids = iter(("session-1", "session-2"))
         sessions = SessionStore(id_factory=lambda: next(ids))
@@ -737,6 +1712,255 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
             "session-1",
         )
 
+    async def test_unverified_deduped_new_does_not_commit_fresh_candidate(self):
+        ids = iter(("session-1", "session-2"))
+        sessions = SessionStore(id_factory=lambda: next(ids))
+        key = sessions.key(chat_type="single", chat_id="", external_user_id="alice")
+        self.assertEqual(sessions.get_for_key(key), "session-1")
+        result = SimpleNamespace(
+            status="completed",
+            text="canonical answer",
+            message="",
+            files=[],
+            deduped=True,
+        )
+        channel = SimpleNamespace(submit=AsyncMock(return_value=result))
+
+        with patch("connectors.wecom_aibot.worker.logger.warning"):
+            await _handle_text(
+                SimpleNamespace(reply_stream=AsyncMock()),
+                channel,
+                DedupeStore(),
+                sessions,
+                _config(),
+                self._frame("message-1", "/new"),
+            )
+
+        self.assertEqual(sessions.get_for_key(key), "session-1")
+
+    async def test_ambiguous_submit_retry_reuses_canonical_new_candidate(self):
+        ids = iter(("session-1", "session-2"))
+        sessions = SessionStore(id_factory=lambda: next(ids))
+        key = sessions.key(chat_type="single", chat_id="", external_user_id="alice")
+        self.assertEqual(sessions.get_for_key(key), "session-1")
+        ambiguous = ChannelResponse(
+            request_id="request-1",
+            external_message_id="message-1",
+            message="accepted frame was lost",
+            canonical_started=True,
+        )
+        canonical = SimpleNamespace(
+            status="completed",
+            text="canonical answer",
+            message="",
+            files=[],
+            deduped=True,
+        )
+        channel = SimpleNamespace(
+            submit=AsyncMock(
+                side_effect=(ChannelSubmitInterrupted(ambiguous), canonical)
+            )
+        )
+        dedupe = DedupeStore()
+        frame = self._frame("message-1", "/new")
+
+        with patch("connectors.wecom_aibot.worker.logger.warning"):
+            await _handle_text(
+                SimpleNamespace(reply_stream=AsyncMock()),
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                frame,
+            )
+            await _handle_text(
+                SimpleNamespace(reply_stream=AsyncMock()),
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                frame,
+            )
+
+        submitted = [call.args[0] for call in channel.submit.await_args_list]
+        self.assertEqual(
+            [message.channel_session_id for message in submitted],
+            ["session-2", "session-2"],
+        )
+        self.assertEqual(sessions.get_for_key(key), "session-2")
+
+    async def test_accepted_disconnect_retry_reuses_canonical_new_candidate(self):
+        ids = iter(("session-1", "session-2"))
+        sessions = SessionStore(id_factory=lambda: next(ids))
+        key = sessions.key(chat_type="single", chat_id="", external_user_id="alice")
+        self.assertEqual(sessions.get_for_key(key), "session-1")
+        interrupted = ChannelResponse(
+            request_id="request-1",
+            external_message_id="message-1",
+            run_id="run-1",
+            conversation_id="conversation-1",
+            status="failed",
+            message="disconnected",
+        )
+        canonical = SimpleNamespace(
+            status="completed",
+            text="canonical answer",
+            message="",
+            files=[],
+            deduped=True,
+        )
+        channel = SimpleNamespace(
+            submit=AsyncMock(
+                side_effect=(ChannelSubmitInterrupted(interrupted), canonical)
+            )
+        )
+        dedupe = DedupeStore()
+        wecom = SimpleNamespace(reply_stream=AsyncMock())
+        frame = self._frame("message-1", "/new")
+
+        with patch("connectors.wecom_aibot.worker.logger.warning"):
+            await _handle_text(wecom, channel, dedupe, sessions, _config(), frame)
+            await _handle_text(wecom, channel, dedupe, sessions, _config(), frame)
+
+        submitted = [call.args[0] for call in channel.submit.await_args_list]
+        self.assertEqual(
+            [message.channel_session_id for message in submitted],
+            ["session-2", "session-2"],
+        )
+        self.assertEqual(sessions.get_for_key(key), "session-2")
+
+    async def test_accepted_lease_loss_releases_new_for_canonical_retry(self):
+        directory = self.enterContext(tempfile.TemporaryDirectory())
+        backend = SQLiteStateStore(
+            os.path.join(directory, "wecom-state.sqlite3"),
+            installation_id="installation",
+            lease_seconds=1,
+        )
+        self.addAsyncCleanup(backend.close_async)
+        ids = iter(("session-1", "session-2"))
+        sessions = SessionStore(
+            id_factory=lambda: next(ids),
+            state_store=backend,
+        )
+        dedupe = DedupeStore(ttl_seconds=60, state_store=backend)
+        sequencer = SessionSequencer(state_store=backend)
+        key = sessions.key(chat_type="single", chat_id="", external_user_id="alice")
+        self.assertEqual(await sessions.get_for_key_async(key), "session-1")
+        accepted = asyncio.Event()
+        submit_count = 0
+
+        async def submit(_inbound):
+            nonlocal submit_count
+            submit_count += 1
+            if submit_count == 1:
+                accepted.set()
+                await asyncio.Event().wait()
+            return SimpleNamespace(
+                status="completed",
+                text="canonical answer",
+                message="",
+                files=[],
+                deduped=True,
+            )
+
+        channel = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(),
+            upload_media=AsyncMock(),
+            send_message=AsyncMock(),
+        )
+        frame = self._frame("message-1", "/new")
+
+        with (
+            patch.object(backend, "renew_session_lease", return_value=False),
+            patch("connectors.wecom_aibot.worker.logger.warning"),
+        ):
+            first_attempt = asyncio.create_task(
+                _handle_text(
+                    wecom,
+                    channel,
+                    dedupe,
+                    sessions,
+                    _config(),
+                    frame,
+                    sequencer,
+                )
+            )
+            await asyncio.wait_for(accepted.wait(), timeout=1)
+            await asyncio.wait_for(first_attempt, timeout=1)
+
+        inbox = backend._db.execute(
+            "SELECT state,claim_token,lease_until_ms,response_status,"
+            "rotation_expected_session_id,rotation_candidate_session_id,"
+            "rotation_expected_generation FROM channel_inbox "
+            "WHERE external_message_id='message-1'"
+        ).fetchone()
+        self.assertEqual(tuple(inbox[:4]), ("processing", None, 0, ""))
+        self.assertEqual(
+            tuple(inbox[4:]),
+            ("session-1", "session-2", 1),
+        )
+        self.assertEqual(await sessions.get_for_key_async(key), "session-1")
+        self.assertFalse(
+            any(call.args[3] for call in wecom.reply_stream.await_args_list)
+        )
+        wecom.upload_media.assert_not_awaited()
+        wecom.send_message.assert_not_awaited()
+
+        with patch("connectors.wecom_aibot.worker.logger.warning"):
+            await _handle_text(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                frame,
+                sequencer,
+            )
+
+        submitted = [call.args[0] for call in channel.submit.await_args_list]
+        self.assertEqual(
+            [message.channel_session_id for message in submitted],
+            ["session-2", "session-2"],
+        )
+        self.assertEqual(await sessions.get_for_key_async(key), "session-2")
+        final_replies = [
+            call.args[2] for call in wecom.reply_stream.await_args_list if call.args[3]
+        ]
+        self.assertEqual(final_replies, ["canonical answer"])
+
+    async def test_new_with_empty_completed_response_does_not_rotate(self):
+        ids = iter(("session-1", "session-2"))
+        sessions = SessionStore(id_factory=lambda: next(ids))
+        sessions.get(chat_type="single", chat_id="", external_user_id="alice")
+        dedupe = DedupeStore()
+        wecom = SimpleNamespace(reply_stream=AsyncMock())
+        channel = SimpleNamespace(
+            submit=AsyncMock(
+                return_value=SimpleNamespace(
+                    status="completed",
+                    text="",
+                    message="",
+                    files=[],
+                )
+            )
+        )
+
+        with patch("connectors.wecom_aibot.worker.logger.exception"):
+            await _handle_text(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                self._frame("message-1", "/new"),
+            )
+
+        self.assertEqual(
+            sessions.get(chat_type="single", chat_id="", external_user_id="alice"),
+            "session-1",
+        )
+
     async def test_completed_without_text_is_failed_and_not_cached(self):
         sessions = SessionStore(id_factory=lambda: "session-1")
         dedupe = DedupeStore()
@@ -752,9 +1976,7 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(channel.submit.await_count, 2)
         final_replies = [
-            call.args[2]
-            for call in wecom.reply_stream.await_args_list
-            if call.args[3]
+            call.args[2] for call in wecom.reply_stream.await_args_list if call.args[3]
         ]
         self.assertEqual(len(final_replies), 2)
         self.assertNotIn("(empty response)", final_replies)
@@ -768,7 +1990,9 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
         async def submit(_inbound):
             submit_started.set()
             await release_result.wait()
-            return SimpleNamespace(status="completed", text="desktop result", message="")
+            return SimpleNamespace(
+                status="completed", text="desktop result", message=""
+            )
 
         wecom = SimpleNamespace(
             reply_stream=AsyncMock(return_value={"errcode": 0}),
@@ -797,9 +2021,7 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(task, timeout=1)
 
         final_calls = [
-            call
-            for call in wecom.reply_stream.await_args_list
-            if call.args[3] is True
+            call for call in wecom.reply_stream.await_args_list if call.args[3] is True
         ]
         self.assertEqual(len(final_calls), 1)
         self.assertEqual(final_calls[0].args[2], "desktop result")
@@ -852,7 +2074,10 @@ class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(channel.submit.await_count, 1)
         self.assertTrue(
-            any(call.args[0] is followup_frame and call.args[3] is False for call in wecom.reply_stream.await_args_list),
+            any(
+                call.args[0] is followup_frame and call.args[3] is False
+                for call in wecom.reply_stream.await_args_list
+            ),
             "queued callbacks must receive a placeholder before waiting",
         )
         release_new.set()
@@ -946,7 +2171,11 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
                 [{"question_id": "dimension", "option_id": "business"}],
             )
             answer_received.set()
-            return {"interaction_id": interaction_id, "accepted": True, "status": "accepted"}
+            return {
+                "interaction_id": interaction_id,
+                "accepted": True,
+                "status": "accepted",
+            }
 
         channel = SimpleNamespace(
             submit=AsyncMock(side_effect=submit),
@@ -1087,7 +2316,9 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(("选择已完成，桌面端正在继续处理。", False), replies)
         self.assertEqual(replies[-1], ("done", True))
 
-    async def test_card_failure_falls_back_to_numbered_markdown_without_remote_error(self):
+    async def test_card_failure_falls_back_to_numbered_markdown_without_remote_error(
+        self,
+    ):
         interactions = InteractionCoordinator()
         wecom = self._wecom(
             reply_stream_with_card=AsyncMock(
@@ -1143,7 +2374,11 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         }
         channel = SimpleNamespace(
             answer_input=AsyncMock(
-                return_value={"interaction_id": "input-1", "accepted": True, "status": "accepted"}
+                return_value={
+                    "interaction_id": "input-1",
+                    "accepted": True,
+                    "status": "accepted",
+                }
             )
         )
 
@@ -1200,11 +2435,17 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         first_card = wecom.reply_stream_with_card.await_args.kwargs["template_card"]
         self.assertEqual(first_card["card_type"], "button_interaction")
-        self.assertEqual([button["key"] for button in first_card["button_list"]], ["o1", "o2"])
+        self.assertEqual(
+            [button["key"] for button in first_card["button_list"]], ["o1", "o2"]
+        )
 
         channel = SimpleNamespace(
             answer_input=AsyncMock(
-                return_value={"interaction_id": "input-1", "accepted": True, "status": "accepted"}
+                return_value={
+                    "interaction_id": "input-1",
+                    "accepted": True,
+                    "status": "accepted",
+                }
             )
         )
         first_event = {
@@ -1225,7 +2466,9 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         )
         second_card = wecom.update_template_card.await_args_list[0].args[1]
         self.assertEqual(second_card["card_type"], "button_interaction")
-        self.assertEqual([button["key"] for button in second_card["button_list"]], ["o1", "o2"])
+        self.assertEqual(
+            [button["key"] for button in second_card["button_list"]], ["o1", "o2"]
+        )
 
         second_event = {
             "headers": {"req_id": "card-event-2"},
@@ -1408,9 +2651,7 @@ class WorkerFileTests(unittest.IsolatedAsyncioTestCase):
 
         channel.submit.assert_not_awaited()
         final_text = [
-            call.args[2]
-            for call in wecom.reply_stream.await_args_list
-            if call.args[3]
+            call.args[2] for call in wecom.reply_stream.await_args_list if call.args[3]
         ][-1]
         self.assertIn("文件过大", final_text)
 
@@ -1515,7 +2756,9 @@ class WorkerFileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(init_body["total_chunks"], 2)
         self.assertEqual(init_body["total_size"], len(content))
         self.assertEqual(init_body["md5"], hashlib.md5(content).hexdigest())
-        chunks = [body for _frame, body, cmd in calls if cmd == "aibot_upload_media_chunk"]
+        chunks = [
+            body for _frame, body, cmd in calls if cmd == "aibot_upload_media_chunk"
+        ]
         self.assertEqual([chunk["chunk_index"] for chunk in chunks], [0, 1])
         self.assertEqual(
             b"".join(base64.b64decode(chunk["base64_data"]) for chunk in chunks),
@@ -1556,7 +2799,9 @@ class WorkerFileTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(result, "media-1")
         self.assertEqual(attempts, 3)
-        self.assertEqual([call.args[0] for call in sleep_mock.await_args_list], [0.5, 1.0])
+        self.assertEqual(
+            [call.args[0] for call in sleep_mock.await_args_list], [0.5, 1.0]
+        )
 
     async def test_upload_init_is_not_retried(self):
         client = SimpleNamespace(
@@ -1630,6 +2875,37 @@ class WorkerFileTests(unittest.IsolatedAsyncioTestCase):
             "room-1",
             {"msgtype": "file", "file": {"media_id": "media-1"}},
         )
+
+    async def test_file_delivery_rechecks_claim_after_upload(self):
+        async def reply(_frame, _body, command=None):
+            if command == "aibot_upload_media_init":
+                return {"body": {"errcode": 0, "upload_id": "upload-1"}}
+            if command == "aibot_upload_media_finish":
+                return {"body": {"errcode": 0, "media_id": "media-1"}}
+            return {"body": {"errcode": 0}}
+
+        client = SimpleNamespace(
+            reply=AsyncMock(side_effect=reply),
+            send_message=AsyncMock(return_value={"body": {"errcode": 0}}),
+        )
+        ownership = iter((True, False))
+
+        with self.assertRaisesRegex(RuntimeError, "lease changed"):
+            await _send_response_files(
+                client,
+                self._media_frame(chat_id="room-1", chat_type="group"),
+                "room-1",
+                [
+                    ChannelResponseFile(
+                        file_name="answer.txt",
+                        content=b"answer",
+                        size_bytes=6,
+                    )
+                ],
+                renew_claim=lambda: next(ownership),
+            )
+
+        client.send_message.assert_not_awaited()
 
     async def test_final_reply_failure_does_not_resend_completed_files(self):
         wecom = SimpleNamespace(
@@ -1775,7 +3051,7 @@ class ChannelClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.files[1].content, b"")
         self.assertEqual(response.files[1].error_code, "invalid_file_size")
 
-    async def test_pending_submit_fails_when_reader_disconnects(self):
+    async def test_pending_submit_without_accepted_is_released_as_uncertain(self):
         client = ChannelClient(_config())
         client._ws = _FrameSocket()
         client._closed = False
@@ -1785,14 +3061,111 @@ class ChannelClientTests(unittest.IsolatedAsyncioTestCase):
             chat_type="single",
             text="hello",
         )
-        pending = asyncio.create_task(client.submit(inbound, timeout=60))
+        pending = asyncio.create_task(client.submit(inbound, timeout=0.05))
         for _ in range(20):
             if client._responses:
                 break
             await asyncio.sleep(0)
         await client._mark_failed(ConnectionError("reader stopped"))
-        with self.assertRaises(ConnectionError):
+        with self.assertRaises(ChannelSubmitInterrupted) as raised:
             await asyncio.wait_for(pending, timeout=1)
+        self.assertTrue(raised.exception.response.canonical_started)
+
+    async def test_lost_accepted_frame_releases_without_waiting_for_reconnect(self):
+        client = ChannelClient(_config())
+        first_socket = _FrameSocket()
+        client._ws = first_socket
+        client._closed = False
+        inbound = ChannelInboundMessage(
+            external_message_id="message-1",
+            external_user_id="alice",
+            chat_type="single",
+            text="hello",
+            channel_session_id="session-1",
+        )
+        pending = asyncio.create_task(client.submit(inbound, timeout=1))
+        for _ in range(20):
+            if first_socket.sent:
+                break
+            await asyncio.sleep(0)
+        await client._mark_failed(ConnectionError("accepted frame was lost"))
+        with self.assertRaises(ChannelSubmitInterrupted) as raised:
+            await asyncio.wait_for(pending, timeout=1)
+        self.assertTrue(raised.exception.response.canonical_started)
+
+    async def test_accepted_submit_reconnects_and_queries_canonical_result(self):
+        client = ChannelClient(_config())
+        first_socket = _FrameSocket()
+        client._ws = first_socket
+        client._closed = False
+        inbound = ChannelInboundMessage(
+            external_message_id="message-1",
+            external_user_id="alice",
+            chat_type="single",
+            text="hello",
+            channel_session_id="session-1",
+        )
+        pending = asyncio.create_task(client.submit(inbound, timeout=1))
+        for _ in range(20):
+            if first_socket.sent:
+                break
+            await asyncio.sleep(0)
+        first_request = ChannelClientFrame.FromString(first_socket.sent[0])
+        await client._handle_frame(
+            ChannelServerFrame(
+                request_id=first_request.request_id,
+                accepted=ChannelAccepted(
+                    external_message_id="message-1",
+                    run_id="run-1",
+                    conversation_id="conversation-1",
+                    deduped=False,
+                ),
+            )
+        )
+        await client._mark_failed(ConnectionError("reader stopped"))
+
+        second_socket = _FrameSocket()
+        client._ws = second_socket
+        client._connection_error = None
+        client._closed = False
+        client._connected.set()
+        for _ in range(20):
+            if second_socket.sent:
+                break
+            await asyncio.sleep(0)
+        second_request = ChannelClientFrame.FromString(second_socket.sent[0])
+        await client._handle_frame(
+            ChannelServerFrame(
+                request_id=second_request.request_id,
+                accepted=ChannelAccepted(
+                    external_message_id="message-1",
+                    run_id="run-1",
+                    conversation_id="conversation-1",
+                    deduped=True,
+                ),
+            )
+        )
+        await client._handle_frame(
+            ChannelServerFrame(
+                request_id=second_request.request_id,
+                delta=ChannelDelta(run_id="run-1", text="canonical answer"),
+            )
+        )
+        await client._handle_frame(
+            ChannelServerFrame(
+                request_id=second_request.request_id,
+                final=ChannelFinal(run_id="run-1", status="completed"),
+            )
+        )
+
+        response = await pending
+        self.assertTrue(response.deduped)
+        self.assertTrue(response.canonical_started)
+        self.assertEqual(response.text, "canonical answer")
+        self.assertEqual(
+            first_request.inbound.SerializeToString(),
+            second_request.inbound.SerializeToString(),
+        )
 
     async def test_handshake_rejection_is_immediate(self):
         rejection = ChannelServerFrame(
@@ -1805,7 +3178,10 @@ class ChannelClientTests(unittest.IsolatedAsyncioTestCase):
             return socket
 
         client = ChannelClient(_config())
-        with patch("connectors.wecom_aibot.channel_client.websockets.connect", new=AsyncMock(side_effect=connect)):
+        with patch(
+            "connectors.wecom_aibot.channel_client.websockets.connect",
+            new=AsyncMock(side_effect=connect),
+        ):
             with self.assertRaises(RuntimeError) as raised:
                 await asyncio.wait_for(client.connect(), timeout=1)
         self.assertIn("unauthorized", str(raised.exception))
@@ -1927,7 +3303,10 @@ class ConnectorControlTests(unittest.IsolatedAsyncioTestCase):
         authenticated = asyncio.Event()
         client = SimpleNamespace(send_message=AsyncMock())
         for line, expected_error, expected_request_id in cases:
-            with self.subTest(error=expected_error), patch("builtins.print") as print_mock:
+            with (
+                self.subTest(error=expected_error),
+                patch("builtins.print") as print_mock,
+            ):
                 await _handle_control_line(
                     client,
                     authenticated,
@@ -1973,7 +3352,9 @@ class ConnectorControlTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(state.authenticated.is_set())
         self.assertTrue(state.ever_authenticated)
 
-    async def test_jsonl_server_correlates_concurrent_requests_and_finishes_at_eof(self):
+    async def test_jsonl_server_correlates_concurrent_requests_and_finishes_at_eof(
+        self,
+    ):
         authenticated = asyncio.Event()
         authenticated.set()
         both_started = asyncio.Event()
@@ -2025,7 +3406,9 @@ class ConnectorControlTests(unittest.IsolatedAsyncioTestCase):
             "chatId": "alice",
             "content": "\u4e2d\u6587 Markdown",
         }
-        stream = io.BytesIO((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
+        stream = io.BytesIO(
+            (json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8")
+        )
 
         with patch("builtins.print"):
             await _serve_control_requests(
@@ -2113,7 +3496,9 @@ class ConnectorReadinessTests(unittest.IsolatedAsyncioTestCase):
                 timeout=0.01,
             )
 
-    async def test_ready_marker_survives_transient_disconnect_and_reauthentication(self):
+    async def test_ready_marker_survives_transient_disconnect_and_reauthentication(
+        self,
+    ):
         events = []
         wecom_instances = []
 
@@ -2169,7 +3554,9 @@ class ConnectorReadinessTests(unittest.IsolatedAsyncioTestCase):
                     break
                 await asyncio.sleep(0)
             print_mock.assert_called_once_with(CONNECTOR_READY_MARKER, flush=True)
-            self.assertIsInstance(wecom_instances[0].options.logger, _RedactingSdkLogger)
+            self.assertIsInstance(
+                wecom_instances[0].options.logger, _RedactingSdkLogger
+            )
 
             with patch("connectors.wecom_aibot.worker.logger.warning"):
                 wecom_instances[0].emit("disconnected", "private remote reason")

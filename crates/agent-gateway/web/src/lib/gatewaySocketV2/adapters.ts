@@ -1291,6 +1291,7 @@ function chatCommandUpdatePayload(update: ChatCommandUpdate): J {
   if (update.conversationId) payload.conversation_id = update.conversationId;
   if (update.errorCode) payload.error_code = update.errorCode;
   if (update.message) payload.message = update.message;
+  if (update.runStarted) payload.run_started = true;
   return payload;
 }
 

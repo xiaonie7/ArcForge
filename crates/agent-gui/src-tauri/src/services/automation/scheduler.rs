@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use regex::Regex;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::task::JoinSet;
 use tokio_cron_scheduler::{Job, JobScheduler};
 use uuid::Uuid;
 
@@ -23,8 +24,10 @@ use super::types::{
 };
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const DELIVERY_SWEEP_INTERVAL: Duration = Duration::from_secs(2);
 const DELIVERY_STATUS_UPDATE_ATTEMPTS: usize = 3;
 const DELIVERY_STATUS_UPDATE_RETRY_DELAY: Duration = Duration::from_millis(250);
+const DELIVERY_DISPATCH_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone)]
 struct ScheduledJob {
@@ -52,6 +55,7 @@ pub struct AutomationScheduler {
     wecom_supervisor: Mutex<Option<Weak<LocalWecomSupervisor>>>,
     reload_notify: Notify,
     reload_pending: AtomicBool,
+    delivery_dispatch_running: AtomicBool,
 }
 
 impl AutomationScheduler {
@@ -64,6 +68,7 @@ impl AutomationScheduler {
             wecom_supervisor: Mutex::new(None),
             reload_notify: Notify::new(),
             reload_pending: AtomicBool::new(false),
+            delivery_dispatch_running: AtomicBool::new(false),
         }
     }
 
@@ -85,22 +90,9 @@ impl AutomationScheduler {
     }
 
     async fn run_loop(self: Arc<Self>) {
-        {
-            let store = Arc::clone(&self.store);
-            let recovered = tauri::async_runtime::spawn_blocking(move || {
-                store.recover_interrupted_deliveries()
-            })
-            .await;
-            match recovered {
-                Ok(Ok(count)) if count > 0 => {
-                    eprintln!("automation: failed {count} delivery job(s) interrupted by restart");
-                }
-                Ok(Err(error)) => eprintln!("automation delivery recovery failed: {error}"),
-                Err(error) => eprintln!("automation delivery recovery join failed: {error}"),
-                _ => {}
-            }
-        }
-
+        // Recover prompt leases first: an interrupted prompt may produce a
+        // fresh prepared delivery row in the same transaction. The outbox
+        // scan below must see that row on the first startup pass.
         {
             let store = Arc::clone(&self.store);
             let recovered = tauri::async_runtime::spawn_blocking(move || {
@@ -117,14 +109,33 @@ impl AutomationScheduler {
             }
         }
 
+        {
+            let store = Arc::clone(&self.store);
+            let recovered = tauri::async_runtime::spawn_blocking(move || {
+                store.recover_interrupted_deliveries()
+            })
+            .await;
+            match recovered {
+                Ok(Ok(count)) if count > 0 => {
+                    eprintln!("automation: marked {count} delivery job(s) interrupted by restart");
+                }
+                Ok(Err(error)) => eprintln!("automation delivery recovery failed: {error}"),
+                Err(error) => eprintln!("automation delivery recovery join failed: {error}"),
+                _ => {}
+            }
+        }
+
         if let Err(error) = self.ensure_scheduler().await {
             eprintln!("启动 automation scheduler 失败：{error}");
             return;
         }
         self.request_reload();
+        self.spawn_delivery_dispatch();
 
         let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut delivery_sweep = tokio::time::interval(DELIVERY_SWEEP_INTERVAL);
+        delivery_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = self.reload_notify.notified() => {
@@ -146,7 +157,66 @@ impl AutomationScheduler {
                         _ => {}
                     }
                 }
+                _ = delivery_sweep.tick() => {
+                    self.spawn_delivery_dispatch();
+                }
             }
+        }
+    }
+
+    fn spawn_delivery_dispatch(self: &Arc<Self>) {
+        if self.delivery_dispatch_running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let scheduler = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            scheduler.recover_and_dispatch_deliveries().await;
+            scheduler
+                .delivery_dispatch_running
+                .store(false, Ordering::SeqCst);
+        });
+    }
+
+    async fn recover_and_dispatch_deliveries(self: &Arc<Self>) {
+        let store = Arc::clone(&self.store);
+        let recovered =
+            tauri::async_runtime::spawn_blocking(move || store.recover_expired_deliveries()).await;
+        match recovered {
+            Ok(Err(error)) => eprintln!("automation delivery lease recovery failed: {error}"),
+            Err(error) => eprintln!("automation delivery lease recovery join failed: {error}"),
+            _ => {}
+        }
+        self.dispatch_prepared_deliveries().await;
+    }
+
+    async fn dispatch_prepared_deliveries(self: &Arc<Self>) {
+        let store = Arc::clone(&self.store);
+        let resumable =
+            tauri::async_runtime::spawn_blocking(move || store.prepared_delivery_run_ids()).await;
+        match resumable {
+            Ok(Ok(run_ids)) => {
+                let mut pending = run_ids.into_iter();
+                let mut deliveries = JoinSet::new();
+                loop {
+                    while deliveries.len() < DELIVERY_DISPATCH_CONCURRENCY {
+                        let Some(execution_id) = pending.next() else {
+                            break;
+                        };
+                        let scheduler = Arc::clone(self);
+                        deliveries.spawn(async move {
+                            scheduler.deliver_run(execution_id).await;
+                        });
+                    }
+                    if deliveries.is_empty() {
+                        break;
+                    }
+                    if let Some(Err(error)) = deliveries.join_next().await {
+                        eprintln!("automation delivery task failed: {error}");
+                    }
+                }
+            }
+            Ok(Err(error)) => eprintln!("list resumable automation deliveries failed: {error}"),
+            Err(error) => eprintln!("list resumable automation deliveries join failed: {error}"),
         }
     }
 
@@ -488,6 +558,7 @@ impl AutomationScheduler {
             }
         });
         let job_parts = delivery
+            .clone()
             .filter(|config| config.only_on.matches(run.success))
             .map(|config| {
                 (
@@ -502,7 +573,7 @@ impl AutomationScheduler {
         let task_id = run.task_id.clone();
         let store = Arc::clone(&self.store);
         let execution_id = tauri::async_runtime::spawn_blocking(move || {
-            store.record_completed_run_with_delivery(run, delivery_status, None)
+            store.record_completed_run_with_delivery(run, delivery, delivery_status, None)
         })
         .await;
         let execution_id = match execution_id {
@@ -532,6 +603,30 @@ impl AutomationScheduler {
     }
 
     pub async fn deliver(&self, job: DeliveryJob) {
+        self.deliver_run(job.execution_id).await;
+    }
+
+    async fn deliver_run(&self, execution_id: String) {
+        let claimed = {
+            let store = Arc::clone(&self.store);
+            let execution_id = execution_id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                store.claim_delivery_for_run(&execution_id)
+            })
+            .await
+        };
+        let claimed = match claimed {
+            Ok(Ok(Some(claimed))) => claimed,
+            Ok(Ok(None)) => return,
+            Ok(Err(error)) => {
+                eprintln!("claim automation delivery failed: {error}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("claim automation delivery join failed: {error}");
+                return;
+            }
+        };
         let supervisor = self
             .wecom_supervisor
             .lock()
@@ -539,54 +634,85 @@ impl AutomationScheduler {
             .and_then(|guard| guard.as_ref().cloned())
             .and_then(|supervisor| supervisor.upgrade());
         let result = match supervisor {
-            Some(supervisor) if job.config.channel == "wecom" => {
-                let content = format_delivery_markdown(&job);
-                let mut attempt = 0;
-                loop {
-                    let result = supervisor
-                        .send_markdown(job.config.target_id.clone(), content.clone())
-                        .await
-                        .map(|_| ());
-                    match result {
-                        Err(error) if attempt < 9 && is_transient_delivery_error(&error) => {
-                            attempt += 1;
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                        }
-                        result => break result,
-                    }
-                }
-            }
+            Some(supervisor) if claimed.target.channel == "wecom" => send_delivery_once(|| {
+                supervisor.send_markdown_for_installation(
+                    claimed.target.installation_id.clone(),
+                    claimed.target.external_target_id.clone(),
+                    claimed.outbox.body.clone(),
+                )
+            })
+            .await
+            .map(|_| ()),
             Some(_) => Err("unsupported delivery channel".to_string()),
             None => Err("WeCom runtime unavailable".to_string()),
         };
         let (status, error) = match result {
-            Ok(()) => (DeliveryStatus::Sent, None),
+            Ok(()) => ("sent", None),
             Err(raw_error) => {
                 let safe_error = safe_delivery_error(&raw_error);
                 eprintln!(
-                    "automation delivery failed for task {}: {}",
-                    job.task_id, safe_error
+                    "automation delivery failed for run {}: {}",
+                    execution_id, safe_error
                 );
-                (DeliveryStatus::Failed, Some(safe_error))
+                (delivery_result_status(&raw_error), Some(safe_error))
             }
         };
-        self.persist_delivery_result(job.execution_id, status, error)
+        if status == "prepared" {
+            self.persist_delivery_retry(execution_id, claimed.outbox.id, error)
+                .await;
+            return;
+        }
+        self.persist_delivery_result(execution_id, claimed.outbox.id, status, error)
             .await;
     }
 
-    async fn persist_delivery_result(
+    async fn persist_delivery_retry(
         &self,
         execution_id: String,
-        status: DeliveryStatus,
+        outbox_id: String,
         error: Option<String>,
     ) {
         let mut last_error = None;
         for attempt in 0..DELIVERY_STATUS_UPDATE_ATTEMPTS {
             let store = Arc::clone(&self.store);
             let execution_id = execution_id.clone();
+            let outbox_id = outbox_id.clone();
             let error = error.clone();
             let updated = tauri::async_runtime::spawn_blocking(move || {
-                store.update_run_delivery(&execution_id, status, error.as_deref())
+                store.requeue_delivery(&execution_id, &outbox_id, error.as_deref())
+            })
+            .await;
+            match updated {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => last_error = Some(error),
+                Err(error) => {
+                    last_error = Some(format!("delivery retry update task failed: {error}"));
+                }
+            }
+            if attempt + 1 < DELIVERY_STATUS_UPDATE_ATTEMPTS {
+                tokio::time::sleep(DELIVERY_STATUS_UPDATE_RETRY_DELAY).await;
+            }
+        }
+        if let Some(error) = last_error {
+            eprintln!("requeue Cron delivery failed after retries: {error}");
+        }
+    }
+
+    async fn persist_delivery_result(
+        &self,
+        execution_id: String,
+        outbox_id: String,
+        status: &'static str,
+        error: Option<String>,
+    ) {
+        let mut last_error = None;
+        for attempt in 0..DELIVERY_STATUS_UPDATE_ATTEMPTS {
+            let store = Arc::clone(&self.store);
+            let execution_id = execution_id.clone();
+            let outbox_id = outbox_id.clone();
+            let error = error.clone();
+            let updated = tauri::async_runtime::spawn_blocking(move || {
+                store.finish_delivery(&execution_id, &outbox_id, status, error.as_deref())
             })
             .await;
             match updated {
@@ -624,7 +750,7 @@ const DELIVERY_OUTPUT_MAX_BYTES: usize = 8 * 1024;
 const DELIVERY_INLINE_MAX_BYTES: usize = 512;
 const DELIVERY_MESSAGE_MAX_BYTES: usize = 12 * 1024;
 
-fn format_delivery_markdown(job: &DeliveryJob) -> String {
+pub(super) fn format_delivery_markdown(job: &DeliveryJob) -> String {
     let status = if job.success { "Success" } else { "Failure" };
     let task_name = escape_markdown_inline(&truncate_utf8_bytes(
         job.task_name.trim(),
@@ -706,13 +832,34 @@ fn break_markdown_fences(value: &str) -> String {
     escaped
 }
 
-fn is_transient_delivery_error(error: &str) -> bool {
+async fn send_delivery_once<F, Fut, T>(send: F) -> Result<T, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    send().await
+}
+
+fn delivery_result_status(error: &str) -> &'static str {
     let normalized = error.to_ascii_lowercase();
-    normalized.contains("not running")
+    if normalized.contains("not running")
         || normalized.contains("not authenticated")
         || normalized.contains("not_authenticated")
-        || normalized.contains("unavailable")
         || normalized.contains("waiting to be sent")
+        || normalized.contains("too many wecom messages")
+        || normalized.contains("runtime unavailable")
+        || normalized.contains("input is unavailable")
+    {
+        "prepared"
+    } else if normalized.contains("unsupported delivery channel")
+        || normalized.contains("chatid is required")
+        || normalized.contains("must not")
+        || normalized.contains("installation does not match")
+    {
+        "failed"
+    } else {
+        "unknown"
+    }
 }
 
 fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
@@ -914,24 +1061,27 @@ mod delivery_tests {
         assert!(!safe.contains("private"));
     }
 
-    #[test]
-    fn delivery_retry_excludes_outcome_unknown_connector_failures() {
-        assert!(is_transient_delivery_error(
-            "WeCom Connector is not running"
-        ));
-        assert!(is_transient_delivery_error(
-            "WeCom Connector is not authenticated"
-        ));
-        assert!(is_transient_delivery_error("not_authenticated"));
-        assert!(is_transient_delivery_error(
-            "Too many WeCom messages are waiting to be sent"
-        ));
-        assert!(!is_transient_delivery_error(
-            "WeCom Connector stopped before acknowledging the message"
-        ));
-        assert!(!is_transient_delivery_error(
-            "Timed out waiting for WeCom to acknowledge the message"
-        ));
+    #[tokio::test]
+    async fn outcome_unknown_errors_are_never_sent_twice_and_preflight_errors_retry() {
+        for error in [
+            "WeCom Connector stopped before acknowledging the message",
+            "Timed out waiting for WeCom to acknowledge the message",
+            "write WeCom send request failed: broken pipe",
+        ] {
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let result: Result<(), String> = send_delivery_once(|| async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err(error.to_string())
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(delivery_result_status(error), "unknown");
+        }
+        assert_eq!(
+            delivery_result_status("WeCom Connector is not authenticated"),
+            "prepared"
+        );
     }
 
     #[test]

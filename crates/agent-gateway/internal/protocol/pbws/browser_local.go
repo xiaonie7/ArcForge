@@ -2,6 +2,7 @@ package pbws
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -93,7 +94,7 @@ func (c *browserConn) handleChatCommand(requestID string, cmd *gatewayv1.ChatCom
 	}
 
 	if existing, ok := c.sm.LookupChatCommand(body.ClientRequestID); ok {
-		c.respondChatCommandDeduped(requestID, existing)
+		c.respondChatCommandDeduped(requestID, body.ClientRequestID, existing)
 		return
 	}
 
@@ -119,8 +120,12 @@ func (c *browserConn) handleChatCommand(requestID string, cmd *gatewayv1.ChatCom
 		body.ClientRequestID,
 		chatcmd.BuildAcceptedCommandPayloads(body, baseMessageRef),
 	)
+	if start.PersistenceError != "" {
+		_ = c.sendLocalError(requestID, "gateway command state is unavailable")
+		return
+	}
 	if start.Deduped {
-		c.respondChatCommandDeduped(requestID, start)
+		c.respondChatCommandDeduped(requestID, body.ClientRequestID, start)
 		return
 	}
 	updates, cleanupWatch := c.sm.WatchChatCommand(start.RunID)
@@ -133,13 +138,73 @@ func (c *browserConn) handleChatCommand(requestID string, cmd *gatewayv1.ChatCom
 	)
 }
 
-// respondChatCommandDeduped 用既有运行应答重复的 client_request_id 并转发其（回放的）
-// 前置阶段更新；观察流由看门狗窗口兜底关闭。
-func (c *browserConn) respondChatCommandDeduped(requestID string, start session.ChatCommandStart) {
-	updates, cleanupWatch := c.sm.WatchChatCommand(start.RunID)
+// respondChatCommandDeduped 用既有运行应答重复的 client_request_id。持久化终态直接
+// 回放；仍在当前进程中的运行继续观察前置阶段更新。
+func (c *browserConn) respondChatCommandDeduped(
+	requestID string,
+	clientRequestID string,
+	start session.ChatCommandStart,
+) {
 	_ = c.sendChatCommandAccepted(requestID, start)
+	if start.Terminal != nil {
+		_ = c.sendChatCommandTerminalReplay(clientRequestID, start)
+		return
+	}
+	updates, cleanupWatch := c.sm.WatchChatCommand(start.RunID)
 	go c.forwardChatCommandUpdates(updates, cleanupWatch)
-	cleanupChatCommandWatchAfter(c.cfg, cleanupWatch)
+	cleanupChatCommandWatchAfter(c.cfg, start.Recovering, cleanupWatch)
+}
+
+func (c *browserConn) sendChatCommandTerminalReplay(
+	clientRequestID string,
+	start session.ChatCommandStart,
+) error {
+	terminal := start.Terminal
+	if terminal == nil {
+		return nil
+	}
+	phase := strings.ToLower(strings.TrimSpace(terminal.Status))
+	switch phase {
+	case "completed", "failed", "cancelled", "unknown":
+	default:
+		phase = "unknown"
+	}
+	message := strings.TrimSpace(terminal.Message)
+	runStarted := false
+	var payload map[string]any
+	if json.Unmarshal([]byte(terminal.PayloadJSON), &payload) == nil {
+		runStarted, _ = payload["run_started"].(bool)
+	}
+	if phase == "completed" {
+		if payload != nil {
+			if finalText, ok := payload["final_text"].(string); ok && strings.TrimSpace(finalText) != "" {
+				message = finalText
+			}
+		}
+	}
+	if message == "" {
+		switch phase {
+		case "failed":
+			message = "The command failed."
+		case "cancelled":
+			message = "The command was cancelled."
+		case "unknown":
+			message = "The command outcome is unknown."
+		}
+	}
+	return c.send(wscore.FrameControl, "chat_command_update", &gatewayv2.WebServerFrame{
+		Payload: &gatewayv2.WebServerFrame_ChatCommandUpdate{
+			ChatCommandUpdate: chatCommandUpdate(session.ChatCommandUpdate{
+				RunID:           start.RunID,
+				ClientRequestID: strings.TrimSpace(clientRequestID),
+				ConversationID:  start.ConversationID,
+				Phase:           phase,
+				ErrorCode:       terminal.ErrorCode,
+				Message:         message,
+				RunStarted:      runStarted,
+			}),
+		},
+	})
 }
 
 func (c *browserConn) sendChatCommandAccepted(requestID string, start session.ChatCommandStart) error {
@@ -187,15 +252,22 @@ func (c *browserConn) forwardChatCommandUpdates(
 
 // cleanupChatCommandWatchAfter 为去重提交的更新观察流设兜底关闭窗口
 // （与 v1 同：AfterFunc 不占 goroutine，cleanup 幂等）。
-func cleanupChatCommandWatchAfter(cfg *config.Config, cleanup func()) {
+func cleanupChatCommandWatchAfter(cfg *config.Config, recovering bool, cleanup func()) {
 	if cleanup == nil {
 		return
 	}
+	time.AfterFunc(chatCommandWatchTimeout(cfg, recovering), cleanup)
+}
+
+func chatCommandWatchTimeout(cfg *config.Config, recovering bool) time.Duration {
 	timeout := chatcmd.StartTimeout(cfg) + chatcmd.RenderStartTimeout(cfg)
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
-	time.AfterFunc(timeout, cleanup)
+	if recovering && timeout < 45*time.Second {
+		timeout = 45 * time.Second
+	}
+	return timeout
 }
 
 const chatCancelWatchdogTimeout = 15 * time.Second

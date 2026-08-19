@@ -354,16 +354,28 @@ impl GatewayController {
             } else {
                 ChatRunLedgerState::Failed
             };
-            // Carry the error text into the ledger so a retransmitted terminal
-            // control event still surfaces it after the original send failed.
-            let message = event
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .trim();
+            // The ledger's message slot carries the terminal user-facing
+            // content. For completed runs that is the canonical final answer;
+            // for failures it remains the error message. Replayed runtime
+            // reports can therefore rebuild a DONE payload after a Gateway
+            // restart without extending the v1 wire schema.
+            let message = if state == ChatRunLedgerState::Completed {
+                event
+                    .get("final_text")
+                    .or_else(|| event.get("finalText"))
+                    .and_then(Value::as_str)
+            } else {
+                event.get("message").and_then(Value::as_str)
+            }
+            .unwrap_or("")
+            .trim();
             // Record the terminal before attempting the send so a failed send
             // is retransmitted by the ledger flush loop.
-            self.ledger_mark_run_terminal(&request_id, &conversation_id, state, "", message)?;
+            let accepted =
+                self.ledger_mark_run_terminal(&request_id, &conversation_id, state, "", message)?;
+            if !accepted {
+                return Ok(());
+            }
         } else {
             self.ledger_touch_run(&request_id, &conversation_id)?;
         }

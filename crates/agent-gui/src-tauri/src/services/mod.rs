@@ -1,4 +1,5 @@
 pub mod automation;
+pub mod channel_control;
 pub mod chat_run_ledger;
 pub mod gateway;
 pub mod gateway_bridge;

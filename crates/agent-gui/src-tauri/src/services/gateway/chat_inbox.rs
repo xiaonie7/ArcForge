@@ -217,6 +217,28 @@ impl GatewayController {
         }
     }
 
+    pub(crate) fn remote_chat_record_is_claimable(
+        record: &RemoteChatInboxRecord,
+        worker_id: &str,
+        now: Instant,
+    ) -> bool {
+        let state = record.state.trim();
+        let lease_expired = record
+            .lease_expires_at
+            .map(|expires_at| now >= expires_at)
+            .unwrap_or(true);
+        state == "queued"
+            || ((state == "claimed" || state == "starting")
+                && lease_expired
+                && !record.started)
+            // queued_in_gui lives in WebView memory. A remounted WebView gets
+            // a new worker id and may reclaim the Rust-side canonical request;
+            // the worker that originally queued it must not enqueue it twice.
+            || (state == "queued_in_gui"
+                && !record.started
+                && record.lease_owner.as_deref() != Some(worker_id))
+    }
+
     pub(crate) fn remote_chat_record_should_cancel_for_conversation(
         record: &RemoteChatInboxRecord,
     ) -> bool {
@@ -312,16 +334,7 @@ impl GatewayController {
             let mut selected_request_id: Option<String> = None;
             let mut selected_created_at: Option<Instant> = None;
             for (request_id, record) in inbox.iter() {
-                let state = record.state.trim();
-                let lease_expired = record
-                    .lease_expires_at
-                    .map(|expires_at| now >= expires_at)
-                    .unwrap_or(true);
-                if state == "queued"
-                    || ((state == "claimed" || state == "starting")
-                        && lease_expired
-                        && !record.started)
-                {
+                if Self::remote_chat_record_is_claimable(record, &worker_id, now) {
                     if selected_created_at
                         .map(|created_at| record.created_at < created_at)
                         .unwrap_or(true)
@@ -379,8 +392,10 @@ impl GatewayController {
             let record = inbox
                 .get_mut(&request_id)
                 .ok_or_else(|| "remote chat request lease is no longer active".to_string())?;
-            let queued_in_gui = record.state.trim() == "queued_in_gui" && !record.started;
-            if !queued_in_gui
+            let owned_gui_queue = record.state.trim() == "queued_in_gui"
+                && !record.started
+                && Self::remote_chat_record_is_owned_by_worker(record, &worker_id);
+            if !owned_gui_queue
                 && !Self::remote_chat_record_has_current_lease(record, &worker_id, now)
             {
                 return Err("remote chat request lease is no longer active".to_string());
@@ -442,7 +457,9 @@ impl GatewayController {
                 return Ok(());
             }
             record.state = "queued_in_gui".to_string();
-            record.lease_owner = None;
+            // Retain the worker id as an ownership marker. A new WebView
+            // worker can reclaim this request after a reload, while the
+            // current worker cannot immediately claim its own queued item.
             record.lease_expires_at = None;
             if !conversation_id.is_empty() {
                 record.request.conversation_id = conversation_id.clone();
@@ -485,13 +502,16 @@ impl GatewayController {
         }
         // Ledger first: once the inbox record is gone this is the only place
         // that still knows the run finished, and the send below can fail.
-        self.ledger_mark_run_terminal(
+        let accepted = self.ledger_mark_run_terminal(
             &request_id,
             &conversation_id,
             ChatRunLedgerState::Completed,
             "",
             "",
         )?;
+        if !accepted {
+            return Ok(());
+        }
         self.send_gateway_chat_control_event(request_id.clone(), conversation_id, "completed")
             .await?;
         self.ledger_mark_run_terminal_sent(&request_id)
@@ -518,10 +538,7 @@ impl GatewayController {
             match inbox.get_mut(&request_id) {
                 None => None,
                 Some(record) => {
-                    let queued_in_gui = terminal && record.state.trim() == "queued_in_gui";
-                    if !queued_in_gui
-                        && !Self::remote_chat_record_is_owned_by_worker(record, &worker_id)
-                    {
+                    if !Self::remote_chat_record_is_owned_by_worker(record, &worker_id) {
                         Some(false)
                     } else {
                         record.state = if terminal { "failed" } else { "queued" }.to_string();
@@ -551,13 +568,16 @@ impl GatewayController {
             }
         }
         if terminal {
-            self.ledger_mark_run_terminal(
+            let accepted = self.ledger_mark_run_terminal(
                 &request_id,
                 &conversation_id,
                 ChatRunLedgerState::Failed,
                 &error_code,
                 &message,
             )?;
+            if !accepted {
+                return Ok(());
+            }
         }
         self.send_gateway_chat_control_event_with_details(
             request_id.clone(),
@@ -590,8 +610,7 @@ impl GatewayController {
             let Some(record) = inbox.get(&request_id) else {
                 return Ok(());
             };
-            let queued_in_gui = record.state.trim() == "queued_in_gui";
-            if !queued_in_gui && !Self::remote_chat_record_is_owned_by_worker(record, &worker_id) {
+            if !Self::remote_chat_record_is_owned_by_worker(record, &worker_id) {
                 return Ok(());
             }
             inbox.remove(&request_id);
@@ -605,13 +624,16 @@ impl GatewayController {
         // produced for this request (callers use it to drop queued turns that
         // never start; running runs terminate via done/error/fail instead).
         // First-terminal-wins keeps this from clobbering an earlier outcome.
-        self.ledger_mark_run_terminal(
+        let accepted = self.ledger_mark_run_terminal(
             &request_id,
             &conversation_id,
             ChatRunLedgerState::Cancelled,
             "",
             "",
         )?;
+        if !accepted {
+            return Ok(());
+        }
         self.send_gateway_chat_control_event(request_id.clone(), conversation_id, "cancelled")
             .await?;
         self.ledger_mark_run_terminal_sent(&request_id)

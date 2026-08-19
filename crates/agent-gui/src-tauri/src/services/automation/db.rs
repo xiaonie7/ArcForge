@@ -11,6 +11,7 @@ use super::types::{
 
 pub const RUN_RETENTION_PER_TASK: u32 = 200;
 pub const RUN_RETENTION_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+pub const DELIVERY_OUTBOX_PRUNE_BATCH_SIZE: usize = 256;
 pub const MAX_RUN_OUTPUT_CHARS: usize = 50_000;
 
 const SCHEMA_VERSION: i64 = 2;
@@ -39,7 +40,7 @@ pub fn open_automation_connection() -> Result<Connection, String> {
         .map_err(|e| format!("设置 SQLite busy_timeout 失败：{e}"))?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|e| format!("启用 SQLite WAL 失败：{e}"))?;
-    conn.pragma_update(None, "synchronous", "NORMAL")
+    conn.pragma_update(None, "synchronous", "FULL")
         .map_err(|e| format!("设置 SQLite synchronous 失败：{e}"))?;
     Ok(conn)
 }
@@ -176,7 +177,9 @@ pub const PLAYBOOKS_REVISION_KEY: &str = "playbooks_revision";
 
 /// Creates the automation tables and stamps the schema version. Idempotent.
 pub fn initialize(conn: &Connection) -> Result<(), String> {
+    crate::commands::settings::initialize_schema(conn)?;
     ensure_schema(conn)?;
+    crate::services::channel_control::initialize_schema(conn)?;
     if meta_read_i64(conn, "schema_version")?.unwrap_or(0) < SCHEMA_VERSION {
         meta_write_i64(conn, "schema_version", SCHEMA_VERSION)?;
     }
@@ -747,7 +750,9 @@ pub fn prune_runs(conn: &Connection, task_id: &str) -> Result<(), String> {
     conn.execute(
         &format!(
             "DELETE FROM automation_cron_runs
-             WHERE task_id = ?1 AND state IN ('done', 'expired') AND execution_id NOT IN (
+             WHERE task_id = ?1 AND state IN ('done', 'expired')
+               AND COALESCE(delivery_status, '') <> 'pending'
+               AND execution_id NOT IN (
                  SELECT execution_id FROM automation_cron_runs
                  WHERE task_id = ?1 AND state IN ('done', 'expired')
                  ORDER BY started_at DESC, execution_id DESC
@@ -759,9 +764,30 @@ pub fn prune_runs(conn: &Connection, task_id: &str) -> Result<(), String> {
     .map_err(|e| format!("修剪 automation_cron_runs 失败：{e}"))?;
     conn.execute(
         "DELETE FROM automation_cron_runs
-         WHERE state IN ('done', 'expired') AND started_at < ?1",
+         WHERE state IN ('done', 'expired')
+           AND COALESCE(delivery_status, '') <> 'pending'
+           AND started_at < ?1",
         params![now_ms() - RUN_RETENTION_MAX_AGE_MS],
     )
     .map_err(|e| format!("按时限修剪 automation_cron_runs 失败：{e}"))?;
+    prune_orphaned_delivery_outbox(conn)?;
     Ok(())
+}
+
+pub fn prune_orphaned_delivery_outbox(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM channel_delivery_outbox WHERE rowid IN (
+           SELECT outbox.rowid FROM channel_delivery_outbox outbox
+           WHERE outbox.run_id IS NOT NULL
+             AND outbox.status IN ('sent','failed','unknown')
+             AND NOT EXISTS (
+                 SELECT 1 FROM automation_cron_runs r
+                 WHERE r.execution_id=outbox.run_id
+             )
+           ORDER BY outbox.updated_at, outbox.rowid
+           LIMIT ?1
+         )",
+        params![DELIVERY_OUTBOX_PRUNE_BATCH_SIZE as i64],
+    )
+    .map_err(|e| format!("修剪 terminal delivery outbox 失败：{e}"))
 }

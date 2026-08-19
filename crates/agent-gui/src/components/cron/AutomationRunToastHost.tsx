@@ -59,7 +59,8 @@ function AutomationRunToast(props: {
 }) {
   const { item, onDismiss, t } = props;
   const elementRef = useRef<HTMLDivElement>(null);
-  const hasError = !item.success || item.deliveryStatus === "failed";
+  const hasError =
+    !item.success || item.deliveryStatus === "failed" || item.deliveryStatus === "unknown";
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -84,9 +85,11 @@ function AutomationRunToast(props: {
       ? t("automation.runNoticeDeliverySent")
       : item.deliveryStatus === "failed"
         ? t("automation.runNoticeDeliveryFailed")
-        : item.deliveryStatus === "skipped"
-          ? t("automation.runNoticeDeliverySkipped")
-          : "";
+        : item.deliveryStatus === "unknown"
+          ? t("automation.runNoticeDeliveryUnknown")
+          : item.deliveryStatus === "skipped"
+            ? t("automation.runNoticeDeliverySkipped")
+            : "";
 
   return (
     <div

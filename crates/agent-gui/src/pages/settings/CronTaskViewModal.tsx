@@ -663,17 +663,21 @@ function RightPanel({
                                 ? "text-emerald-600 dark:text-emerald-400"
                                 : log.deliveryStatus === "failed"
                                   ? "text-red-600 dark:text-red-400"
-                                  : log.deliveryStatus === "pending"
-                                    ? "text-sky-600 dark:text-sky-400"
-                                    : "text-muted-foreground/60"
+                                  : log.deliveryStatus === "unknown"
+                                    ? "text-amber-600 dark:text-amber-400"
+                                    : log.deliveryStatus === "pending"
+                                      ? "text-sky-600 dark:text-sky-400"
+                                      : "text-muted-foreground/60"
                             }`}
                           >
                             <Send className="h-3 w-3" />
-                            {t("settings.cronViewDelivery")}: {t(deliveryTranslationKey(log.deliveryStatus))}
+                            {t("settings.cronViewDelivery")}:{" "}
+                            {t(deliveryTranslationKey(log.deliveryStatus))}
                           </span>
                         ) : null}
                       </div>
-                      {log.deliveryStatus === "failed" && log.deliveryError ? (
+                      {(log.deliveryStatus === "failed" || log.deliveryStatus === "unknown") &&
+                      log.deliveryError ? (
                         <div className="break-words rounded-lg border border-red-500/15 bg-red-500/[0.03] px-2.5 py-2 text-[11px] leading-relaxed text-red-700 dark:text-red-300">
                           {t("settings.cronViewDeliveryError")}: {log.deliveryError}
                         </div>

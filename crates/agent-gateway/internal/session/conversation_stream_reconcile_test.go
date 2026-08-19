@@ -43,7 +43,12 @@ func TestRunReportAdoptsMissedTerminal(t *testing.T) {
 	m.ingestChatControl("run-1", startedControl("run-1", "conv-1"))
 
 	m.convStreams.onRuntimeStatus(runsReport(nil, []*gatewayv1.ChatRunReport{
-		runReport("run-1", "conv-1", "completed"),
+		{
+			RunId:          "run-1",
+			ConversationId: "conv-1",
+			State:          "completed",
+			Message:        "recovered final answer",
+		},
 	}), time.Now())
 
 	last := lastEvent(t, m, "conv-1")
@@ -52,6 +57,9 @@ func TestRunReportAdoptsMissedTerminal(t *testing.T) {
 	}
 	if last.Payload["reason"] != "desktop_reported" {
 		t.Fatalf("adopted terminal reason = %#v, want desktop_reported", last.Payload["reason"])
+	}
+	if last.Payload["final_text"] != "recovered final answer" {
+		t.Fatalf("adopted terminal final_text = %#v", last.Payload["final_text"])
 	}
 	if activities := m.ActiveConversationActivities(); len(activities) != 0 {
 		t.Fatalf("activity not cleared after adopted terminal, activities=%d", len(activities))

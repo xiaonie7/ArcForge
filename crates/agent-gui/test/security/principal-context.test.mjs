@@ -5,6 +5,7 @@ import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
 const {
+  buildChannelInstallationId,
   buildTrustedPrincipalSystemPrompt,
   derivePrincipalConversationId,
   normalizeTrustedChannelOrigin,
@@ -44,10 +45,20 @@ test("channel session changes conversation identity without changing principal i
   const firstConversationId = await derivePrincipalConversationId(first);
   const secondConversationId = await derivePrincipalConversationId(second);
   assert.notEqual(firstConversationId, secondConversationId);
+  const installationId =
+    '{"bot_id":"bot-1","channel":"wecom","connector_id":"connector-1","tenant_id":"tenant-1"}';
+  assert.equal(first.installationId, installationId);
+  assert.equal(
+    buildChannelInstallationId({
+      botId: " bot-1 ",
+      channel: "WECOM",
+      connectorId: " connector-1 ",
+      tenantId: " tenant-1 ",
+    }),
+    installationId,
+  );
   const gatewayKey = [
-    "wecom",
-    "tenant-1",
-    "bot-1",
+    installationId,
     "direct",
     "direct",
     "user-1",
@@ -57,12 +68,20 @@ test("channel session changes conversation identity without changing principal i
     firstConversationId,
     `wecom:${createHash("sha256").update(`conversation|${gatewayKey}`, "utf8").digest("hex")}`,
   );
-  assert.equal(
-    firstConversationId,
-    "wecom:7625effa3c6fbdc88635b366952b2c80410b5a62dcc5a7aecb37e4c7cb6d0ec2",
-  );
   assert.equal(second.channelSessionId, "session-2");
   assert.equal(second.channelCommand, "compact");
+});
+
+test("connector identity scopes principals and conversations to one installation", async () => {
+  const first = await resolvePrincipalContext(trustedOrigin());
+  const second = await resolvePrincipalContext(trustedOrigin({ connectorId: "connector-2" }));
+
+  assert.notEqual(first.installationId, second.installationId);
+  assert.notEqual(first.principalId, second.principalId);
+  assert.notEqual(
+    await derivePrincipalConversationId(first),
+    await derivePrincipalConversationId(second),
+  );
 });
 
 test("a group chat named direct cannot collide with a direct chat", async () => {

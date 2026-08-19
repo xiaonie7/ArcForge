@@ -341,6 +341,10 @@ func (c *channelConn) handleInbound(requestID string, inbound *gatewayv2.Channel
 		clientRequestID,
 		seededPayloads,
 	)
+	if start.PersistenceError != "" {
+		_ = c.sendLocalError(requestID, "gateway command state is unavailable")
+		return
+	}
 	if err := c.sendAccepted(requestID, inbound.GetExternalMessageId(), start); err != nil {
 		return
 	}
@@ -1399,6 +1403,24 @@ func (c *channelConn) forwardPresentedFiles(
 		}
 		return
 	}
+	c.forwardPresentedFilesFromWorkdir(requestID, runID, conversationID, seq, workdir, files)
+}
+
+func (c *channelConn) forwardPresentedFilesFromWorkdir(
+	requestID string,
+	runID string,
+	conversationID string,
+	seq int64,
+	workdir string,
+	files []channelPresentedFile,
+) {
+	workdir = strings.TrimSpace(workdir)
+	if workdir == "" {
+		for _, file := range files {
+			_ = c.sendRunFileError(requestID, runID, conversationID, seq, file)
+		}
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.requestTimeout())
 	defer cancel()
 	for _, file := range files {
@@ -1461,6 +1483,38 @@ func (c *channelConn) sendAccepted(requestID, externalMessageID string, start se
 }
 
 func (c *channelConn) subscribeRun(requestID, externalMessageID string, start session.ChatCommandStart) {
+	if terminal := start.Terminal; terminal != nil {
+		payload := make(map[string]any)
+		_ = json.Unmarshal([]byte(terminal.PayloadJSON), &payload)
+		for _, durableFile := range terminal.PresentedFiles {
+			filePayload := make(map[string]any)
+			if json.Unmarshal([]byte(durableFile.PayloadJSON), &filePayload) != nil {
+				continue
+			}
+			files, ok := channelPresentedFiles(filePayload)
+			if !ok {
+				continue
+			}
+			c.forwardPresentedFilesFromWorkdir(
+				requestID,
+				start.RunID,
+				start.ConversationID,
+				durableFile.Seq,
+				durableFile.Workdir,
+				files,
+			)
+		}
+		if text, ok := channelFinalResponseText(terminal.Status, payload); ok {
+			_ = c.sendRunDelta(
+				requestID, start.RunID, start.ConversationID, start.AcceptedSeq, text,
+			)
+		}
+		_ = c.sendRunFinal(
+			requestID, start.RunID, start.ConversationID,
+			terminal.Status, terminal.ErrorCode, terminal.Message,
+		)
+		return
+	}
 	sub := c.sm.SubscribeConversationStream(start.ConversationID, start.AcceptedSeq, "")
 	c.runsMu.Lock()
 	c.runs[start.RunID] = sub.Cleanup

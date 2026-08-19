@@ -102,15 +102,16 @@ export type ConversationActivityEvent = {
   updatedAt: number;
 };
 
-// chat.command_update push: pre-stream outcomes of a submitted command,
+// chat.command_update push: pre-stream outcomes plus durable terminal replay,
 // delivered only to the issuing connection.
 export type ChatCommandUpdate = {
   runId: string;
   clientRequestId: string;
   conversationId: string | null;
-  phase: "bound" | "queued_in_gui" | "failed";
+  phase: "bound" | "queued_in_gui" | "completed" | "failed" | "cancelled" | "unknown";
   errorCode: string | null;
   message: string | null;
+  runStarted?: boolean;
 };
 
 export type ChatCommandAccepted = {
@@ -225,17 +226,27 @@ export function normalizeCommandUpdate(raw: unknown): ChatCommandUpdate | null {
   const value = raw as Record<string, unknown>;
   const runId = readString(value.run_id).trim();
   const phase = readString(value.phase).trim();
-  if (!runId || (phase !== "bound" && phase !== "queued_in_gui" && phase !== "failed")) {
+  if (
+    !runId ||
+    !["bound", "queued_in_gui", "completed", "failed", "cancelled", "unknown"].includes(phase)
+  ) {
     return null;
   }
-  return {
+  const normalized: ChatCommandUpdate = {
     runId,
     clientRequestId: readString(value.client_request_id).trim(),
     conversationId: readString(value.conversation_id).trim() || null,
-    phase,
+    phase: phase as ChatCommandUpdate["phase"],
     errorCode: readString(value.error_code).trim() || null,
     message: readString(value.message).trim() || null,
   };
+  // Keep the optional field absent for legacy updates.  `true` is the only
+  // value with semantics; omitting false preserves the pre-extension object
+  // shape for listeners that compare normalized updates structurally.
+  if (value.run_started === true) {
+    normalized.runStarted = true;
+  }
+  return normalized;
 }
 
 export function readEventSeq(event: ConversationStreamEvent): number {

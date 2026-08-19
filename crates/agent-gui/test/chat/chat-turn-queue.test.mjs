@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
 const queue = loader.loadModule("src/pages/chat/queue/chatTurnQueue.ts");
+const queueHookSource = readFileSync(
+  new URL("../../src/pages/chat/queue/useChatTurnQueue.ts", import.meta.url),
+  "utf8",
+);
 
 function draft(text, segments = [{ type: "text", text }]) {
   return {
@@ -46,6 +51,102 @@ test("queued chat turns preserve explicit empty-workdir authorization", () => {
 
   assert.equal(recent.workdir, "");
   assert.equal(recent.allowEmptyWorkdir, true);
+});
+
+test("trusted queued turns retain deeply frozen permission and principal snapshots", () => {
+  const permissionProfile = {
+    id: "profile-1",
+    name: "WeCom default",
+    revision: 3,
+    policy: {
+      executionMode: "tools",
+      allowedSkills: ["review"],
+      allowedSystemTools: ["search"],
+      allowedMcpServers: ["docs"],
+      memoryEnabled: false,
+    },
+    policyHash: "hash-3",
+    enabled: true,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const principal = {
+    principalId: "wecom:principal",
+    installationId:
+      '{"bot_id":"bot-1","channel":"wecom","connector_id":"connector-1","tenant_id":"tenant-1"}',
+    channel: "wecom",
+    tenantId: "tenant-1",
+    botId: "bot-1",
+    externalUserId: "user-1",
+    chatId: "",
+    chatType: "direct",
+    externalMessageId: "message-1",
+    connectorId: "connector-1",
+    channelSessionId: "session-1",
+    channelCommand: "",
+    authTime: 1,
+    requestId: "request-1",
+  };
+  const queued = queue.createQueuedChatTurn({
+    ...turn("trusted", "conversation-a", "question"),
+    gatewayRequest: {
+      requestId: "request-1",
+      principal,
+      permissionProfile,
+    },
+  });
+
+  assert.notEqual(queued.gatewayRequest.principal, principal);
+  assert.notEqual(queued.gatewayRequest.permissionProfile, permissionProfile);
+  assert.notEqual(queued.gatewayRequest.permissionProfile.policy, permissionProfile.policy);
+  assert.notEqual(
+    queued.gatewayRequest.permissionProfile.policy.allowedSkills,
+    permissionProfile.policy.allowedSkills,
+  );
+  assert.ok(Object.isFrozen(queued.gatewayRequest.principal));
+  assert.ok(Object.isFrozen(queued.gatewayRequest.permissionProfile));
+  assert.ok(Object.isFrozen(queued.gatewayRequest.permissionProfile.policy));
+  assert.ok(Object.isFrozen(queued.gatewayRequest.permissionProfile.policy.allowedSkills));
+  assert.deepEqual(queued.gatewayRequest.permissionProfile.policy, {
+    executionMode: "tools",
+    workdir: "",
+    allowEmptyWorkdir: false,
+    allowedSkills: ["review"],
+    allowedSystemTools: ["search"],
+    allowedMcpServers: ["docs"],
+    memoryEnabled: false,
+    nativeWebSearchEnabled: false,
+    maxDurationSeconds: 3_600,
+    maxOutputChars: 1_000_000,
+  });
+  assert.deepEqual(Object.keys(queued.gatewayRequest.permissionProfile).sort(), [
+    "id",
+    "policy",
+    "policyHash",
+    "revision",
+  ]);
+
+  permissionProfile.policy.allowedSkills.push("later-change");
+  assert.deepEqual(queued.gatewayRequest.permissionProfile.policy.allowedSkills, ["review"]);
+});
+
+test("gateway queue fields come from the frozen profile without empty-list fallback", () => {
+  assert.match(
+    queueHookSource,
+    /const trustedPolicy = principal \? permissionProfile\?\.policy : undefined/,
+  );
+  assert.match(queueHookSource, /principal && !trustedPolicy/);
+  assert.match(queueHookSource, /trustedPolicy\s*\? trustedPolicy\.executionMode/);
+  assert.match(queueHookSource, /trustedPolicy\s*\? trustedPolicy\.workdir/);
+  assert.match(
+    queueHookSource,
+    /trustedPolicy \? trustedPolicy\.allowEmptyWorkdir : allowEmptyAgentWorkdir/,
+  );
+  assert.match(queueHookSource, /Array\.isArray\(payload\.selectedSystemTools\)/);
+  assert.doesNotMatch(
+    queueHookSource,
+    /selectedSystemToolIds\.length > 0[\s\S]{0,120}settings\.system\.selectedSystemTools/,
+  );
 });
 
 test("queued chat turns append, promote, remove, and take the next turn", () => {
