@@ -9,10 +9,17 @@ import type {
 } from "../gateway/gatewayBridgeTypes";
 import { freezeChannelPermissionProfile } from "../gateway/gatewayBridgeTypes";
 
+const REMOTE_CHAT_LEASE_INACTIVE_MESSAGE = "remote chat request lease is no longer active";
+
+export function isRemoteChatLeaseInactiveError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.trim().toLowerCase().includes(REMOTE_CHAT_LEASE_INACTIVE_MESSAGE);
+}
+
 export type QueuedGatewayChatRequest = {
   requestId: string;
   clientRequestId?: string;
-  workerId?: string;
+  workerId: string;
   queuePolicy?: "auto" | "append" | "interrupt";
   selectedModel?: GatewaySelectedModelEvent;
   runtimeControls?: GatewayChatRuntimeControlsEvent;

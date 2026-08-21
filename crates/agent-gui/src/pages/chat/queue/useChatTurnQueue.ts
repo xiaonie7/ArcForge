@@ -44,6 +44,7 @@ import {
   createQueuedChatTurn,
   getQueuedConversationIds,
   insertQueuedChatTurnAtSlot,
+  isRemoteChatLeaseInactiveError,
   moveQueuedChatTurn,
   promoteQueuedChatTurn,
   type QueuedChatTurn,
@@ -372,7 +373,8 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         inFlightQueuedTurn = queuedTurn;
         setQueuedChatTurnsState(() => taken.queue);
         const gatewayRequest = queuedTurn.gatewayRequest;
-        const gatewayWorkerId = gatewayRequest?.workerId?.trim() || "gui-queue";
+        const gatewayWorkerId = gatewayRequest?.workerId.trim() ?? "";
+        let gatewayLeaseInactive = false;
         const gatewayBridgeRequest: ActiveGatewayBridgeRequest | null = gatewayRequest
           ? {
               requestId: gatewayRequest.requestId,
@@ -394,11 +396,16 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         const markGatewayStarted =
           gatewayRequest && gatewayBridgeRequest
             ? async () => {
-                await invoke("gateway_chat_mark_started", {
-                  request_id: gatewayRequest.requestId,
-                  conversation_id: targetConversationId,
-                  worker_id: gatewayWorkerId,
-                } as any);
+                try {
+                  await invoke("gateway_chat_mark_started", {
+                    request_id: gatewayRequest.requestId,
+                    conversation_id: targetConversationId,
+                    worker_id: gatewayWorkerId,
+                  } as any);
+                } catch (error) {
+                  gatewayLeaseInactive = isRemoteChatLeaseInactiveError(error);
+                  throw error;
+                }
               }
             : undefined;
         const accepted = await sendActionRef.current({
@@ -417,9 +424,14 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
           afterInitialHistoryPersist: markGatewayStarted,
         });
         if (!accepted) {
-          setQueuedChatTurnsState((current) =>
-            promoteQueuedChatTurn(appendQueuedChatTurn(current, queuedTurn), queuedTurn.id),
-          );
+          // A stale remote lease is ownership fencing, not a transient send
+          // failure. Requeueing it can never succeed and creates an endless
+          // retry/toast loop while another worker may already own the request.
+          if (!gatewayLeaseInactive) {
+            setQueuedChatTurnsState((current) =>
+              promoteQueuedChatTurn(appendQueuedChatTurn(current, queuedTurn), queuedTurn.id),
+            );
+          }
           inFlightQueuedTurn = null;
         } else if (gatewayRequest) {
           void invoke("gateway_chat_complete", {
@@ -542,7 +554,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       void invoke("gateway_chat_cancel_request", {
         request_id: gatewayRequest.requestId,
         conversation_id: queuedTurn?.conversationId,
-        worker_id: gatewayRequest.workerId ?? "gui-queue",
+        worker_id: gatewayRequest.workerId,
       } as any).catch((error) => {
         console.warn("gateway_chat_cancel_request failed", error);
       });
@@ -566,14 +578,16 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
   async function enqueueGatewayChatRequest(
     claimed: GatewayChatClaimedRequest,
     conversationId: string,
-    principal?: PrincipalContext,
-    permissionProfile?: ChannelPermissionProfileSnapshot,
+    principal: PrincipalContext | undefined,
+    permissionProfile: ChannelPermissionProfileSnapshot | undefined,
+    workerId: string,
   ) {
     const payload = claimed.request;
     const requestId = payload.requestId.trim();
     const targetConversationId = conversationId.trim();
     const message = payload.message ?? "";
     const uploadedFiles = Array.isArray(payload.uploadedFiles) ? payload.uploadedFiles : [];
+    const gatewayWorkerId = workerId.trim();
     const trustedPolicy = principal ? permissionProfile?.policy : undefined;
     const queueDisplayMessage = buildQueuedGatewayDisplayMessage(
       message,
@@ -582,6 +596,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     if (
       !requestId ||
       !targetConversationId ||
+      !gatewayWorkerId ||
       (principal && !trustedPolicy) ||
       (!queueDisplayMessage && uploadedFiles.length === 0)
     ) {
@@ -629,7 +644,9 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         requestId,
         clientRequestId:
           payload.clientRequestId?.trim() || claimed.clientRequestId?.trim() || undefined,
-        workerId: "gui-queue",
+        // Rust retains the claiming WebView worker as the queued request's
+        // ownership marker. Start/complete/cancel must use that same id.
+        workerId: gatewayWorkerId,
         queuePolicy:
           payload.queuePolicy === "append" || payload.queuePolicy === "interrupt"
             ? payload.queuePolicy

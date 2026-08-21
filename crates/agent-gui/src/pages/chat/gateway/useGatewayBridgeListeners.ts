@@ -37,8 +37,9 @@ type UseGatewayBridgeListenersParams = GatewayBridgeRuntimeRefs & {
   enqueueGatewayChatRequest: (
     claimed: GatewayChatClaimedRequest,
     conversationId: string,
-    principal?: PrincipalContext,
-    permissionProfile?: ChannelPermissionProfileSnapshot,
+    principal: PrincipalContext | undefined,
+    permissionProfile: ChannelPermissionProfileSnapshot | undefined,
+    workerId: string,
   ) => Promise<boolean>;
   isConversationRunning: (conversationId: string) => boolean;
   getConversationAbortController: (conversationId: string) => AbortController | null;
@@ -350,6 +351,7 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
         conversationId,
         principal,
         permissionProfile,
+        workerId,
       );
       if (!queued) return false;
       await invoke("gateway_chat_mark_queued_in_gui", {
@@ -378,6 +380,10 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
       if (!requestId) {
         return;
       }
+      // The claimed lease starts before trusted-origin and permission
+      // resolution. Renew it immediately so slow policy reads cannot let the
+      // 15-second startup lease expire before the request reaches the runtime.
+      startHeartbeat(requestId);
       if (payload.origin) {
         try {
           principal = await resolvePrincipalContext(payload.origin, requestId);
@@ -461,7 +467,6 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
         stopHeartbeat(requestId);
         return;
       }
-      startHeartbeat(requestId);
       if (!message && uploadedFiles.length === 0 && !principal?.channelCommand) {
         latestParamsRef.current.queueGatewayBridgeEventForRequest(
           requestId,

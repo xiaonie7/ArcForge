@@ -164,28 +164,33 @@ function createCommandListenerLoader(
   hookHarness,
   invoke,
   resolveEffectiveProfile = async () => channelPermissionProfile(),
+  principalContext,
 ) {
-  return createTsModuleLoader({
-    mocks: {
-      react: hookHarness.react,
-      "@tauri-apps/api/core": { invoke },
-      "@tauri-apps/api/event": {
-        async listen() {
-          return () => {};
-        },
-      },
-      "../../../lib/channelControl": {
-        channelControl: { resolveEffectiveProfile },
-      },
-      "../../../lib/settings": {
-        normalizeChatRuntimeControls(value) {
-          return value;
-        },
-        normalizeSystemToolSelection(value) {
-          return Array.isArray(value) ? value : [];
-        },
+  const mocks = {
+    react: hookHarness.react,
+    "@tauri-apps/api/core": { invoke },
+    "@tauri-apps/api/event": {
+      async listen() {
+        return () => {};
       },
     },
+    "../../../lib/channelControl": {
+      channelControl: { resolveEffectiveProfile },
+    },
+    "../../../lib/settings": {
+      normalizeChatRuntimeControls(value) {
+        return value;
+      },
+      normalizeSystemToolSelection(value) {
+        return Array.isArray(value) ? value : [];
+      },
+    },
+  };
+  if (principalContext) {
+    mocks["../../../lib/security/principalContext"] = principalContext;
+  }
+  return createTsModuleLoader({
+    mocks,
   });
 }
 
@@ -355,6 +360,99 @@ test("gateway bridge listener keeps one worker across renders and handles native
     else globalThis.window = previousWindow;
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
+  }
+});
+
+test("trusted requests start their lease heartbeat before identity and permission resolution", async () => {
+  const restoreGlobals = installBrowserGlobals();
+  const hookHarness = createHookHarness();
+  const invokeCalls = [];
+  let claim = claimedCommand("");
+  claim.request.message = "slow identity question";
+  let principalResolutionSawHeartbeat = false;
+  let permissionResolutionSawHeartbeat = false;
+  const principal = {
+    installationId:
+      '{"bot_id":"bot-1","channel":"wecom","connector_id":"connector-1","tenant_id":"tenant-1"}',
+    channel: "wecom",
+    tenantId: "tenant-1",
+    botId: "bot-1",
+    connectorId: "connector-1",
+    externalUserId: "user-1",
+    chatId: "",
+    chatType: "direct",
+    externalMessageId: "message-slow-identity",
+    channelSessionId: "session-1",
+  };
+
+  try {
+    const leaseHeartbeatStarted = () =>
+      invokeCalls.some(
+        (call) =>
+          call.command === "gateway_chat_heartbeat" && call.payload.request_id === "request-",
+      );
+    const loader = createCommandListenerLoader(
+      hookHarness,
+      async (command, payload) => {
+        invokeCalls.push({ command, payload });
+        if (command === "gateway_chat_claim_next") {
+          const next = claim;
+          claim = null;
+          return next;
+        }
+        return undefined;
+      },
+      async () => {
+        permissionResolutionSawHeartbeat = leaseHeartbeatStarted();
+        return channelPermissionProfile();
+      },
+      {
+        async resolvePrincipalContext() {
+          principalResolutionSawHeartbeat = leaseHeartbeatStarted();
+          return principal;
+        },
+        async derivePrincipalConversationId() {
+          return "conversation-slow-identity";
+        },
+      },
+    );
+    const { useGatewayBridgeListeners } = loader.loadModule(
+      "src/pages/chat/gateway/useGatewayBridgeListeners.ts",
+    );
+
+    hookHarness.render(() =>
+      useGatewayBridgeListeners({
+        allowWecomGroupMessages: true,
+        currentConversationIdRef: { current: "local-conversation" },
+        conversationRuntimeCacheRef: { current: new Map() },
+        ensureGatewayBridgeConversationReadyRef: { current: async (id) => id },
+        sendActionRef: { current: async () => false },
+        queueGatewayBridgeEventForRequest() {},
+        shouldQueueGatewayChatRequest() {
+          return true;
+        },
+        async enqueueGatewayChatRequest() {
+          return true;
+        },
+        isConversationRunning() {
+          return false;
+        },
+        getConversationAbortController() {
+          return null;
+        },
+      }),
+    );
+
+    await waitFor(
+      () => invokeCalls.some((call) => call.command === "gateway_chat_mark_queued_in_gui"),
+      "timed out waiting for the trusted request to enter the GUI queue",
+    );
+
+    assert.equal(principalResolutionSawHeartbeat, true);
+    assert.equal(permissionResolutionSawHeartbeat, true);
+  } finally {
+    hookHarness.cleanup();
+    restoreGlobals();
   }
 });
 
@@ -676,6 +774,15 @@ test("trusted queued requests carry the same frozen permission snapshot", async 
     assert.equal(queued[0][3].id, "profile-1");
     assert.ok(Object.isFrozen(queued[0][3]));
     assert.ok(Object.isFrozen(queued[0][3].policy.allowedSystemTools));
+    const queuedControl = invokeCalls.find(
+      (call) => call.command === "gateway_chat_mark_queued_in_gui",
+    );
+    assert.ok(queuedControl.payload.worker_id);
+    assert.equal(
+      queued[0][4],
+      queuedControl.payload.worker_id,
+      "the GUI queue must retain the worker that owns the Rust-side lease",
+    );
     assert.equal(
       invokeCalls.some((call) => call.command === "gateway_chat_mark_started"),
       false,

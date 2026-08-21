@@ -91,6 +91,7 @@ test("trusted queued turns retain deeply frozen permission and principal snapsho
     ...turn("trusted", "conversation-a", "question"),
     gatewayRequest: {
       requestId: "request-1",
+      workerId: "gateway-chat-runtime-worker-1",
       principal,
       permissionProfile,
     },
@@ -107,6 +108,7 @@ test("trusted queued turns retain deeply frozen permission and principal snapsho
   assert.ok(Object.isFrozen(queued.gatewayRequest.permissionProfile));
   assert.ok(Object.isFrozen(queued.gatewayRequest.permissionProfile.policy));
   assert.ok(Object.isFrozen(queued.gatewayRequest.permissionProfile.policy.allowedSkills));
+  assert.equal(queued.gatewayRequest.workerId, "gateway-chat-runtime-worker-1");
   assert.deepEqual(queued.gatewayRequest.permissionProfile.policy, {
     executionMode: "tools",
     workdir: "",
@@ -146,6 +148,33 @@ test("gateway queue fields come from the frozen profile without empty-list fallb
   assert.doesNotMatch(
     queueHookSource,
     /selectedSystemToolIds\.length > 0[\s\S]{0,120}settings\.system\.selectedSystemTools/,
+  );
+});
+
+test("gateway queued turns retain the runtime worker that owns the native lease", () => {
+  assert.match(queueHookSource, /const gatewayWorkerId = workerId\.trim\(\)/);
+  assert.match(queueHookSource, /!gatewayWorkerId/);
+  assert.match(
+    queueHookSource,
+    /gatewayRequest:\s*\{[\s\S]{0,500}workerId: gatewayWorkerId/,
+  );
+});
+
+test("stale remote leases are dropped instead of entering an endless queue retry", () => {
+  assert.equal(
+    queue.isRemoteChatLeaseInactiveError(
+      new Error("remote chat request lease is no longer active"),
+    ),
+    true,
+  );
+  assert.equal(queue.isRemoteChatLeaseInactiveError("temporary model failure"), false);
+  assert.match(
+    queueHookSource,
+    /gatewayLeaseInactive = isRemoteChatLeaseInactiveError\(error\)/,
+  );
+  assert.match(
+    queueHookSource,
+    /if \(!gatewayLeaseInactive\) \{[\s\S]{0,250}appendQueuedChatTurn\(current, queuedTurn\)/,
   );
 });
 
