@@ -450,6 +450,55 @@ func TestFailChatCommandPendingAndBound(t *testing.T) {
 	}
 }
 
+func TestGlobalTerminalPreventsWatchdogFailureOnAnotherStream(t *testing.T) {
+	m := NewManager()
+	m.StartChatCommand("run-split", "conv-gateway", "", "client-split", nil)
+
+	s := m.convStreams
+	now := time.Now()
+	s.mu.Lock()
+	foreign := s.streamLocked("conv-desktop", now)
+	s.appendEventLocked(foreign, "run-split", StreamEventRunFinished, map[string]any{
+		"status":      "completed",
+		"run_started": true,
+	}, now)
+	s.cacheChatCommandTerminalLocked(
+		"client-split", "run-split", "conv-desktop",
+		"completed", "", "已开启新会话。", map[string]any{
+			"status":      "completed",
+			"run_started": true,
+		}, now,
+	)
+	s.publishCommandUpdateLocked(ChatCommandUpdate{
+		RunID:           "run-split",
+		ClientRequestID: "client-split",
+		ConversationID:  "conv-desktop",
+		Phase:           "completed",
+		Message:         "已开启新会话。",
+	}, now)
+	s.mu.Unlock()
+
+	if !m.ChatCommandSettled("run-split") {
+		t.Fatal("global terminal must settle a run even when its original stream is still queued")
+	}
+	m.FailChatCommand("run-split", "startup_timeout", "did not start")
+
+	canonical := m.SubscribeConversationStream("conv-gateway", 0, "")
+	defer canonical.Cleanup()
+	if len(canonical.Events) != 0 {
+		t.Fatalf("watchdog appended a conflicting terminal: %#v", canonical.Events)
+	}
+	foreignReplay := m.SubscribeConversationStream("conv-desktop", 0, "")
+	defer foreignReplay.Cleanup()
+	if len(foreignReplay.Events) != 1 || foreignReplay.Events[0].Payload["status"] != "completed" {
+		t.Fatalf("first terminal was not preserved: %#v", foreignReplay.Events)
+	}
+	lookup, ok := m.LookupChatCommand("client-split")
+	if !ok || lookup.ConversationID != "conv-gateway" || lookup.Terminal == nil || lookup.Terminal.Status != "completed" {
+		t.Fatalf("canonical terminal lookup = %#v, ok = %v", lookup, ok)
+	}
+}
+
 func TestStartChatCommandDeduplicatesAtomically(t *testing.T) {
 	t.Parallel()
 

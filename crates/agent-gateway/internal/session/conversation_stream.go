@@ -803,6 +803,17 @@ func (s *conversationStreamStore) runFinishedWithPersistenceLocked(
 	if runID == "" || stream.runFinishedRecently(runID) {
 		return
 	}
+	record := s.runs[runID]
+	clientRequestID := ""
+	if record != nil {
+		clientRequestID = record.clientRequestID
+	}
+	if persist && s.chatCommandTerminalLocked(clientRequestID, runID) {
+		// Terminal state is run-scoped, not stream-scoped. This prevents a late
+		// or misrouted live signal from appending a conflicting second terminal.
+		// Recovery uses persist=false to materialize a terminal durable record.
+		return
+	}
 	if _, finishing := s.finishingRuns[runID]; finishing {
 		return
 	}
@@ -842,12 +853,8 @@ func (s *conversationStreamStore) runFinishedWithPersistenceLocked(
 	if persistedRunStarted, ok := payload["run_started"].(bool); ok {
 		runStarted = persistedRunStarted
 	}
-	clientRequestID := ""
-	if record := s.runs[runID]; record != nil {
-		clientRequestID = record.clientRequestID
-		if clientRequestID != "" {
-			payload["client_request_id"] = clientRequestID
-		}
+	if clientRequestID != "" {
+		payload["client_request_id"] = clientRequestID
 	}
 	s.appendEventLocked(stream, runID, StreamEventRunFinished, payload, now)
 	if clientRequestID != "" {
@@ -1188,7 +1195,7 @@ func (s *conversationStreamStore) cacheChatCommandTerminalLocked(
 	if record.state == "terminal" {
 		return
 	}
-	if conversationID = strings.TrimSpace(conversationID); conversationID != "" {
+	if conversationID = strings.TrimSpace(conversationID); conversationID != "" && record.conversationID == "" {
 		record.conversationID = conversationID
 	}
 	record.state = "terminal"
@@ -1631,6 +1638,10 @@ func (m *Manager) FailChatCommand(runID string, errorCode string, message string
 	defer s.mu.Unlock()
 
 	if pending := s.pendingRuns[runID]; pending != nil {
+		if s.chatCommandTerminalLocked(pending.clientRequestID, runID) {
+			delete(s.pendingRuns, runID)
+			return
+		}
 		delete(s.pendingRuns, runID)
 		s.fireCommandUpdateLocked(ChatCommandUpdate{
 			RunID:           runID,
@@ -1644,6 +1655,9 @@ func (m *Manager) FailChatCommand(runID string, errorCode string, message string
 
 	record := s.runs[runID]
 	if record == nil || record.conversationID == "" {
+		return
+	}
+	if s.chatCommandTerminalLocked(record.clientRequestID, runID) {
 		return
 	}
 	stream := s.streams[record.conversationID]
@@ -1666,7 +1680,10 @@ func (m *Manager) ChatCommandSettled(runID string) bool {
 	defer s.mu.Unlock()
 	record := s.runs[runID]
 	if record == nil {
-		return false
+		return s.chatCommandTerminalLocked("", runID)
+	}
+	if s.chatCommandTerminalLocked(record.clientRequestID, runID) {
+		return true
 	}
 	if record.queuedInGUI {
 		return true

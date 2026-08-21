@@ -620,9 +620,7 @@ func channelConversationID(binding channelBinding, inbound *gatewayv2.ChannelInb
 		chatKey = strings.TrimSpace(inbound.GetChatId())
 	}
 	key := strings.Join([]string{
-		channelName,
-		binding.tenantID,
-		binding.botID,
+		channelInstallationID(binding),
 		trustedChatType(chatType),
 		chatKey,
 		strings.TrimSpace(inbound.GetExternalUserId()),
@@ -630,6 +628,63 @@ func channelConversationID(binding channelBinding, inbound *gatewayv2.ChannelInb
 	}, "\x00")
 	digest := sha256.Sum256([]byte("conversation|" + key))
 	return "wecom:" + fmtHex(digest[:])
+}
+
+// channelInstallationID is the byte-for-byte installation identity shared by
+// the Connector, desktop, and Gateway. Field order and HTML escaping are part
+// of the cross-runtime hashing contract.
+func channelInstallationID(binding channelBinding) string {
+	identity := struct {
+		BotID       string `json:"bot_id"`
+		Channel     string `json:"channel"`
+		ConnectorID string `json:"connector_id"`
+		TenantID    string `json:"tenant_id"`
+	}{
+		BotID:       strings.TrimSpace(binding.botID),
+		Channel:     channelName,
+		ConnectorID: strings.TrimSpace(binding.connectorID),
+		TenantID:    strings.TrimSpace(binding.tenantID),
+	}
+	var encoded strings.Builder
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(identity); err != nil {
+		// A concrete struct containing only strings cannot fail to encode.
+		panic(err)
+	}
+	return normalizeChannelInstallationJSON(strings.TrimSuffix(encoded.String(), "\n"))
+}
+
+// encoding/json always escapes the two JavaScript line-separator runes, while
+// JSON.stringify and Python's ensure_ascii=false keep them as UTF-8. Decode
+// only those real JSON escape tokens; an escaped literal "\\u2028" remains
+// untouched because its first token is the escaped backslash.
+func normalizeChannelInstallationJSON(value string) string {
+	var normalized strings.Builder
+	normalized.Grow(len(value))
+	for index := 0; index < len(value); {
+		if value[index] != '\\' {
+			normalized.WriteByte(value[index])
+			index++
+			continue
+		}
+		switch {
+		case strings.HasPrefix(value[index:], `\u2028`):
+			normalized.WriteRune('\u2028')
+			index += len(`\u2028`)
+		case strings.HasPrefix(value[index:], `\u2029`):
+			normalized.WriteRune('\u2029')
+			index += len(`\u2029`)
+		default:
+			normalized.WriteByte(value[index])
+			index++
+			if index < len(value) {
+				normalized.WriteByte(value[index])
+				index++
+			}
+		}
+	}
+	return normalized.String()
 }
 
 func trustedChatType(value string) string {

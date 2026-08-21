@@ -399,6 +399,12 @@ func (s *conversationStreamStore) resolveConversationLocked(
 	conversationID string,
 	now time.Time,
 ) string {
+	if record := s.runs[runID]; record != nil && strings.TrimSpace(record.conversationID) != "" {
+		// A delivered command is permanently bound to the Gateway's canonical
+		// conversation. Agent events may report an independently derived id, but
+		// allowing that value to move the run would split its event stream.
+		return record.conversationID
+	}
 	if pending := s.pendingRuns[runID]; pending != nil && conversationID != "" {
 		s.bindPendingRunLocked(pending, conversationID, now)
 	}

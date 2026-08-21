@@ -143,6 +143,7 @@ func TestValidateChannelInboundAllowsFileOnlyAndEnforcesFileLimits(t *testing.T)
 
 func TestChannelConversationIDIsolatedByPrincipalAndChat(t *testing.T) {
 	binding := channelBinding{tenantID: "tenant-1", botID: "bot-1", connectorID: "connector-1"}
+	otherConnector := channelBinding{tenantID: "tenant-1", botID: "bot-1", connectorID: "connector-2"}
 	singleAlice := &gatewayv2.ChannelInboundMessage{ExternalUserId: "alice", ChatType: "single", ChatId: "ignored", ChannelSessionId: "session-1"}
 	singleAliceAgain := &gatewayv2.ChannelInboundMessage{ExternalUserId: "alice", ChatType: "single", ChatId: "another", ChannelSessionId: "session-1"}
 	singleAliceNewSession := &gatewayv2.ChannelInboundMessage{ExternalUserId: "alice", ChatType: "single", ChannelSessionId: "session-2"}
@@ -160,6 +161,9 @@ func TestChannelConversationIDIsolatedByPrincipalAndChat(t *testing.T) {
 	if channelConversationID(binding, singleAlice) == channelConversationID(binding, singleAliceNewSession) {
 		t.Fatal("new channel sessions reuse the previous conversation")
 	}
+	if channelConversationID(binding, singleAlice) == channelConversationID(otherConnector, singleAlice) {
+		t.Fatal("different connector installations share a conversation")
+	}
 	if channelConversationID(binding, groupAlice) == channelConversationID(binding, groupAliceOtherRoom) {
 		t.Fatal("different group chats share a conversation")
 	}
@@ -169,14 +173,36 @@ func TestChannelConversationIDIsolatedByPrincipalAndChat(t *testing.T) {
 	if channelConversationID(binding, singleAlice) == channelConversationID(binding, groupAliceDirectRoom) {
 		t.Fatal("group chat named direct collided with a direct conversation")
 	}
-	const expected = "wecom:420b00f43535847a98305a90fe1222fde82f2a3a9a397f26bf7ed4a2cb974b9f"
+	const expected = "wecom:c481380b4172c3023333dce0a3a91f84df4c265aeab76d7fb7e45c66a808fd52"
 	if got := channelConversationID(binding, singleAlice); got != expected {
 		t.Fatalf("conversation id contract changed: got %q want %q", got, expected)
 	}
 	contractUser := &gatewayv2.ChannelInboundMessage{ExternalUserId: "user-1", ChatType: "single", ChannelSessionId: "session-1"}
-	const crossRuntimeExpected = "wecom:7625effa3c6fbdc88635b366952b2c80410b5a62dcc5a7aecb37e4c7cb6d0ec2"
+	const crossRuntimeExpected = "wecom:566289c1463d9ec881a957649aeed9a84153fd78d0d5b72f37497ba988b64409"
 	if got := channelConversationID(binding, contractUser); got != crossRuntimeExpected {
 		t.Fatalf("cross-runtime conversation id changed: got %q want %q", got, crossRuntimeExpected)
+	}
+}
+
+func TestChannelInstallationIDMatchesCrossRuntimeJSONContract(t *testing.T) {
+	binding := channelBinding{
+		tenantID:    `租户\one`,
+		botID:       `机器人<&`,
+		connectorID: `connector"one`,
+	}
+	const expected = `{"bot_id":"机器人<&","channel":"wecom","connector_id":"connector\"one","tenant_id":"租户\\one"}`
+	if got := channelInstallationID(binding); got != expected {
+		t.Fatalf("installation id contract changed: got %q want %q", got, expected)
+	}
+
+	separators := channelBinding{
+		tenantID:    "租户\u2028分隔\u2029尾",
+		botID:       `机器人\u2028<&`,
+		connectorID: "connector-1",
+	}
+	separatorExpected := "{\"bot_id\":\"机器人\\\\u2028<&\",\"channel\":\"wecom\",\"connector_id\":\"connector-1\",\"tenant_id\":\"租户\u2028分隔\u2029尾\"}"
+	if got := channelInstallationID(separators); got != separatorExpected {
+		t.Fatalf("installation separator contract changed: got %q want %q", got, separatorExpected)
 	}
 }
 

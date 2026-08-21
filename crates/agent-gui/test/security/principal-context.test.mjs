@@ -68,8 +68,35 @@ test("channel session changes conversation identity without changing principal i
     firstConversationId,
     `wecom:${createHash("sha256").update(`conversation|${gatewayKey}`, "utf8").digest("hex")}`,
   );
+  assert.equal(
+    firstConversationId,
+    "wecom:566289c1463d9ec881a957649aeed9a84153fd78d0d5b72f37497ba988b64409",
+  );
   assert.equal(second.channelSessionId, "session-2");
   assert.equal(second.channelCommand, "compact");
+});
+
+test("installation identity JSON is byte-compatible across runtimes", () => {
+  assert.equal(
+    buildChannelInstallationId({
+      botId: "机器人<&",
+      channel: "wecom",
+      connectorId: 'connector"one',
+      tenantId: String.raw`租户\one`,
+    }),
+    String.raw`{"bot_id":"机器人<&","channel":"wecom","connector_id":"connector\"one","tenant_id":"租户\\one"}`,
+  );
+
+  const tenantWithSeparators = `租户\u2028分隔\u2029尾`;
+  assert.equal(
+    buildChannelInstallationId({
+      botId: String.raw`机器人\u2028<&`,
+      channel: "wecom",
+      connectorId: "connector-1",
+      tenantId: tenantWithSeparators,
+    }),
+    String.raw`{"bot_id":"机器人\\u2028<&","channel":"wecom","connector_id":"connector-1","tenant_id":"${tenantWithSeparators}"}`,
+  );
 });
 
 test("connector identity scopes principals and conversations to one installation", async () => {

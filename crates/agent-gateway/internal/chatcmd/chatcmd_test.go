@@ -96,6 +96,62 @@ func TestChatStartupWatchdogUsesShortCombinedWindow(t *testing.T) {
 	}
 }
 
+func TestChatStartupWatchdogKeepsForeignCompletionOnCanonicalConversation(t *testing.T) {
+	t.Parallel()
+
+	sm, agent := newCommandTestManager(t)
+	sm.StartChatCommand("run-conversation-contract", "conv-gateway", "", "client-contract", nil)
+	sm.DispatchFromAgentForSession(agent, &gatewayv1.AgentEnvelope{
+		RequestId: "run-conversation-contract",
+		Payload: &gatewayv1.AgentEnvelope_ChatControl{
+			ChatControl: &gatewayv1.ChatControlEvent{
+				RequestId:      "run-conversation-contract",
+				ConversationId: "conv-desktop",
+				Type:           "completed",
+				State:          "completed",
+				Message:        "已开启新会话。",
+			},
+		},
+	})
+
+	WatchAcceptedCommandStartup(context.Background(), &config.Config{
+		ChatStartTimeout:       5 * time.Millisecond,
+		ChatRenderStartTimeout: 5 * time.Millisecond,
+	}, sm, "run-conversation-contract")
+
+	canonical := sm.SubscribeConversationStream("conv-gateway", 0, "")
+	defer canonical.Cleanup()
+	terminalCount := 0
+	for _, event := range canonical.Events {
+		if event.RunID != "run-conversation-contract" || event.Type != session.StreamEventRunFinished {
+			continue
+		}
+		terminalCount++
+		if event.ConversationID != "conv-gateway" || event.Payload["status"] != "completed" {
+			t.Fatalf("canonical terminal = %#v", event)
+		}
+		if event.Payload["error_code"] == "startup_timeout" {
+			t.Fatalf("watchdog overwrote completed terminal: %#v", event.Payload)
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("canonical terminal count = %d, want 1; events = %#v", terminalCount, canonical.Events)
+	}
+
+	foreign := sm.SubscribeConversationStream("conv-desktop", 0, "")
+	defer foreign.Cleanup()
+	if len(foreign.Events) != 0 {
+		t.Fatalf("foreign conversation received events: %#v", foreign.Events)
+	}
+	if !sm.ChatCommandSettled("run-conversation-contract") {
+		t.Fatal("completed command must be settled")
+	}
+	lookup, ok := sm.LookupChatCommand("client-contract")
+	if !ok || lookup.ConversationID != "conv-gateway" || lookup.Terminal == nil || lookup.Terminal.Status != "completed" {
+		t.Fatalf("canonical command lookup = %#v, ok = %v", lookup, ok)
+	}
+}
+
 func TestTrustedOriginRequestBindingMatchesCommandEnvelope(t *testing.T) {
 	origin := &gatewayv1.TrustedOrigin{GatewayRequestId: "channel-run-1"}
 	envelope := buildCommandEnvelope(
