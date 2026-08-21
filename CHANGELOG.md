@@ -1,5 +1,22 @@
 # 更新日志
 
+## v0.3.1
+
+本次发布为 **bugfix 版本**，聚焦修复企业微信远程会话启动超时问题，统一 Channel 会话标识与终端状态边界。
+
+### 修复
+
+- **企业微信远程会话启动超时**：修复因会话标识拼接不一致导致远程会话无法正确关联、出现启动超时的问题。
+  - **Channel 会话标识统一**：`channelConversationID` 改用 `channelInstallationID`（由 `channel + tenant_id + bot_id + connector_id` 组成的安装级标识）作为哈希输入，替代之前逐字段拼接的方式，确保 Connector、桌面端与 Gateway 三方计算出的会话 ID 完全一致。
+  - **跨运行时 JSON 哈希契约**：`channelInstallationID` 使用确定性的 JSON 序列化（固定字段顺序、禁用 HTML 转义），并通过 `normalizeChannelInstallationJSON` 统一处理 Go `encoding/json` 与 JS `JSON.stringify` / Python `ensure_ascii=false` 对行分隔符（U+2028 / U+2029）的转义差异，杜绝因运行时差异导致的哈希不一致。
+- **终端状态防冲突**：`runFinishedWithPersistenceLocked` 新增 `chatCommandTerminalLocked` 检查，防止迟到的或被错误路由的 live 信号在已终结的 run 上追加第二个终端记录，避免事件流分裂。恢复路径使用 `persist=false` 正常物化终端记录。
+- **会话绑定不可变**：`resolveConversationLocked` 在 run 已绑定 conversationID 后直接返回已有值，不再允许 Agent 事件中独立推导的会话 ID 迁移该 run，防止事件流被拆分到不同会话。
+- **FailChatCommand / ChatCommandSettled 终端守卫**：在 pending 与 stream 两条路径都补上终端锁定检查，已终结的 run 不再触发重复状态更新。
+
+### 其他
+
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.1。
+
 ## v0.3.0
 
 本次发布围绕 **Playbook 自动投递** 和 **Channel 状态持久化** 两条主线，把自动化能力从「单条定时 Prompt」升级为「可复用模板 + 条件投递」，并夯实了企业微信通道在重启、轮换与权限收敛上的可靠性。
