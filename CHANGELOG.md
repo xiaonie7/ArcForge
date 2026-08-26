@@ -1,5 +1,26 @@
 # 更新日志
 
+## v0.3.3
+
+本次发布为 **功能版本**，升级 Pi 至 0.84.3，并为 provider 设置页新增单个模型的"高级采样与兼容参数"配置，主要适配通过 new-api 中转访问各类模型的兼容性需求。
+
+### 新功能
+
+- **高级模型控制（Advanced Model Controls）**：在 provider 设置页为单个模型新增"高级采样与兼容参数"配置区，针对目录外模型（中转/改名）的兼容场景。
+  - **采样参数（JSON）**：可把 JSON 对象（top_p、top_k、min_p 等）合并到模型请求，适配服务端支持的非标准采样字段；请求级配置按键覆盖。
+  - **Finish reason 声明**：声明 OpenAI Completions 响应是否始终返回 finish_reason（自动 / 始终返回 / 可能省略），解决部分中转端点不返回 finish_reason 导致流处理异常。
+  - **思考 Token 预算字段**：选择服务端接收思考 Token 上限的字段名（thinking_token_budget / thinking_budget / thinking_budget_tokens / 不发送），适配不同供应商的推理 token 预算字段命名差异。
+
+### 改进
+
+- **Pi 升级至 0.84.3**：升级前端依赖 Pi 至 0.84.3，同步更新 gateway web 与 agent-gui 的 pnpm-lock。
+- **模型运行时链路适配**：deepSeekProviderAdapter、modelFactory、payloadPipeline、streamByApi、openAICompletionsStream 等运行时链路适配高级参数透传与流式兼容，并补充 stream-by-api tool-choice、request-options 等测试。
+
+### 其他
+
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.3。
+- 本次提交不包含 Office Runtime 工作区的其他改动。
+
 ## v0.3.2
 
 本次发布为 **bugfix 版本**，聚焦修复 GUI 远程聊天队列租约（lease）在连续排队场景下失效、重复弹窗的问题。该问题表现为连续快速发送多条企业微信消息时，队列因 lease 失效而无法依次执行并反复弹出 lease 提示。
