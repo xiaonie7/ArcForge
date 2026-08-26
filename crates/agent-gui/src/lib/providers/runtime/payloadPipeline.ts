@@ -98,6 +98,10 @@ const finalizePayloadMiddlewares = composePayloadMiddlewares([
       providerId: params.providerId,
       baseUrl: params.baseUrl,
       modelApi: params.model?.api,
+      supportsFinishReason:
+        params.model?.api === "openai-completions"
+          ? (params.model as Model<"openai-completions">).compat?.supportsFinishReason
+          : undefined,
     }),
   (options, params) =>
     attachProviderNativeWebSearch(params.providerId, options, params.nativeWebSearch, {

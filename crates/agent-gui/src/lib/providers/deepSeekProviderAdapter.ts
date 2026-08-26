@@ -6,10 +6,12 @@ import type {
 } from "@earendil-works/pi-ai";
 import { isOnlyDsmlOrphanCloseTags, stripDsmlToolCallMarkup } from "../chat/runner/deepSeekDsml";
 import type { ProviderId } from "../settings";
+import type { ToolChoice } from "./runtime/types";
 
 type PayloadHook = (payload: unknown, model: Model<Api>) => unknown | Promise<unknown>;
 
-type DeepSeekStreamOptionsLike = SimpleStreamOptions & {
+type DeepSeekStreamOptionsLike = Omit<SimpleStreamOptions, "toolChoice"> & {
+  toolChoice?: ToolChoice;
   onPayload?: PayloadHook;
   deepSeekDsmlToolCallRepair?: boolean;
   deepSeekProviderAdapter?: boolean;
@@ -82,6 +84,7 @@ export function resolveDeepSeekOpenAICompletionsOverrides(): {
       requiresReasoningContentOnAssistantMessages: true,
       thinkingFormat: "deepseek",
       supportsStrictMode: false,
+      supportsFinishReason: false,
       supportsLongCacheRetention: false,
     },
     thinkingLevelMap: DEEPSEEK_THINKING_LEVEL_MAP,

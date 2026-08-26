@@ -258,6 +258,37 @@ test("registry without a subagent runtime exposes neither Agent nor SendMessage"
   assert.ok(names.includes("mcp_docs_search"));
 });
 
+test("only the first safe native tools prefer strict JSON-schema sampling", async () => {
+  const harness = createRegistryHarness();
+  const { registry } = await buildRegistry(harness, { withSubagentRuntime: false });
+  const readTool = registry.tools.find((tool) => tool.name === "Read");
+  const writeTool = registry.tools.find((tool) => tool.name === "Write");
+  const editTool = registry.tools.find((tool) => tool.name === "Edit");
+  const mcpTool = registry.tools.find((tool) => tool.name === "mcp_docs_search");
+
+  assert.deepEqual(writeTool?.constrainedSampling, {
+    type: "json_schema",
+    strict: "prefer",
+  });
+  assert.deepEqual(editTool?.constrainedSampling, writeTool?.constrainedSampling);
+  assert.equal(readTool?.constrainedSampling, undefined);
+  assert.equal(mcpTool?.constrainedSampling, undefined);
+  assert.deepEqual(
+    editTool?.prepareArguments?.({
+      path: "notes.txt",
+      old_string: "old",
+      new_string: "new",
+      expected_replacements: null,
+      replace_all: null,
+    }),
+    {
+      path: "notes.txt",
+      old_string: "old",
+      new_string: "new",
+    },
+  );
+});
+
 test("registry with a subagent runtime exposes Agent and the parent SendMessage", async () => {
   const harness = createRegistryHarness();
   const { registry } = await buildRegistry(harness, { withSubagentRuntime: true });

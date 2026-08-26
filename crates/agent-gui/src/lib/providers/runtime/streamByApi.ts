@@ -59,6 +59,18 @@ function mapToolChoiceToOpenAI(
   };
 }
 
+function mapToolChoiceToOpenAIResponses(
+  toolChoice: ToolChoice | undefined,
+): OpenAIResponsesOptions["toolChoice"] | undefined {
+  if (!toolChoice) return undefined;
+  if (toolChoice === "any") return "required";
+  if (toolChoice === "auto" || toolChoice === "none") return toolChoice;
+  return {
+    type: "function",
+    name: toolChoice.name,
+  };
+}
+
 function mapToolChoiceToGoogle(
   toolChoice: ToolChoice | undefined,
 ): GoogleOptions["toolChoice"] | undefined {
@@ -70,8 +82,13 @@ function mapToolChoiceToGoogle(
 }
 
 function buildOpenAIBaseOptions(model: Model<any>, options: StreamOptionsEx) {
+  const samplingParams =
+    model.samplingParams || options.samplingParams
+      ? { ...model.samplingParams, ...options.samplingParams }
+      : undefined;
   return {
     temperature: options.temperature,
+    samplingParams,
     maxTokens: resolveMaxTokens(options.maxTokens, model.maxTokens),
     signal: options.signal,
     apiKey: options.apiKey,
@@ -81,6 +98,7 @@ function buildOpenAIBaseOptions(model: Model<any>, options: StreamOptionsEx) {
     onPayload: options.onPayload,
     maxRetryDelayMs: options.maxRetryDelayMs,
     metadata: options.metadata,
+    thinkingBudgets: options.thinkingBudgets,
   };
 }
 
@@ -178,6 +196,9 @@ export function streamSimpleByApi(model: Model<any>, context: Context, options: 
       const openAIOptions: OpenAIResponsesOptions = {
         ...buildOpenAIBaseOptions(model, options),
         reasoningEffort: clampOpenAIReasoningEffort(model, options.reasoning),
+        toolChoice: context.tools?.length
+          ? mapToolChoiceToOpenAIResponses(options.toolChoice)
+          : undefined,
       };
       return withStreamRetry(() => streamOpenAIResponses(model as any, context, openAIOptions), {
         signal: options.signal,

@@ -200,8 +200,22 @@ test("openai-completions: compatibility is enabled only for non-official endpoin
     options: { recoverMissingFinishReason: false },
     model,
   });
+  const nativeMissingReasonCompat = finalizeProviderStreamOptions({
+    providerId: "codex",
+    baseUrl: "https://relay.example.com/v1",
+    options: {},
+    model: { ...model, compat: { supportsFinishReason: false } },
+  });
+  const explicitFinishReasonSupport = finalizeProviderStreamOptions({
+    providerId: "codex",
+    baseUrl: "https://relay.example.com/v1",
+    options: {},
+    model: { ...model, compat: { supportsFinishReason: true } },
+  });
 
   assert.equal(compatible.recoverMissingFinishReason, true);
   assert.equal(official.recoverMissingFinishReason, undefined);
   assert.equal(explicitStrict.recoverMissingFinishReason, false);
+  assert.equal(nativeMissingReasonCompat.recoverMissingFinishReason, undefined);
+  assert.equal(explicitFinishReasonSupport.recoverMissingFinishReason, undefined);
 });

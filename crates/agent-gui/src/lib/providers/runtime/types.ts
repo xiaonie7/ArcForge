@@ -39,7 +39,7 @@ export type ToolChoice =
       name: string;
     };
 
-export type StreamOptionsEx = SimpleStreamOptions & {
+export type StreamOptionsEx = Omit<SimpleStreamOptions, "toolChoice"> & {
   /**
    * 注意：pi-ai 的 streamSimpleAnthropic() 在内部会通过 buildBaseOptions() 丢弃 toolChoice，
    * 所以这里我们自己调用 streamAnthropic() 并把 toolChoice 显式传下去。

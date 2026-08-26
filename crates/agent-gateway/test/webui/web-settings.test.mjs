@@ -290,7 +290,7 @@ test("web chat runtime controls default and follow model-aware reasoning support
       requestFormat: "openai-responses",
       modelId: "gpt-5.2",
     }),
-    ["minimal", "low", "medium", "high", "xhigh"],
+    ["low", "medium", "high", "xhigh"],
   );
   assert.deepEqual(
     settings.getChatRuntimeReasoningLevelsForProvider({
@@ -313,7 +313,7 @@ test("web chat runtime controls default and follow model-aware reasoning support
       providerId: "zhipu",
       modelId: "glm-5.2",
     }),
-    ["low", "medium", "high", "max"],
+    ["high", "max"],
   );
   // 目录之外的自定义模型（deepseek/glm 等）按可推理处理，与桌面端一致：
   // 标准四档；deepseek 走 codex 时镜像桌面端适配层的 xhigh 档。

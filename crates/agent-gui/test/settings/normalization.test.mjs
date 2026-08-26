@@ -99,6 +99,53 @@ test("MiMo relay models inherit Xiaomi limits and migrate legacy Codex defaults"
   assert.equal(explicit.maxOutputToken, 65_536);
 });
 
+test("provider model normalization preserves valid advanced OpenAI-compatible options", () => {
+  const normalized = settings.normalizeProviderModelConfig(
+    {
+      id: "custom-reasoning-model",
+      contextWindow: 128_000,
+      maxOutputToken: 16_384,
+      samplingParams: {
+        top_p: 0.92,
+        top_k: 40,
+        min_p: 0.05,
+        stop: ["<end>", "<tool>"],
+        vendor_options: { repeat_last_n: 64 },
+      },
+      supportsFinishReason: false,
+      thinkingTokenBudgetField: "thinking_budget",
+    },
+    "codex",
+  );
+
+  assert.deepEqual(normalized?.samplingParams, {
+    top_p: 0.92,
+    top_k: 40,
+    min_p: 0.05,
+    stop: ["<end>", "<tool>"],
+    vendor_options: { repeat_last_n: 64 },
+  });
+  assert.equal(normalized?.supportsFinishReason, false);
+  assert.equal(normalized?.thinkingTokenBudgetField, "thinking_budget");
+});
+
+test("provider model normalization drops malformed advanced options", () => {
+  const normalized = settings.normalizeProviderModelConfig(
+    {
+      id: "custom-reasoning-model",
+      samplingParams: ["top_p", 0.92],
+      supportsFinishReason: "false",
+      thinkingTokenBudgetField: "max_reasoning_tokens",
+    },
+    "codex",
+  );
+
+  assert.ok(normalized);
+  assert.equal(Object.hasOwn(normalized, "samplingParams"), false);
+  assert.equal(Object.hasOwn(normalized, "supportsFinishReason"), false);
+  assert.equal(Object.hasOwn(normalized, "thinkingTokenBudgetField"), false);
+});
+
 test("claude provider normalization defaults routing, caching, and model limits", () => {
   const provider = settings.normalizeCustomProvider({
     id: "claude-1",
@@ -453,7 +500,7 @@ test("chat runtime controls default and follow provider model reasoning support"
     }),
     ["minimal", "low", "medium", "high", "xhigh", "max"],
   );
-  // gpt-5.1（openai-responses）：目录只覆盖 off，标准四档。
+  // gpt-5.1（openai-responses）：目录禁用 off/minimal，只保留 low/medium/high。
   assert.deepEqual(
     settings.getChatRuntimeReasoningLevelsForProvider({
       providerId: "codex",
@@ -461,7 +508,7 @@ test("chat runtime controls default and follow provider model reasoning support"
       modelId: "gpt-5.1",
       baseUrl: "https://api.openai.com/v1",
     }),
-    ["minimal", "low", "medium", "high"],
+    ["low", "medium", "high"],
   );
   // gpt-5.2：目录额外声明 xhigh，仍无 max。
   assert.deepEqual(
@@ -471,7 +518,7 @@ test("chat runtime controls default and follow provider model reasoning support"
       modelId: "gpt-5.2",
       baseUrl: "https://api.openai.com/v1",
     }),
-    ["minimal", "low", "medium", "high", "xhigh"],
+    ["low", "medium", "high", "xhigh"],
   );
   // Groq qwen/qwen3-32b（openai-completions 兼容端点）：目录覆盖到 xhigh，仍无 max。
   assert.deepEqual(
@@ -492,11 +539,11 @@ test("chat runtime controls default and follow provider model reasoning support"
     }),
     ["minimal", "low", "medium", "high"],
   );
-  // gemini-3-pro-preview：目录把 minimal/medium 显式置空，只剩两档（3.0/3.1 同档）。
+  // gemini-3.1-pro-preview：0.84.3 目录只开放 low/high。
   assert.deepEqual(
     settings.getChatRuntimeReasoningLevelsForProvider({
       providerId: "gemini",
-      modelId: "gemini-3-pro-preview",
+      modelId: "gemini-3.1-pro-preview",
       baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     }),
     ["low", "high"],

@@ -187,7 +187,7 @@ export function resolveGeminiThinkingRuntime(
 ): GoogleOptions["thinking"] {
   if (!reasoning) return { enabled: false };
 
-  // 档位可用性交给目录 thinkingLevelMap（clampThinkingLevel）决定，例如 gemini-3-pro-preview
+  // 档位可用性交给目录 thinkingLevelMap（clampThinkingLevel）决定，例如 gemini-3.1-pro-preview
   // 会被裁剪到只剩 low/high；xhigh/max 目前没有任何 Gemini 目录条目声明支持，一律降到 high。
   const clamped = clampThinkingLevel(model, reasoning);
   const effort: GeminiEffort =

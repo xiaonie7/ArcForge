@@ -43,6 +43,10 @@ type ToolOk<TDetails extends BuiltinToolResultDetails = BuiltinToolResultDetails
 const MAX_DISPLAY_IMAGE_PATHS = 12;
 const MAX_DISPLAY_FILE_PATHS = 12;
 const AUTO_FULL_READ_MAX_LINES = 5_000;
+const PREFERRED_STRICT_TOOL_SAMPLING = {
+  type: "json_schema",
+  strict: "prefer",
+} as const satisfies Exclude<Tool["constrainedSampling"], false | undefined>;
 
 function strictToolParameters(properties: Record<string, unknown>) {
   return Type.Object(properties as any, { additionalProperties: false });
@@ -579,6 +583,7 @@ export function createFsTools(params: {
       }),
       content: Type.String({ description: "Entire text content to write" }),
     }),
+    constrainedSampling: PREFERRED_STRICT_TOOL_SAMPLING,
     // Legacy tolerance: replayed histories teach some models to send the
     // retired `mode` field; strip it before schema validation instead of
     // failing the call.
@@ -591,7 +596,7 @@ export function createFsTools(params: {
     },
   };
 
-  const toolEdit: Tool = {
+  const toolEdit: Tool & { prepareArguments?: (args: unknown) => unknown } = {
     name: "Edit",
     description:
       "Perform an exact-string replacement in a file you have already Read. Validates version metadata before writing and rejects stale edits — if the file changed after the last Read, Read it again before retrying. When no exact match exists, Edit automatically retries with lenient matching (CRLF/LF line endings, per-line trailing whitespace, then a uniform indentation shift) and reports the used matchStrategy in the result, so do not pad old_string with guessed whitespace. If `old_string` matches multiple places, either narrow it until unique or set `replace_all=true` explicitly.",
@@ -616,6 +621,19 @@ export function createFsTools(params: {
         }),
       ),
     }),
+    constrainedSampling: PREFERRED_STRICT_TOOL_SAMPLING,
+    // Strict JSON-schema sampling represents optional fields as nullable
+    // required properties. Restore omission semantics before validating the
+    // original TypeBox schema and executing the edit.
+    prepareArguments: (args) => {
+      if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+      const record = args as Record<string, unknown>;
+      if (record.expected_replacements !== null && record.replace_all !== null) return args;
+      const normalized = { ...record };
+      if (normalized.expected_replacements === null) delete normalized.expected_replacements;
+      if (normalized.replace_all === null) delete normalized.replace_all;
+      return normalized;
+    },
   };
 
   const toolDelete: Tool = {

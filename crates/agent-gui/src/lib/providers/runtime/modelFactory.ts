@@ -176,10 +176,17 @@ function resolveCodexOpenAIResponsesCompat(params: {
   upstreamBaseUrl?: string;
 }): Model<"openai-responses">["compat"] | undefined {
   const compatBaseUrl = normalizeCompatBaseUrl(params.upstreamBaseUrl ?? params.baseUrl);
-  if (isOfficialOpenAIBaseUrl(compatBaseUrl)) return undefined;
+  if (isOfficialOpenAIBaseUrl(compatBaseUrl)) {
+    // Catalog models already declare this, but relays often expose renamed/custom
+    // OpenAI models. The official Responses endpoint supports strict function tools.
+    return { supportsStrictMode: true };
+  }
 
   return {
     supportsDeveloperRole: false,
+    // Unknown OpenAI-compatible relays do not reliably accept the per-tool
+    // `strict` flag. Keep constrained sampling opt-in to official upstreams.
+    supportsStrictMode: false,
   };
 }
 
@@ -232,6 +239,10 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   const compat: OpenAICompletionsCompat = {
     supportsStore: false,
     supportsDeveloperRole: false,
+    supportsStrictMode: false,
+    // OpenAI-compatible relays are not required to emit a terminal finish_reason.
+    // Pi 0.84+ can infer stop/toolUse natively when this is disabled.
+    supportsFinishReason: false,
   };
 
   if (isXai || isZai || isXiaomiMimo) {
@@ -293,6 +304,35 @@ function normalizeCodexBaseUrl(baseUrl: string): {
 
 function inferCodexApi(requestFormat?: CodexRequestFormat, preferredApi?: CodexApi): CodexApi {
   return requestFormat ?? preferredApi ?? "openai-responses";
+}
+
+function applyConfiguredOpenAIModelOptions<T extends Model<any>>(
+  model: T,
+  modelConfig?: ProviderModelConfig,
+): T {
+  const samplingParams = modelConfig?.samplingParams;
+  const hasSamplingParams = Boolean(samplingParams && Object.keys(samplingParams).length > 0);
+  const supportsFinishReason = modelConfig?.supportsFinishReason;
+  const thinkingTokenBudgetField = modelConfig?.thinkingTokenBudgetField;
+  const hasCompletionsCompatOverrides =
+    model.api === "openai-completions" &&
+    (supportsFinishReason !== undefined || thinkingTokenBudgetField !== undefined);
+
+  if (!hasSamplingParams && !hasCompletionsCompatOverrides) return model;
+
+  return {
+    ...model,
+    ...(hasSamplingParams ? { samplingParams } : {}),
+    ...(hasCompletionsCompatOverrides
+      ? {
+          compat: {
+            ...(model.compat ?? {}),
+            ...(supportsFinishReason !== undefined ? { supportsFinishReason } : {}),
+            ...(thinkingTokenBudgetField !== undefined ? { thinkingTokenBudgetField } : {}),
+          },
+        }
+      : {}),
+  } as T;
 }
 
 export function createModelFromConfig(
@@ -362,23 +402,26 @@ export function createModelFromConfig(
               ...(compatOverrides ?? {}),
             }
           : undefined;
-      return applyDeepSeekModelDefaults(
-        {
-          ...known,
-          contextWindow,
-          maxTokens,
-          ...(configuredCost ? { cost: configuredCost } : {}),
-          ...(compat ? { compat } : {}),
-          ...(completionsOverrides?.thinkingLevelMap
-            ? { thinkingLevelMap: completionsOverrides.thinkingLevelMap }
-            : {}),
-        },
-        {
-          providerId,
-          baseUrl: normalizedBaseUrl,
-          upstreamBaseUrl,
-          modelId,
-        },
+      return applyConfiguredOpenAIModelOptions(
+        applyDeepSeekModelDefaults(
+          {
+            ...known,
+            contextWindow,
+            maxTokens,
+            ...(configuredCost ? { cost: configuredCost } : {}),
+            ...(compat ? { compat } : {}),
+            ...(completionsOverrides?.thinkingLevelMap
+              ? { thinkingLevelMap: completionsOverrides.thinkingLevelMap }
+              : {}),
+          },
+          {
+            providerId,
+            baseUrl: normalizedBaseUrl,
+            upstreamBaseUrl,
+            modelId,
+          },
+        ),
+        modelConfig,
       );
     }
 
@@ -407,12 +450,15 @@ export function createModelFromConfig(
         }
       }
     }
-    return applyDeepSeekModelDefaults(custom, {
-      providerId,
-      baseUrl: normalizedBaseUrl,
-      upstreamBaseUrl,
-      modelId,
-    });
+    return applyConfiguredOpenAIModelOptions(
+      applyDeepSeekModelDefaults(custom, {
+        providerId,
+        baseUrl: normalizedBaseUrl,
+        upstreamBaseUrl,
+        modelId,
+      }),
+      modelConfig,
+    );
   }
 
   if (providerId === "gemini") {

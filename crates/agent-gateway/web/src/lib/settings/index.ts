@@ -184,12 +184,27 @@ export type ProviderModelCost = {
   cacheWrite: number;
 };
 
+export const PROVIDER_THINKING_TOKEN_BUDGET_FIELDS = [
+  "thinking_token_budget",
+  "thinking_budget",
+  "thinking_budget_tokens",
+] as const;
+
+export type ProviderThinkingTokenBudgetField =
+  (typeof PROVIDER_THINKING_TOKEN_BUDGET_FIELDS)[number];
+
 export type ProviderModelConfig = {
   id: string;
   contextWindow: number;
   maxOutputToken: number;
   /** 用户自填单价：目录外模型（中转/改名）没有官方定价时用于成本展示。 */
   cost?: ProviderModelCost;
+  /** 按模型透传给 Pi provider 的高级采样参数。 */
+  samplingParams?: Record<string, unknown>;
+  /** OpenAI Chat Completions 兼容端点是否稳定返回 finish_reason。 */
+  supportsFinishReason?: boolean;
+  /** OpenAI Chat Completions 兼容端点使用的思考预算字段名。 */
+  thinkingTokenBudgetField?: ProviderThinkingTokenBudgetField;
 };
 
 export type ChatRuntimeControls = {
@@ -1274,6 +1289,31 @@ function normalizeProviderModelCost(input: unknown): ProviderModelCost | undefin
   return cost;
 }
 
+function normalizeProviderModelSamplingParams(
+  input: unknown,
+): Record<string, unknown> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+
+  try {
+    const serialized = JSON.stringify(input);
+    if (!serialized) return undefined;
+    const normalized = JSON.parse(serialized) as unknown;
+    if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
+      return undefined;
+    }
+    const samplingParams = normalized as Record<string, unknown>;
+    return Object.keys(samplingParams).length > 0 ? samplingParams : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeThinkingTokenBudgetField(
+  input: unknown,
+): ProviderThinkingTokenBudgetField | undefined {
+  return PROVIDER_THINKING_TOKEN_BUDGET_FIELDS.find((field) => field === input);
+}
+
 export function normalizeProviderModelConfig(
   input: unknown,
   providerId: ProviderId,
@@ -1294,6 +1334,12 @@ export function normalizeProviderModelConfig(
 
   const defaults = getProviderModelDefaults(providerId, id);
   const cost = normalizeProviderModelCost(obj.cost);
+  const samplingParams = normalizeProviderModelSamplingParams(obj.samplingParams);
+  const supportsFinishReason =
+    typeof obj.supportsFinishReason === "boolean" ? obj.supportsFinishReason : undefined;
+  const thinkingTokenBudgetField = normalizeThinkingTokenBudgetField(
+    obj.thinkingTokenBudgetField,
+  );
   return {
     id,
     contextWindow: normalizePositiveInteger(obj.contextWindow, defaults.contextWindow),
@@ -1302,6 +1348,9 @@ export function normalizeProviderModelConfig(
       defaults.maxOutputToken,
     ),
     ...(cost !== undefined ? { cost } : {}),
+    ...(samplingParams !== undefined ? { samplingParams } : {}),
+    ...(supportsFinishReason !== undefined ? { supportsFinishReason } : {}),
+    ...(thinkingTokenBudgetField !== undefined ? { thinkingTokenBudgetField } : {}),
   };
 }
 

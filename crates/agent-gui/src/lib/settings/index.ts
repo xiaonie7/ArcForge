@@ -193,12 +193,23 @@ export type ProviderModelCost = {
   cacheWrite: number;
 };
 
+export type ProviderThinkingTokenBudgetField =
+  | "thinking_token_budget"
+  | "thinking_budget"
+  | "thinking_budget_tokens";
+
 export type ProviderModelConfig = {
   id: string;
   contextWindow: number;
   maxOutputToken: number;
   /** 用户自填单价：目录外模型（中转/改名）没有官方定价时用于成本展示。 */
   cost?: ProviderModelCost;
+  /** OpenAI 兼容端点的额外采样字段；请求级配置会按键覆盖这里的值。 */
+  samplingParams?: Record<string, unknown>;
+  /** Chat Completions 流是否保证返回 finish_reason；未配置时使用自动判断。 */
+  supportsFinishReason?: boolean;
+  /** 推理 token 预算使用的供应商字段名。 */
+  thinkingTokenBudgetField?: ProviderThinkingTokenBudgetField;
 };
 
 export type ChatRuntimeControls = {
@@ -1196,6 +1207,33 @@ function normalizeProviderModelCost(input: unknown): ProviderModelCost | undefin
   return cost;
 }
 
+function normalizeSamplingParams(input: unknown): Record<string, unknown> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
+
+  try {
+    const serialized = JSON.stringify(input);
+    if (!serialized) return undefined;
+    const normalized = JSON.parse(serialized) as unknown;
+    if (!normalized || typeof normalized !== "object" || Array.isArray(normalized)) {
+      return undefined;
+    }
+    const params = normalized as Record<string, unknown>;
+    return Object.keys(params).length > 0 ? params : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeThinkingTokenBudgetField(
+  input: unknown,
+): ProviderThinkingTokenBudgetField | undefined {
+  return input === "thinking_token_budget" ||
+    input === "thinking_budget" ||
+    input === "thinking_budget_tokens"
+    ? input
+    : undefined;
+}
+
 export function normalizeProviderModelConfig(
   input: unknown,
   providerId: ProviderId,
@@ -1217,6 +1255,12 @@ export function normalizeProviderModelConfig(
   const knownLimits = getKnownModelLimits(providerId, id);
   const defaults = getProviderModelDefaults(providerId, id);
   const cost = normalizeProviderModelCost(obj.cost);
+  const samplingParams = normalizeSamplingParams(obj.samplingParams);
+  const supportsFinishReason =
+    typeof obj.supportsFinishReason === "boolean" ? obj.supportsFinishReason : undefined;
+  const thinkingTokenBudgetField = normalizeThinkingTokenBudgetField(
+    obj.thinkingTokenBudgetField,
+  );
   let contextWindow = normalizePositiveInteger(obj.contextWindow, defaults.contextWindow);
   let maxOutputToken = normalizePositiveInteger(
     obj.maxOutputToken ?? obj.maxTokens,
@@ -1241,6 +1285,9 @@ export function normalizeProviderModelConfig(
     contextWindow,
     maxOutputToken,
     ...(cost !== undefined ? { cost } : {}),
+    ...(samplingParams !== undefined ? { samplingParams } : {}),
+    ...(supportsFinishReason !== undefined ? { supportsFinishReason } : {}),
+    ...(thinkingTokenBudgetField !== undefined ? { thinkingTokenBudgetField } : {}),
   };
 }
 

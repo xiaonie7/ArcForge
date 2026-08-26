@@ -1,10 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { stream as streamOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
+import { stream as streamOpenAIResponses } from "@earendil-works/pi-ai/api/openai-responses";
 import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 
 const loader = createTsModuleLoader();
 const providers = loader.loadModule("src/lib/providers/llm.ts");
+const wireProviders = createTsModuleLoader({
+  mocks: {
+    "@earendil-works/pi-ai/api/openai-completions": {
+      stream: streamOpenAICompletions,
+    },
+    "@earendil-works/pi-ai/api/openai-responses": {
+      stream: streamOpenAIResponses,
+    },
+  },
+}).loadModule("src/lib/providers/llm.ts");
 const proxy = loader.loadModule("src/lib/providers/proxy.ts");
 const customHeaderHelpers = loader.loadModule("src/lib/providers/customHeaders.ts");
 const providerUtils = loader.loadModule("src/pages/settings/providerUtils.ts");
@@ -51,6 +62,25 @@ async function captureOpenAICompletionsPayload(model, context, options) {
     }
   }
   assert.ok(captured, "expected the OpenAI payload hook to run");
+  return captured;
+}
+
+async function captureArcForgeOpenAIPayload(model, context, options = {}) {
+  let captured;
+  const source = wireProviders.streamSimpleByApi(model, context, {
+    ...options,
+    apiKey: "unused-test-key",
+    streamRetry: { disabled: true },
+    onPayload: (payload) => {
+      captured = payload;
+      throw new Error("ARC_FORGE_PAYLOAD_CAPTURE_COMPLETE");
+    },
+  });
+
+  for await (const _event of source) {
+    // The payload hook stops the request before fetch; pi reports it through the stream.
+  }
+  assert.ok(captured, "expected the ArcForge OpenAI payload hook to run");
   return captured;
 }
 
@@ -357,7 +387,10 @@ test("third-party Codex Responses models use the system role compatibility mode"
 
   assert.equal(custom.compat.supportsDeveloperRole, false);
   assert.equal(known.compat.supportsDeveloperRole, false);
+  assert.equal(custom.compat.supportsStrictMode, false);
+  assert.equal(known.compat.supportsStrictMode, false);
   assert.notEqual(proxiedOfficial.compat?.supportsDeveloperRole, false);
+  assert.notEqual(proxiedOfficial.compat?.supportsStrictMode, false);
 });
 
 test("custom Codex models append v1 to bare and prefixed base URLs", () => {
@@ -435,6 +468,106 @@ test("custom Codex Chat Completions models keep text-only input metadata", () =>
   assert.deepEqual(model.input, ["text"]);
 });
 
+test("custom Codex Chat Completions models carry advanced sampling and wire compatibility settings", () => {
+  const samplingParams = {
+    top_p: 0.93,
+    top_k: 48,
+    min_p: 0.04,
+    repetition_penalty: 1.08,
+  };
+  const model = providers.createModelFromConfig(
+    "codex",
+    "custom-reasoning-model",
+    "https://relay.example.test/v1",
+    "openai-completions",
+    {
+      id: "custom-reasoning-model",
+      contextWindow: 128_000,
+      maxOutputToken: 16_384,
+      samplingParams,
+      supportsFinishReason: true,
+      thinkingTokenBudgetField: "thinking_budget_tokens",
+    },
+  );
+
+  assert.deepEqual(model.samplingParams, samplingParams);
+  assert.equal(model.compat.supportsFinishReason, true);
+  assert.equal(model.compat.thinkingTokenBudgetField, "thinking_budget_tokens");
+});
+
+test("advanced sampling and thinking budget settings reach the final OpenAI-compatible payload", async () => {
+  const model = providers.createModelFromConfig(
+    "codex",
+    "custom-reasoning-model",
+    "https://relay.example.test/v1",
+    "openai-completions",
+    {
+      id: "custom-reasoning-model",
+      contextWindow: 128_000,
+      maxOutputToken: 16_384,
+      samplingParams: { top_p: 0.9, top_k: 40, min_p: 0.05 },
+      thinkingTokenBudgetField: "thinking_budget_tokens",
+    },
+  );
+  const payload = await captureArcForgeOpenAIPayload(
+    model,
+    { messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+    {
+      reasoning: "low",
+      thinkingBudgets: { low: 2_048 },
+      samplingParams: { top_p: 0.93 },
+    },
+  );
+
+  assert.equal(payload.top_p, 0.93, "request sampling overrides the model default");
+  assert.equal(payload.top_k, 40);
+  assert.equal(payload.min_p, 0.05);
+  assert.equal(payload.thinking_budget_tokens, 2_048);
+});
+
+test("Responses advanced sampling, named tool choice, and strict sampling reach the final payload", async () => {
+  const model = providers.createModelFromConfig(
+    "codex",
+    "custom-responses-model",
+    "https://api.openai.com/v1",
+    "openai-responses",
+    {
+      id: "custom-responses-model",
+      contextWindow: 128_000,
+      maxOutputToken: 16_384,
+      samplingParams: { top_p: 0.88, top_k: 24 },
+    },
+  );
+  const payload = await captureArcForgeOpenAIPayload(
+    model,
+    {
+      tools: [
+        {
+          name: "echo",
+          description: "Echo text",
+          parameters: {
+            type: "object",
+            properties: { text: { type: "string" } },
+            required: ["text"],
+            additionalProperties: false,
+          },
+          constrainedSampling: { type: "json_schema", strict: "prefer" },
+        },
+      ],
+      messages: [{ role: "user", content: "hi", timestamp: 1 }],
+    },
+    {
+      toolChoice: { type: "tool", name: "echo" },
+      samplingParams: { top_p: 0.91 },
+    },
+  );
+
+  assert.equal(payload.top_p, 0.91);
+  assert.equal(payload.top_k, 24);
+  assert.deepEqual(payload.tool_choice, { type: "function", name: "echo" });
+  assert.equal(payload.tools[0].strict, true);
+});
+
 test("custom Codex Chat Completions GPT vision models infer image input metadata", () => {
   const model = providers.createModelFromConfig(
     "codex",
@@ -471,6 +604,8 @@ test("custom Codex Chat Completions models infer reasoning-capable IDs", () => {
   assert.equal(model.reasoning, true);
   assert.equal(model.compat.supportsDeveloperRole, false);
   assert.equal(model.compat.supportsStore, false);
+  assert.equal(model.compat.supportsStrictMode, false);
+  assert.equal(model.compat.supportsFinishReason, false);
 });
 
 test("custom Codex Chat Completions models behind proxy use upstream compat detection", () => {
@@ -486,6 +621,7 @@ test("custom Codex Chat Completions models behind proxy use upstream compat dete
   assert.equal(model.api, "openai-completions");
   assert.equal(model.compat.supportsDeveloperRole, false);
   assert.equal(model.compat.supportsStore, false);
+  assert.equal(model.compat.supportsStrictMode, false);
 });
 
 test("official OpenAI Chat Completions models behind proxy keep native compat", () => {

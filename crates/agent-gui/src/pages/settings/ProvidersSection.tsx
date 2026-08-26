@@ -46,6 +46,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
+import { Textarea } from "../../components/ui/textarea";
 import { useLocale } from "../../i18n";
 import { buildModelOptions } from "../../lib/chat/page/chatPageHelpers";
 import {
@@ -92,6 +93,13 @@ type ModalProps = {
 
 type ProviderDialogPanel = "general" | "request";
 
+type BooleanOverrideDraft = "auto" | "true" | "false";
+type ThinkingTokenBudgetFieldDraft =
+  | "none"
+  | "thinking_token_budget"
+  | "thinking_budget"
+  | "thinking_budget_tokens";
+
 type ModelEditDraft = {
   model: ProviderModelConfig;
   contextWindow: string;
@@ -100,6 +108,9 @@ type ModelEditDraft = {
   costOutput: string;
   costCacheRead: string;
   costCacheWrite: string;
+  samplingParamsJson: string;
+  supportsFinishReason: BooleanOverrideDraft;
+  thinkingTokenBudgetField: ThinkingTokenBudgetFieldDraft;
 };
 type CcsProviderImportItem = {
   sourceId: string;
@@ -182,6 +193,37 @@ function formatCostRate(value: number | undefined): string {
   return typeof value === "number" && value > 0 ? String(value) : "";
 }
 
+type ParsedSamplingParams =
+  | { valid: true; value: Record<string, unknown> | undefined }
+  | { valid: false; value: undefined };
+
+function parseSamplingParamsJson(input: string): ParsedSamplingParams {
+  const trimmed = input.trim();
+  if (!trimmed) return { valid: true, value: undefined };
+  try {
+    const value: unknown = JSON.parse(trimmed);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      return { valid: false, value: undefined };
+    }
+    const record = value as Record<string, unknown>;
+    return {
+      valid: true,
+      value: Object.keys(record).length > 0 ? record : undefined,
+    };
+  } catch {
+    return { valid: false, value: undefined };
+  }
+}
+
+function formatSamplingParams(value: Record<string, unknown> | undefined): string {
+  if (!value || Object.keys(value).length === 0) return "";
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return "";
+  }
+}
+
 type CustomHeaderKeyIssue = "reserved" | "invalid";
 
 function getCustomHeaderKeyIssue(key: string, includeEmpty = false): CustomHeaderKeyIssue | null {
@@ -255,6 +297,10 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
       ? "openai-completions"
       : (initialData?.requestFormat ?? "openai-responses"),
   );
+  const supportsAdvancedModelOptions = providerType === "codex" || providerType === "zhipu";
+  const usesOpenAICompletions =
+    providerType === "zhipu" ||
+    (providerType === "codex" && requestFormat === "openai-completions");
   const [useSystemProxy, setUseSystemProxy] = useState(initialData?.useSystemProxy ?? false);
   const supportsPromptCaching = providerType === "claude_code" || providerType === "codex";
   const [promptCachingEnabled, setPromptCachingEnabled] = useState(
@@ -376,6 +422,14 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
             costOutput: formatCostRate(target.cost?.output),
             costCacheRead: formatCostRate(target.cost?.cacheRead),
             costCacheWrite: formatCostRate(target.cost?.cacheWrite),
+            samplingParamsJson: formatSamplingParams(target.samplingParams),
+            supportsFinishReason:
+              typeof target.supportsFinishReason === "boolean"
+                ? target.supportsFinishReason
+                  ? "true"
+                  : "false"
+                : "auto",
+            thinkingTokenBudgetField: target.thinkingTokenBudgetField ?? "none",
           },
     );
   }
@@ -400,17 +454,22 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
       editingModelCost.output !== null &&
       editingModelCost.cacheRead !== null &&
       editingModelCost.cacheWrite !== null);
+  const editingModelSamplingParams = parseSamplingParamsJson(
+    editingModel?.samplingParamsJson ?? "",
+  );
   const canSaveEditingModel =
     editingModelContextWindow !== null &&
     editingModelMaxOutputToken !== null &&
-    editingModelCostValid;
+    editingModelCostValid &&
+    editingModelSamplingParams.valid;
 
   function saveInlineModelSettings() {
     if (
       !editingModel ||
       editingModelContextWindow === null ||
       editingModelMaxOutputToken === null ||
-      !editingModelCostValid
+      !editingModelCostValid ||
+      !editingModelSamplingParams.valid
     ) {
       return;
     }
@@ -430,6 +489,15 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
       contextWindow: editingModelContextWindow,
       maxOutputToken: editingModelMaxOutputToken,
       cost: hasCost ? cost : undefined,
+      samplingParams: editingModelSamplingParams.value,
+      supportsFinishReason:
+        editingModel.supportsFinishReason === "auto"
+          ? undefined
+          : editingModel.supportsFinishReason === "true",
+      thinkingTokenBudgetField:
+        editingModel.thinkingTokenBudgetField === "none"
+          ? undefined
+          : editingModel.thinkingTokenBudgetField,
     };
     setModels((prev) => prev.map((item) => (item.id === nextModel.id ? nextModel : item)));
     setEditingModel(null);
@@ -982,9 +1050,133 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                                   ))}
                                 </div>
 
-                                {!canSaveEditingModel ? (
+                                {supportsAdvancedModelOptions ? (
+                                  <div className="mt-4 border-t pt-4">
+                                    <div className="text-xs font-medium text-muted-foreground">
+                                      {t("settings.modelAdvancedParameters")}
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-muted-foreground/80">
+                                      {t("settings.modelAdvancedParametersHint")}
+                                    </div>
+
+                                    <div className="mt-3 space-y-1.5">
+                                      <Label>{t("settings.samplingParams")}</Label>
+                                      <div className="text-[11px] text-muted-foreground/80">
+                                        {t("settings.samplingParamsHint")}
+                                      </div>
+                                      <Textarea
+                                        value={editingModel.samplingParamsJson}
+                                        spellCheck={false}
+                                        aria-invalid={
+                                          editingModelSamplingParams.valid ? undefined : true
+                                        }
+                                        className={cn(
+                                          "min-h-[112px] resize-y font-mono text-xs",
+                                          !editingModelSamplingParams.valid &&
+                                            "ring-1 ring-inset ring-destructive focus-visible:ring-destructive",
+                                        )}
+                                        placeholder={'{\n  "top_p": 0.95,\n  "top_k": 40,\n  "min_p": 0.05\n}'}
+                                        onChange={(event) => {
+                                          const value = event.currentTarget.value;
+                                          setEditingModel((prev) =>
+                                            prev ? { ...prev, samplingParamsJson: value } : prev,
+                                          );
+                                        }}
+                                      />
+                                    </div>
+
+                                    {usesOpenAICompletions ? (
+                                      <div className="mt-3 grid grid-cols-2 gap-3 max-[720px]:grid-cols-1">
+                                        <div className="space-y-1.5">
+                                          <Label>{t("settings.supportsFinishReason")}</Label>
+                                          <div className="min-h-8 text-[11px] text-muted-foreground/80 max-[720px]:min-h-0">
+                                            {t("settings.supportsFinishReasonHint")}
+                                          </div>
+                                          <Select
+                                            value={editingModel.supportsFinishReason}
+                                            onValueChange={(value) =>
+                                              setEditingModel((prev) =>
+                                                prev
+                                                  ? {
+                                                      ...prev,
+                                                      supportsFinishReason:
+                                                        value as BooleanOverrideDraft,
+                                                    }
+                                                  : prev,
+                                              )
+                                            }
+                                          >
+                                            <SelectTrigger className="w-full">
+                                              <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="auto">
+                                                {t("settings.advancedParameterAuto")}
+                                              </SelectItem>
+                                              <SelectItem value="true">
+                                                {t("settings.finishReasonAlwaysPresent")}
+                                              </SelectItem>
+                                              <SelectItem value="false">
+                                                {t("settings.finishReasonMayBeMissing")}
+                                              </SelectItem>
+                                            </SelectContent>
+                                          </Select>
+                                        </div>
+
+                                        <div className="space-y-1.5">
+                                          <Label>{t("settings.thinkingTokenBudgetField")}</Label>
+                                          <div className="min-h-8 text-[11px] text-muted-foreground/80 max-[720px]:min-h-0">
+                                            {t("settings.thinkingTokenBudgetFieldHint")}
+                                          </div>
+                                          <Select
+                                            value={editingModel.thinkingTokenBudgetField}
+                                            onValueChange={(value) =>
+                                              setEditingModel((prev) =>
+                                                prev
+                                                  ? {
+                                                      ...prev,
+                                                      thinkingTokenBudgetField:
+                                                        value as ThinkingTokenBudgetFieldDraft,
+                                                    }
+                                                  : prev,
+                                              )
+                                            }
+                                          >
+                                            <SelectTrigger className="w-full">
+                                              <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="none">
+                                                {t("settings.thinkingBudgetFieldNone")}
+                                              </SelectItem>
+                                              <SelectItem value="thinking_token_budget">
+                                                thinking_token_budget (vLLM)
+                                              </SelectItem>
+                                              <SelectItem value="thinking_budget">
+                                                thinking_budget (Qwen / SGLang)
+                                              </SelectItem>
+                                              <SelectItem value="thinking_budget_tokens">
+                                                thinking_budget_tokens (llama.cpp)
+                                              </SelectItem>
+                                            </SelectContent>
+                                          </Select>
+                                        </div>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+
+                                {editingModelContextWindow === null ||
+                                editingModelMaxOutputToken === null ||
+                                !editingModelCostValid ? (
                                   <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
                                     {t("settings.positiveIntegerRequired")}
+                                  </div>
+                                ) : null}
+
+                                {!editingModelSamplingParams.valid ? (
+                                  <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                                    {t("settings.samplingParamsJsonInvalid")}
                                   </div>
                                 ) : null}
 

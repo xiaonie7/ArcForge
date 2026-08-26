@@ -30,6 +30,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
+import { Textarea } from "../../components/ui/textarea";
 import { useLocale } from "../../i18n";
 import { buildModelOptions } from "../../lib/chat/chatPageHelpers";
 import {
@@ -44,6 +45,7 @@ import {
   type CustomProvider,
   type ProviderId,
   type ProviderModelConfig,
+  type ProviderThinkingTokenBudgetField,
   updateCustomProviders,
   updateCustomSettings,
 } from "../../lib/settings";
@@ -80,6 +82,9 @@ type ModelEditDraft = {
   costOutput: string;
   costCacheRead: string;
   costCacheWrite: string;
+  samplingParamsJson: string;
+  supportsFinishReason: "auto" | "true" | "false";
+  thinkingTokenBudgetField: "auto" | ProviderThinkingTokenBudgetField;
 };
 const PROVIDER_TABS: ProviderId[] = ["claude_code", "codex", "zhipu", "gemini"];
 const PROVIDER_LABELS: Record<ProviderId, string> = {
@@ -122,6 +127,32 @@ function parseCostRate(input: string): number | null {
 
 function formatCostRate(value: number | undefined): string {
   return typeof value === "number" && value > 0 ? String(value) : "";
+}
+
+type ParsedSamplingParams =
+  | { valid: true; value: Record<string, unknown> | undefined }
+  | { valid: false; value: undefined };
+
+function parseSamplingParamsJson(input: string): ParsedSamplingParams {
+  const trimmed = input.trim();
+  if (!trimmed) return { valid: true, value: undefined };
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { valid: false, value: undefined };
+    }
+    const value = parsed as Record<string, unknown>;
+    return {
+      valid: true,
+      value: Object.keys(value).length > 0 ? value : undefined,
+    };
+  } catch {
+    return { valid: false, value: undefined };
+  }
+}
+
+function formatSamplingParamsJson(value: Record<string, unknown> | undefined): string {
+  return value && Object.keys(value).length > 0 ? JSON.stringify(value, null, 2) : "";
 }
 
 type CustomHeaderKeyIssue = "reserved" | "invalid";
@@ -197,6 +228,10 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
       ? "openai-completions"
       : (initialData?.requestFormat ?? "openai-responses"),
   );
+  const supportsAdvancedSampling = providerType === "codex" || providerType === "zhipu";
+  const supportsCompletionsCompatibility =
+    providerType === "zhipu" ||
+    (providerType === "codex" && requestFormat === "openai-completions");
   const [useSystemProxy, setUseSystemProxy] = useState(initialData?.useSystemProxy ?? false);
   const supportsPromptCaching = providerType === "claude_code" || providerType === "codex";
   const [promptCachingEnabled, setPromptCachingEnabled] = useState(
@@ -319,6 +354,14 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
             costOutput: formatCostRate(target.cost?.output),
             costCacheRead: formatCostRate(target.cost?.cacheRead),
             costCacheWrite: formatCostRate(target.cost?.cacheWrite),
+            samplingParamsJson: formatSamplingParamsJson(target.samplingParams),
+            supportsFinishReason:
+              target.supportsFinishReason === undefined
+                ? "auto"
+                : target.supportsFinishReason
+                  ? "true"
+                  : "false",
+            thinkingTokenBudgetField: target.thinkingTokenBudgetField ?? "auto",
           },
     );
   }
@@ -343,17 +386,22 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
       editingModelCost.output !== null &&
       editingModelCost.cacheRead !== null &&
       editingModelCost.cacheWrite !== null);
+  const editingModelSamplingParams = parseSamplingParamsJson(
+    editingModel?.samplingParamsJson ?? "",
+  );
   const canSaveEditingModel =
     editingModelContextWindow !== null &&
     editingModelMaxOutputToken !== null &&
-    editingModelCostValid;
+    editingModelCostValid &&
+    editingModelSamplingParams.valid;
 
   function saveInlineModelSettings() {
     if (
       !editingModel ||
       editingModelContextWindow === null ||
       editingModelMaxOutputToken === null ||
-      !editingModelCostValid
+      !editingModelCostValid ||
+      !editingModelSamplingParams.valid
     ) {
       return;
     }
@@ -373,6 +421,15 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
       contextWindow: editingModelContextWindow,
       maxOutputToken: editingModelMaxOutputToken,
       cost: hasCost ? cost : undefined,
+      samplingParams: editingModelSamplingParams.value,
+      supportsFinishReason:
+        editingModel.supportsFinishReason === "auto"
+          ? undefined
+          : editingModel.supportsFinishReason === "true",
+      thinkingTokenBudgetField:
+        editingModel.thinkingTokenBudgetField === "auto"
+          ? undefined
+          : editingModel.thinkingTokenBudgetField,
     };
     setModels((prev) => prev.map((item) => (item.id === nextModel.id ? nextModel : item)));
     setEditingModel(null);
@@ -932,9 +989,127 @@ function ProviderModal({ providerType, initialData, onSave, onClose }: ModalProp
                                   ))}
                                 </div>
 
+                                {supportsAdvancedSampling ? (
+                                  <div className="mt-4 border-t pt-3">
+                                    <div className="text-xs font-medium text-muted-foreground">
+                                      {t("settings.advancedModelParameters")}
+                                    </div>
+                                    <div className="mt-2 space-y-1.5">
+                                      <Label>{t("settings.samplingParams")}</Label>
+                                      <Textarea
+                                        rows={5}
+                                        spellCheck={false}
+                                        aria-invalid={
+                                          editingModelSamplingParams.valid ? undefined : true
+                                        }
+                                        className={cn(
+                                          "font-mono",
+                                          !editingModelSamplingParams.valid &&
+                                            "ring-1 ring-inset ring-destructive focus-visible:ring-destructive",
+                                        )}
+                                        placeholder={'{\n  "top_p": 0.95,\n  "top_k": 40,\n  "min_p": 0.05\n}'}
+                                        value={editingModel.samplingParamsJson}
+                                        onChange={(event) => {
+                                          const value = event.currentTarget.value;
+                                          setEditingModel((prev) =>
+                                            prev ? { ...prev, samplingParamsJson: value } : prev,
+                                          );
+                                        }}
+                                      />
+                                      <div className="text-[11px] text-muted-foreground/80">
+                                        {t("settings.samplingParamsHint")}
+                                      </div>
+                                    </div>
+
+                                    {supportsCompletionsCompatibility ? (
+                                      <div className="mt-3 grid grid-cols-2 gap-3 max-[720px]:grid-cols-1">
+                                        <div className="space-y-1.5">
+                                          <Label>{t("settings.supportsFinishReason")}</Label>
+                                          <Select
+                                            value={editingModel.supportsFinishReason}
+                                            onValueChange={(value) => {
+                                              setEditingModel((prev) =>
+                                                prev
+                                                  ? {
+                                                      ...prev,
+                                                      supportsFinishReason: value as
+                                                        | "auto"
+                                                        | "true"
+                                                        | "false",
+                                                    }
+                                                  : prev,
+                                              );
+                                            }}
+                                          >
+                                            <SelectTrigger className="w-full">
+                                              <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="auto">
+                                                {t("settings.supportsFinishReasonAuto")}
+                                              </SelectItem>
+                                              <SelectItem value="true">
+                                                {t("settings.supportsFinishReasonTrue")}
+                                              </SelectItem>
+                                              <SelectItem value="false">
+                                                {t("settings.supportsFinishReasonFalse")}
+                                              </SelectItem>
+                                            </SelectContent>
+                                          </Select>
+                                          <div className="text-[11px] text-muted-foreground/80">
+                                            {t("settings.supportsFinishReasonHint")}
+                                          </div>
+                                        </div>
+
+                                        <div className="space-y-1.5">
+                                          <Label>{t("settings.thinkingTokenBudgetField")}</Label>
+                                          <Select
+                                            value={editingModel.thinkingTokenBudgetField}
+                                            onValueChange={(value) => {
+                                              setEditingModel((prev) =>
+                                                prev
+                                                  ? {
+                                                      ...prev,
+                                                      thinkingTokenBudgetField: value as
+                                                        | "auto"
+                                                        | ProviderThinkingTokenBudgetField,
+                                                    }
+                                                  : prev,
+                                              );
+                                            }}
+                                          >
+                                            <SelectTrigger className="w-full">
+                                              <SelectValue />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                              <SelectItem value="auto">
+                                                {t("settings.thinkingTokenBudgetFieldAuto")}
+                                              </SelectItem>
+                                              <SelectItem value="thinking_token_budget">
+                                                {t("settings.thinkingTokenBudgetFieldVllm")}
+                                              </SelectItem>
+                                              <SelectItem value="thinking_budget">
+                                                {t("settings.thinkingTokenBudgetFieldQwen")}
+                                              </SelectItem>
+                                              <SelectItem value="thinking_budget_tokens">
+                                                {t("settings.thinkingTokenBudgetFieldLlamaCpp")}
+                                              </SelectItem>
+                                            </SelectContent>
+                                          </Select>
+                                          <div className="text-[11px] text-muted-foreground/80">
+                                            {t("settings.thinkingTokenBudgetFieldHint")}
+                                          </div>
+                                        </div>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ) : null}
+
                                 {!canSaveEditingModel ? (
                                   <div className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                                    {t("settings.positiveIntegerRequired")}
+                                    {editingModelSamplingParams.valid
+                                      ? t("settings.positiveIntegerRequired")
+                                      : t("settings.samplingParamsJsonInvalid")}
                                   </div>
                                 ) : null}
 
