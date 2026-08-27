@@ -1,5 +1,27 @@
 # 更新日志
 
+## v0.3.4
+
+本次发布为 **功能版本**，通过内置 Office Runtime 新增 Word DOCX 文档的可审查交付能力，并修复 Skill 运行器在陈旧恢复与执行拒绝上的边界问题。
+
+### 新功能
+
+- **OfficeCLI 文档工作流（OfficeCLI Document Workflow）**：基于内置 Office Runtime，新增 Word DOCX 文档从创建、修改、检查、校验到渲染的完整交付链路，覆盖办公文档产出场景。
+  - **arcforge-documents 内置 Skill**：新增面向 Word 交付的内置技能，引导通过结构化 `OfficeRuntime` 工具产出文档，明确禁止直接调用 officecli、任意 shell 命令或 OfficeCLI MCP 端点。
+  - **OfficeRuntime 文档能力扩展**：新增 `document_artifacts` 命令模块并扩展 `office_runtime`，支持 `create` / `patch` / `inspect` / `validate` / `render` 等 action；内容以原子批处理 JSON 规范驱动（`add` / `set` / `remove` / `move` / `swap` / `get` / `query`），并强制工作区路径、超时与覆盖策略，外部图片、媒体、OLE 与模板引用在首版被有意屏蔽。
+  - **OfficeCLI sidecar 与合规**：新增 `build-officecli-sidecar.ps1` 构建脚本，并随附 `third-party/officecli` 的 LICENSE、NOTICE 与第三方声明。
+  - **前端展示适配**：`GeneratedFilesCard`、`displayFiles`、`officeRuntimeTools`、`RoundContent` 等适配文档产物卡片与渲染策略，并补充 i18n 文案。
+
+### 修复
+
+- **Skill 运行器陈旧恢复**：不再审计历史工作区副本来恢复 Skill 指令，改用当前已启用 Skill 的指令；将瞬时运行器路径、缓存作用域结果与兜底命令排除在持久操作规则之外，同时保留显式历史工作记录。
+- **Skill shell 执行拒绝上报**：将被阻止的 Skill shell 执行与启用状态分开上报，不放松既有权限边界，Channel 脚本执行保持受限。
+
+### 其他
+
+- 补充提示词与工具回归覆盖：1318 项前端测试通过，TypeScript no-emit 检查通过。
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.4。
+
 ## v0.3.3
 
 本次发布为 **功能版本**，升级 Pi 至 0.84.3，并为 provider 设置页新增单个模型的"高级采样与兼容参数"配置，主要适配通过 new-api 中转访问各类模型的兼容性需求。
