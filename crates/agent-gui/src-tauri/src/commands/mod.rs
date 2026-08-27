@@ -39,6 +39,7 @@ pub use runtime_commands::sftp;
 pub use runtime_commands::shell;
 pub use runtime_commands::terminal;
 
+pub use workspace_commands::document_artifacts;
 pub use workspace_commands::fs;
 pub use workspace_commands::git;
 pub use workspace_commands::office_runtime;

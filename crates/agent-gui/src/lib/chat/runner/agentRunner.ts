@@ -368,6 +368,7 @@ export function buildToolsSuffix(
       [
         "## Delivering Files",
         "- After generating, exporting, downloading, or otherwise preparing a file that is a user deliverable, call PresentFile with its exact workspace-relative path before the final reply.",
+        "- OfficeRuntime and SpreadsheetCode automatically attach a generated-file card for successful output_path results. Do not call PresentFile again for that same output unless the automatic attachment is unavailable or the user explicitly asks for another presentation.",
         "- Use PresentFile for finished files such as Excel workbooks, PDFs, Word documents, archives, audio, video, and text exports. It is not needed for ordinary source-code edits unless the user asked to receive that file as a deliverable.",
         "- PresentFile only accepts files inside the workspace. Pass the exact path returned by the tool or command that created or listed the file.",
         "- Do not substitute a Markdown link, file:// URL, local path in prose, or shell output for PresentFile.",

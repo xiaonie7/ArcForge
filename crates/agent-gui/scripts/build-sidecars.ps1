@@ -4,6 +4,7 @@ param(
     [string]$Wheelhouse = "",
     [switch]$Force,
     [switch]$SkipOffice,
+    [switch]$SkipOfficeCli,
     [switch]$SkipGateway,
     [switch]$SkipWecomConnector
 )
@@ -31,6 +32,10 @@ if (-not $SkipOffice) {
         $arguments["Wheelhouse"] = $Wheelhouse
     }
     Invoke-SidecarBuilder -Script (Join-Path $PSScriptRoot "build-office-sidecar.ps1") -Arguments $arguments
+}
+
+if (-not $SkipOfficeCli) {
+    Invoke-SidecarBuilder -Script (Join-Path $PSScriptRoot "build-officecli-sidecar.ps1") -Arguments $commonArguments
 }
 
 if (-not $SkipGateway) {

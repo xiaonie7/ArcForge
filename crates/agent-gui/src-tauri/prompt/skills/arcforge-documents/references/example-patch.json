@@ -1,0 +1,20 @@
+[
+  {
+    "command": "add",
+    "parent": "/body",
+    "type": "paragraph",
+    "props": {
+      "text": "Final project report",
+      "style": "Title"
+    }
+  },
+  {
+    "command": "add",
+    "parent": "/body",
+    "type": "paragraph",
+    "props": {
+      "text": "Prepared for the review meeting.",
+      "style": "Normal"
+    }
+  }
+]

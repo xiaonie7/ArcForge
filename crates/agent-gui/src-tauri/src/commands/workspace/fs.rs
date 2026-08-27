@@ -829,6 +829,13 @@ fn is_spreadsheet_file(path: &Path) -> bool {
     )
 }
 
+fn is_presentation_file(path: &Path) -> bool {
+    matches!(
+        extension_lower(path).as_deref(),
+        Some("pptx") | Some("pptm") | Some("ppt") | Some("odp")
+    )
+}
+
 fn is_xlsx_extractable_file(path: &Path) -> bool {
     matches!(
         extension_lower(path).as_deref(),
@@ -870,7 +877,7 @@ fn editable_text_unsupported_reason(path: &Path) -> Option<&'static str> {
     if is_notebook_file(path) {
         return Some("Notebook files are not supported in the code editor");
     }
-    if is_word_file(path) || is_spreadsheet_file(path) {
+    if is_word_file(path) || is_spreadsheet_file(path) || is_presentation_file(path) {
         return Some("Office documents are not supported in the code editor");
     }
     if is_archive_file(path) {
@@ -892,6 +899,12 @@ fn office_mime_type(path: &Path) -> Option<&'static str> {
         Some("xlsm") | Some("xltm") => Some("application/vnd.ms-excel.sheet.macroEnabled.12"),
         Some("xls") => Some("application/vnd.ms-excel"),
         Some("ods") => Some("application/vnd.oasis.opendocument.spreadsheet"),
+        Some("pptx") => {
+            Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        }
+        Some("pptm") => Some("application/vnd.ms-powerpoint.presentation.macroEnabled.12"),
+        Some("ppt") => Some("application/vnd.ms-powerpoint"),
+        Some("odp") => Some("application/vnd.oasis.opendocument.presentation"),
         Some("zip") => Some("application/zip"),
         Some("rar") => Some("application/vnd.rar"),
         Some("7z") => Some("application/x-7z-compressed"),
@@ -929,6 +942,12 @@ fn infer_workspace_preview_mime(path: &Path, bytes: &[u8]) -> Option<&'static st
         Some("xlsm") | Some("xltm") => Some("application/vnd.ms-excel.sheet.macroEnabled.12"),
         Some("xls") => Some("application/vnd.ms-excel"),
         Some("ods") => Some("application/vnd.oasis.opendocument.spreadsheet"),
+        Some("pptx") => {
+            Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        }
+        Some("pptm") => Some("application/vnd.ms-powerpoint.presentation.macroEnabled.12"),
+        Some("ppt") => Some("application/vnd.ms-powerpoint"),
+        Some("odp") => Some("application/vnd.oasis.opendocument.presentation"),
         Some("mp3") => Some("audio/mpeg"),
         Some("wav") => Some("audio/wav"),
         Some("ogg") | Some("oga") => Some("audio/ogg"),
@@ -5437,6 +5456,31 @@ mod tests {
             !serialized.to_string().contains(&display_path(&workdir)),
             "successful response must not expose the absolute workdir"
         );
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[test]
+    fn describe_workspace_artifacts_identifies_unpreviewed_presentations() {
+        let workdir = unique_test_workdir("describe-presentation-artifact");
+        fs::create_dir_all(workdir.join("reports")).expect("create reports directory");
+        fs::write(workdir.join("reports/deck.pptx"), b"pptx-placeholder")
+            .expect("write presentation");
+
+        let descriptor = fs_describe_workspace_artifacts_sync(
+            workdir.display().to_string(),
+            vec!["reports/deck.pptx".to_string()],
+        )
+        .expect("describe presentation")
+        .files
+        .remove(0);
+
+        assert_eq!(
+            descriptor.mime_type.as_deref(),
+            Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        );
+        assert_eq!(descriptor.preview_kind, None);
+        assert!(!descriptor.preview_supported);
 
         let _ = fs::remove_dir_all(workdir);
     }

@@ -24,6 +24,17 @@ const presentationScript = readFileSync(
   ),
   "utf8",
 );
+const documentsSkill = readFileSync(
+  new URL("../../src-tauri/prompt/skills/arcforge-documents/SKILL.md", import.meta.url),
+  "utf8",
+);
+const documentsSpec = readFileSync(
+  new URL(
+    "../../src-tauri/prompt/skills/arcforge-documents/references/spec.md",
+    import.meta.url,
+  ),
+  "utf8",
+);
 const builtinRegistrySource = readFileSync(
   new URL("../../src-tauri/src/services/skills/builtin.rs", import.meta.url),
   "utf8",
@@ -70,9 +81,33 @@ test("built-in slides skill is registered with structural and visual verificatio
   );
 });
 
+test("built-in document skill uses the controlled Word OfficeRuntime workflow", () => {
+  assert.match(documentsSkill, /^---\r?\nname: arcforge-documents\r?\n/m);
+  assert.match(documentsSkill, /document=word/);
+  assert.match(documentsSkill, /action=create/);
+  assert.match(documentsSkill, /action=patch/);
+  assert.match(documentsSkill, /action=inspect/);
+  assert.match(documentsSkill, /action=validate/);
+  assert.match(documentsSkill, /action=render/);
+  assert.match(documentsSkill, /\.html/);
+  assert.match(documentsSkill, /\.png/);
+  assert.match(documentsSkill, /arbitrary shell command/);
+  assert.doesNotMatch(documentsSkill, /officecli\s+(create|batch|set|raw)/i);
+  assert.match(documentsSpec, /"command": "add"/);
+  assert.match(documentsSpec, /top-level value must be an array/);
+  assert.match(documentsSpec, /Do not embed arbitrary XML/);
+  assert.match(builtinRegistrySource, /name: "arcforge-documents"/);
+  assert.match(
+    builtinRegistrySource,
+    /prompt\/skills\/arcforge-documents\/references\/spec\.md/,
+  );
+  assert.match(builtinRegistrySource, /DOCUMENTS_OWNERSHIP_MARKER_CONTENT/);
+});
+
 test("ArcForge Office skills use ownership markers to preserve user collisions", () => {
   assert.match(builtinRegistrySource, /_arcforge_builtin\.json/);
   assert.match(builtinRegistrySource, /SPREADSHEETS_OWNERSHIP_MARKER_CONTENT/);
   assert.match(builtinRegistrySource, /SLIDES_OWNERSHIP_MARKER_CONTENT/);
+  assert.match(builtinRegistrySource, /DOCUMENTS_OWNERSHIP_MARKER_CONTENT/);
   assert.match(builtinRegistrySource, /\\"owner\\":\\"ArcForge\\"/);
 });

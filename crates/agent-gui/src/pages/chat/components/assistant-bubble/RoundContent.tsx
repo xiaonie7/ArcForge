@@ -4,6 +4,7 @@ import { ChevronRight, Lightbulb, RefreshCw } from "../../../../components/icons
 import { Markdown } from "../../../../components/Markdown";
 import { useLocale } from "../../../../i18n";
 import type { RetryAttemptRecord } from "../../../../lib/chat/conversation/liveTranscriptStore";
+import { dedupeDisplayFilesByToolTrace } from "../../../../lib/chat/messages/displayFiles";
 import type { ToolTraceItem, UiRound } from "../../../../lib/chat/messages/uiMessages";
 import { normalizeLiveToolStatus, VIBING_STATUS } from "../../../../lib/chat/page/chatPageHelpers";
 import { groupRoundBlocks } from "./assistantBubbleUtils";
@@ -11,7 +12,7 @@ import { HostedSearchGroupView } from "./HostedSearchGroupView";
 import { LazyCollapse } from "./LazyCollapse";
 import { AssistantStatus, CompactingText, VibingText } from "./StatusText";
 import { MemoToolCallItem } from "./ToolCallItem";
-import { getNativeDisplayFilePayload, NativeDisplayFileBlock } from "./ToolFiles";
+import { NativeDisplayFileBlock } from "./ToolFiles";
 import { getNativeDisplayImagePayload, NativeDisplayImageBlock } from "./ToolImages";
 import { ToolTraceGroup } from "./ToolTraceGroup";
 import { UsagePanel } from "./UsagePanel";
@@ -159,6 +160,13 @@ export const RoundContent = memo(function RoundContent(props: {
     latestTodoItem,
   } = props;
   const groupedBlocks = useMemo(() => groupRoundBlocks(round.blocks), [round.blocks]);
+  const displayFilesByTool = useMemo(
+    () =>
+      dedupeDisplayFilesByToolTrace(
+        round.blocks.flatMap((block) => (block.kind === "tool" ? [block.item] : [])),
+      ),
+    [round.blocks],
+  );
   const visibleGroupedBlocks = useMemo(
     () =>
       groupedBlocks.filter(
@@ -246,10 +254,11 @@ export const RoundContent = memo(function RoundContent(props: {
         }
 
         if (block.kind === "tool") {
-          const displayFilePayload = getNativeDisplayFilePayload(block.item);
-          if (displayFilePayload) {
+          const displayFilePayload = displayFilesByTool.get(block.item);
+          if (displayFilePayload?.length) {
             return <NativeDisplayFileBlock key={block.key} files={displayFilePayload} />;
           }
+          if (displayFilesByTool.has(block.item)) return null;
 
           const displayImagePayload = getNativeDisplayImagePayload(block.item);
           if (displayImagePayload) {

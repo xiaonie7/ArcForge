@@ -2,7 +2,14 @@ import type { Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { invoke } from "@tauri-apps/api/core";
 import { Type } from "typebox";
 
-import { type BuiltinToolBundle, createBuiltinMetadataMap } from "./builtinTypes";
+import {
+  type BuiltinToolBundle,
+  createBuiltinMetadataMap,
+  type DocumentArtifactSummary,
+  type DisplayFileItemDetails,
+  type DisplayFilePreviewKind,
+} from "./builtinTypes";
+import { ToolPathResolver } from "./pathUtils";
 
 type OfficeRuntimeResponse = {
   success: boolean;
@@ -16,10 +23,28 @@ type OfficeRuntimeResponse = {
   durationMs: number;
   runtime: string;
   runtimePath: string;
+  artifact?: DocumentArtifactSummary;
+  artifactError?: string;
 };
 
 type OfficeRuntimeCancelResponse = {
   cancelled: boolean;
+};
+
+type WorkspaceArtifactDescriptor = {
+  path: string;
+  relativePath?: string | null;
+  fileName: string;
+  mimeType?: string | null;
+  previewKind?: DisplayFilePreviewKind | null;
+  sizeBytes: number;
+  mtimeMs: number;
+  fileId?: string | null;
+  previewSupported: boolean;
+};
+
+type DescribeWorkspaceArtifactsResponse = {
+  files: WorkspaceArtifactDescriptor[];
 };
 
 const OFFICE_RUNTIME_TOOL_NAME = "OfficeRuntime";
@@ -44,28 +69,41 @@ const SPREADSHEET_CODE_ARGUMENTS = new Set([
 const officeRuntimeTool: Tool = {
   name: OFFICE_RUNTIME_TOOL_NAME,
   description:
-    "Create, patch, inspect, or render Office deliverables with ArcForge's bundled local runtime. " +
+    "Create, patch, inspect, validate, or render Office deliverables with ArcForge's bundled local runtime. " +
     "Use document=spreadsheet for XLSX create/patch/inspect and document=presentation for PPTX " +
-    "create/inspect or PDF render. Paths must stay inside the current workspace.",
+    "create/inspect or PDF render. Use document=word for DOCX create/patch/inspect/validate and " +
+    "HTML/PNG render. Paths must stay inside the current workspace.",
   parameters: Type.Object(
     {
-      document: Type.Union([Type.Literal("spreadsheet"), Type.Literal("presentation")]),
+      document: Type.Union([
+        Type.Literal("spreadsheet"),
+        Type.Literal("presentation"),
+        Type.Literal("word"),
+      ]),
       action: Type.Union([
         Type.Literal("create"),
         Type.Literal("patch"),
         Type.Literal("inspect"),
+        Type.Literal("validate"),
         Type.Literal("render"),
       ]),
       spec_path: Type.Optional(
-        Type.String({ description: "Workspace JSON specification path for create or patch." }),
+        Type.String({
+          description:
+            "Workspace JSON specification path for spreadsheet/presentation create or spreadsheet/word patch.",
+        }),
       ),
       input_path: Type.Optional(
         Type.String({
-          description: "Workspace XLSX or PPTX input path for patch, inspect, or render.",
+          description:
+            "Workspace XLSX, PPTX, or DOCX input path for patch, inspect, validate, or render.",
         }),
       ),
       output_path: Type.Optional(
-        Type.String({ description: "Workspace XLSX, PPTX, or PDF destination path." }),
+        Type.String({
+          description:
+            "Workspace XLSX, PPTX, DOCX, PDF, HTML, or PNG destination path, depending on the action.",
+        }),
       ),
       force: Type.Optional(
         Type.Boolean({
@@ -184,6 +222,55 @@ function resultText(result: OfficeRuntimeResponse) {
 }
 
 export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinToolBundle {
+  const pathResolver = new ToolPathResolver({ workdir: params.workdir });
+
+  async function describeGeneratedOutput(outputPath: unknown): Promise<DisplayFileItemDetails> {
+    if (typeof outputPath !== "string" || !outputPath.trim()) {
+      throw new Error("Office Runtime did not provide an output path");
+    }
+    const resolved = await pathResolver.resolvePath(outputPath, {
+      label: "OfficeRuntime.output_path",
+      intent: "read",
+      required: true,
+    });
+    if (resolved.scope !== "workspace" || !resolved.relativePath) {
+      throw new Error("Office Runtime output must resolve to a workspace file");
+    }
+    const response = await invoke<DescribeWorkspaceArtifactsResponse>(
+      "fs_describe_workspace_artifacts",
+      {
+        workdir: params.workdir,
+        paths: [resolved.relativePath],
+      },
+    );
+    const file = response?.files?.[0];
+    if (!file || response.files.length !== 1) {
+      throw new Error("workspace artifact descriptor response did not contain the output file");
+    }
+    const backendPath =
+      typeof file.relativePath === "string" && file.relativePath.trim()
+        ? file.relativePath.trim()
+        : typeof file.path === "string"
+          ? file.path.trim()
+          : "";
+    const relativePath = backendPath || resolved.relativePath;
+    const fileName =
+      typeof file.fileName === "string" && file.fileName.trim()
+        ? file.fileName
+        : relativePath.split("/").filter(Boolean).at(-1) || relativePath;
+    return {
+      path: relativePath,
+      relativePath,
+      fileName,
+      mimeType: typeof file.mimeType === "string" && file.mimeType ? file.mimeType : undefined,
+      previewKind: file.previewKind ?? undefined,
+      sizeBytes: typeof file.sizeBytes === "number" ? file.sizeBytes : 0,
+      mtimeMs: typeof file.mtimeMs === "number" ? file.mtimeMs : 0,
+      fileId: typeof file.fileId === "string" && file.fileId ? file.fileId : undefined,
+      previewSupported: file.previewSupported === true,
+    };
+  }
+
   async function executeToolCall(
     toolCall: ToolCall,
     signal?: AbortSignal,
@@ -249,12 +336,41 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
           parsedOutput = undefined;
         }
       }
+      const displayPath = args.action === "validate" ? args.input_path : args.output_path;
+      let generatedFile: DisplayFileItemDetails | undefined;
+      let previewError: string | undefined;
+      if (result.success && typeof displayPath === "string" && displayPath.trim()) {
+        try {
+          generatedFile = await describeGeneratedOutput(displayPath);
+        } catch (error) {
+          previewError = asErrorMessage(error);
+        }
+      }
+      const warnings = [
+        result.artifactError
+          ? `document version metadata unavailable: ${result.artifactError}`
+          : undefined,
+        previewError ? `generated file preview unavailable: ${previewError}` : undefined,
+      ].filter((warning): warning is string => Boolean(warning));
+      const text = [resultText(result), ...warnings.map((warning) => `warning: ${warning}`)].join(
+        "\n",
+      );
+      const generatedFileWithArtifact = result.artifact
+        ? { ...generatedFile, artifact: result.artifact }
+        : generatedFile;
       return {
         role: "toolResult",
         toolCallId: toolCall.id,
         toolName: toolCall.name,
-        content: [{ type: "text", text: resultText(result) }],
-        details: { ...result, parsedOutput },
+        content: [{ type: "text", text }],
+        details: generatedFile
+          ? {
+              ...result,
+              parsedOutput,
+              kind: "display_file",
+              files: [generatedFileWithArtifact],
+            }
+          : { ...result, parsedOutput, previewError },
         isError: !result.success,
         timestamp,
       };

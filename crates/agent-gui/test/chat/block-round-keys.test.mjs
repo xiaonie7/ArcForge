@@ -93,6 +93,39 @@ test("groupRoundBlocks keys survive a block being inserted before them", () => {
   assert.equal(keysAfter[0], "thinking-1");
 });
 
+test("generated-file tools stay outside adjacent ordinary tool groups", () => {
+  const tool = (id, name, details = {}) => ({
+    kind: "tool",
+    item: {
+      toolCall: { type: "toolCall", id, name, arguments: {} },
+      toolResult: {
+        role: "toolResult",
+        toolCallId: id,
+        toolName: name,
+        content: [{ type: "text", text: "ok" }],
+        details,
+        isError: false,
+        timestamp: 1,
+      },
+    },
+  });
+  const blocks = [
+    tool("read-1", "Read"),
+    tool("office-1", "OfficeRuntime", { kind: "display_file", files: [] }),
+    tool("read-2", "Read"),
+    tool("custom-1", "CustomExporter", { kind: "display_file", files: [] }),
+    tool("read-3", "Read"),
+  ];
+
+  const grouped = bubbleUtils.groupRoundBlocks(blocks);
+  assert.deepEqual(
+    grouped.map((block) => block.kind),
+    ["tool", "tool", "tool", "tool", "tool"],
+  );
+  assert.equal(grouped[1].item.toolCall.name, "OfficeRuntime");
+  assert.equal(grouped[3].item.toolCall.name, "CustomExporter");
+});
+
 // ---------------------------------------------------------------------------
 // Round keys: history rounds are r<n>; rebuilds are deterministic
 

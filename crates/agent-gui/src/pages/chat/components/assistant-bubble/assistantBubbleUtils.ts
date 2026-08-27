@@ -112,6 +112,27 @@ export function getSubagentInlineSummary(item: ToolTraceItem) {
   return name || compactInlineText(task, 120);
 }
 
+function shouldRenderToolStandalone(item: ToolTraceItem): boolean {
+  if (
+    item.toolCall.name === "Image" ||
+    item.toolCall.name === "PresentFile" ||
+    item.toolCall.name === "OfficeRuntime" ||
+    item.toolCall.name === "SpreadsheetCode" ||
+    item.toolCall.name === "TodoWrite" ||
+    item.toolCall.name === "AskUserQuestion" ||
+    isAgentToolName(item.toolCall.name)
+  ) {
+    return true;
+  }
+  const details = item.toolResult?.details;
+  return Boolean(
+    details &&
+      typeof details === "object" &&
+      "kind" in details &&
+      (details as { kind?: unknown }).kind === "display_file",
+  );
+}
+
 export function shouldShowSubagentApplyStatus(agent: SubagentReportDetails) {
   if (!agent.applyStatus) return false;
   if (agent.applyStatus === "applied" || agent.applyStatus === "failed") return true;
@@ -316,13 +337,7 @@ export function groupRoundBlocks(blocks: UiRound["blocks"]): GroupedRoundBlock[]
         return;
       }
       flushPendingSearches();
-      if (
-        block.item.toolCall.name === "Image" ||
-        block.item.toolCall.name === "PresentFile" ||
-        block.item.toolCall.name === "TodoWrite" ||
-        block.item.toolCall.name === "AskUserQuestion" ||
-        isAgentToolName(block.item.toolCall.name)
-      ) {
+      if (shouldRenderToolStandalone(block.item)) {
         flushPendingTools();
         groupedBlocks.push({
           kind: "tool",

@@ -155,6 +155,27 @@ export type DisplayFilePreviewKind =
   | "text"
   | "video";
 
+export type DocumentArtifactSummary = {
+  artifactId: string;
+  artifactKind: string;
+  documentType: string;
+  outputPath: string;
+  currentVersion: number;
+  createdAt: string;
+  updatedAt: string;
+  format: string;
+  mimeType: string;
+  action: string;
+  provider: string;
+  sizeBytes: number;
+  sha256: string;
+  previewCount: number;
+  validationCount: number;
+  latestValidationStatus?: "passed" | "failed";
+  artifactRole: "primary" | "preview";
+  sourceVersion?: number;
+};
+
 export type DisplayFileItemDetails = {
   path: string;
   relativePath: string;
@@ -165,6 +186,7 @@ export type DisplayFileItemDetails = {
   mtimeMs: number;
   fileId?: string;
   previewSupported: boolean;
+  artifact?: DocumentArtifactSummary;
 };
 
 export type DisplayFileResultDetails = {

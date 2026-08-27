@@ -202,6 +202,10 @@ test("agent tool rules require PresentFile for generated user deliverables", () 
   );
   assert.match(
     suffix,
+    /OfficeRuntime and SpreadsheetCode automatically attach a generated-file card/,
+  );
+  assert.match(
+    suffix,
     /Use PresentFile for finished files such as Excel workbooks, PDFs, Word documents, archives, audio, video, and text exports\./,
   );
   assert.match(

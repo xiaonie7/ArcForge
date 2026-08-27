@@ -77,6 +77,9 @@ macro_rules! app_invoke_handler {
             commands::fs::fs_glob,
             commands::fs::fs_grep,
             commands::fs::fs_mention_list,
+            // Document artifacts
+            commands::document_artifacts::document_artifact_list,
+            commands::document_artifacts::document_artifact_get,
             // Bundled Office Runtime
             commands::office_runtime::office_runtime_execute,
             commands::office_runtime::office_runtime_cancel,

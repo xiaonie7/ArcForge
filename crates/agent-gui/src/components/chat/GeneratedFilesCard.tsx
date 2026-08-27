@@ -54,6 +54,9 @@ function getFileKindLabel(t: (key: string) => string, file: DisplayFileItemDetai
     case "html":
       return t("chat.generatedFiles.kind.html");
     default:
+      if (/\.(pptx?|pptm|odp)$/i.test(file.relativePath || file.path)) {
+        return t("chat.generatedFiles.kind.presentation");
+      }
       return t("chat.generatedFiles.kind.file");
   }
 }
@@ -72,7 +75,20 @@ const GeneratedFileRow = memo(function GeneratedFileRow({
   const { dir, base } = splitPath(relativePath);
   const FileTypeIcon = getFileTypeIcon(relativePath, "file");
   const canOpen = Boolean(actions?.onOpenFile);
-  const metadata = [getFileKindLabel(t, file), formatBytes(file.sizeBytes)]
+  const version = file.artifact
+    ? t(
+        file.artifact.artifactRole === "preview"
+          ? "chat.generatedFiles.sourceVersion"
+          : "chat.generatedFiles.version",
+      ).replace("{version}", String(file.artifact.sourceVersion ?? file.artifact.currentVersion))
+    : "";
+  const validation =
+    file.artifact?.latestValidationStatus === "passed"
+      ? t("chat.generatedFiles.validated")
+      : file.artifact?.latestValidationStatus === "failed"
+        ? t("chat.generatedFiles.validationFailed")
+        : "";
+  const metadata = [getFileKindLabel(t, file), version, validation, formatBytes(file.sizeBytes)]
     .filter(Boolean)
     .join(" · ");
 

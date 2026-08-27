@@ -14,8 +14,14 @@
     ]
   },
   "bundle": {
+    "resources": [
+      "third-party/officecli/LICENSE",
+      "third-party/officecli/NOTICE",
+      "third-party/officecli/THIRD-PARTY-NOTICES.txt"
+    ],
     "externalBin": [
       "binaries/arcforge-office-runtime",
+      "binaries/arcforge-officecli",
       "binaries/arcforge-gateway",
       "binaries/arcforge-wecom-connector"
     ],

@@ -1,3 +1,4 @@
+pub mod document_artifacts;
 pub(crate) mod edit_match;
 pub mod fs;
 pub mod git;

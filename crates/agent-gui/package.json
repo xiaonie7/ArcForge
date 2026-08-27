@@ -11,6 +11,7 @@
     "sidecar:build": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-sidecars.ps1",
     "sidecar:rebuild": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-sidecars.ps1 -Force",
     "sidecar:build:office": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-office-sidecar.ps1",
+    "sidecar:build:officecli": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-officecli-sidecar.ps1",
     "sidecar:build:gateway": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-gateway-sidecar.ps1",
     "sidecar:build:wecom-connector": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-wecom-connector-sidecar.ps1",
     "preview": "vite preview",

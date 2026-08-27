@@ -30,6 +30,8 @@ const SPREADSHEETS_OWNERSHIP_MARKER_CONTENT: &str =
     "{\"schemaVersion\":1,\"owner\":\"ArcForge\",\"skill\":\"arcforge-spreadsheets\"}\n";
 const SLIDES_OWNERSHIP_MARKER_CONTENT: &str =
     "{\"schemaVersion\":1,\"owner\":\"ArcForge\",\"skill\":\"arcforge-slides\"}\n";
+const DOCUMENTS_OWNERSHIP_MARKER_CONTENT: &str =
+    "{\"schemaVersion\":1,\"owner\":\"ArcForge\",\"skill\":\"arcforge-documents\"}\n";
 
 const SKILLS_INSTALLER_FILES: &[BuiltinSkillFile] = &[
     BuiltinSkillFile {
@@ -154,6 +156,27 @@ const SLIDES_FILES: &[BuiltinSkillFile] = &[
     },
 ];
 
+const DOCUMENTS_FILES: &[BuiltinSkillFile] = &[
+    BuiltinSkillFile {
+        path: "SKILL.md",
+        content: include_str!("../../../prompt/skills/arcforge-documents/SKILL.md"),
+    },
+    BuiltinSkillFile {
+        path: "references/spec.md",
+        content: include_str!("../../../prompt/skills/arcforge-documents/references/spec.md"),
+    },
+    BuiltinSkillFile {
+        path: "references/example-patch.json",
+        content: include_str!(
+            "../../../prompt/skills/arcforge-documents/references/example-patch.json"
+        ),
+    },
+    BuiltinSkillFile {
+        path: ARCFORGE_BUILTIN_MARKER_PATH,
+        content: DOCUMENTS_OWNERSHIP_MARKER_CONTENT,
+    },
+];
+
 pub(crate) const BUILTIN_AGENT_SKILLS: &[BuiltinSkill] = &[
     BuiltinSkill {
         name: "arcforge-code-review",
@@ -187,6 +210,14 @@ pub(crate) const BUILTIN_AGENT_SKILLS: &[BuiltinSkill] = &[
         ownership_marker: Some((
             ARCFORGE_BUILTIN_MARKER_PATH,
             SLIDES_OWNERSHIP_MARKER_CONTENT,
+        )),
+    },
+    BuiltinSkill {
+        name: "arcforge-documents",
+        files: DOCUMENTS_FILES,
+        ownership_marker: Some((
+            ARCFORGE_BUILTIN_MARKER_PATH,
+            DOCUMENTS_OWNERSHIP_MARKER_CONTENT,
         )),
     },
 ];
