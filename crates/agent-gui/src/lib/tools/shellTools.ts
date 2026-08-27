@@ -19,10 +19,12 @@ import {
 import { type BuiltinToolBundle, createBuiltinMetadataMap } from "./builtinTypes";
 import { formatResolvedTarget, type ResolvedPath, ToolPathResolver } from "./pathUtils";
 import {
-  assertSkillMutationAllowed,
   assertSkillPathAllowedByPolicy,
-  isSkillAccessPolicyRestrictive,
+  assertSkillShellExecutionAllowed,
+  isSkillShellExecutionRestricted,
+  SKILL_SHELL_EXECUTION_RESTRICTION,
   type SkillAccessPolicy,
+  SkillShellExecutionBlockedError,
 } from "./skillAccessPolicy";
 
 type ShellRunResponse = {
@@ -89,6 +91,12 @@ type SystemListSkillFilesResponse = {
 
 function asErrorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
+}
+
+function shellAccessErrorDetails(err: unknown) {
+  return err instanceof SkillShellExecutionBlockedError
+    ? { code: err.code, execution_started: false, retryable: false }
+    : {};
 }
 
 function createShellRunId(toolCallId: string) {
@@ -555,6 +563,9 @@ export function createShellTools(params: {
   const allowSkillsRoot = params.skillsRootEnabled === true;
   const allowManagedProcess = params.managedProcessEnabled !== false;
   const skillAccessPolicy = params.skillAccessPolicy;
+  const skillExecutionGuidance = isSkillShellExecutionRestricted(skillAccessPolicy)
+    ? SKILL_SHELL_EXECUTION_RESTRICTION
+    : "Running a Skill script: set cwd to skill://<enabled-skill>/scripts and use a relative command, or execute the absolute script path directly when that Skill is enabled and its current instructions permit it.";
   let cachedSkillsRootDir =
     typeof params.skillsRootDir === "string" ? params.skillsRootDir.trim() : "";
 
@@ -677,22 +688,17 @@ export function createShellTools(params: {
     );
   }
 
-  function assertShellSkillMutationPolicy(operation: string, path: string | undefined) {
-    if (
-      !isSkillAccessPolicyRestrictive(skillAccessPolicy) ||
-      skillAccessPolicy?.allowSkillMutation === true
-    ) {
-      return;
-    }
-    assertSkillMutationAllowed(skillAccessPolicy, operation, path);
-  }
-
   function validateShellSkillAccess(params: {
     operation: "Bash" | "ManagedProcess";
     cwd: ResolvedPath;
     command: string;
   }) {
     if (params.cwd.scope === "skill") {
+      assertSkillShellExecutionAllowed(
+        skillAccessPolicy,
+        `${params.operation} command`,
+        params.cwd.relativePath,
+      );
       if (commandReferencesFixedSkillsRoot(params.command)) {
         throw new Error(
           "Bash with a Skill cwd must use paths relative to that cwd. Do not cd into or execute absolute ~/.arcforge/skills paths.",
@@ -708,7 +714,6 @@ export function createShellTools(params: {
           "Bash with a Skill cwd cannot use .. or cd .. to move outside the enabled Skill directory.",
         );
       }
-      assertShellSkillMutationPolicy(`${params.operation} command`, params.cwd.relativePath);
       return;
     }
 
@@ -723,7 +728,7 @@ export function createShellTools(params: {
       }
       if (commandChangesDirectoryToSkillsAbsolute(params.command)) {
         throw new Error(
-          "Bash cannot cd into the fixed Skills root. To run an installed Skill script, set cwd to skill://<enabled-skill>/scripts and use a relative command, or execute the absolute script path directly when that Skill is enabled.",
+          `Bash cannot cd into the fixed Skills root. ${skillExecutionGuidance}`,
         );
       }
       // Otherwise (directly executing scripts, etc.) treat absolute Skill paths
@@ -732,18 +737,22 @@ export function createShellTools(params: {
       const referencedSkills = extractSkillBaseDirsFromAbsolutePath(params.command);
       if (referencedSkills.length === 0) {
         throw new Error(
-          "Bash references the ~/.arcforge/skills root without naming a specific installed Skill. Include a Skill name such as ~/.arcforge/skills/<skill-name>/... or set cwd to skill://<enabled-skill>/scripts.",
+          `Bash references the ~/.arcforge/skills root without naming a specific installed Skill. ${skillExecutionGuidance}`,
         );
       }
       for (const baseDir of referencedSkills) {
         assertSkillPathAllowedByPolicy(skillAccessPolicy, `${baseDir}/`, params.operation);
-        assertShellSkillMutationPolicy(`${params.operation} command`, `${baseDir}/`);
+        assertSkillShellExecutionAllowed(
+          skillAccessPolicy,
+          `${params.operation} command`,
+          `${baseDir}/`,
+        );
       }
       // All referenced Skills are enabled — allow the absolute path through.
     }
     if (commandUsesWorkspaceSkillsGuess(params.command)) {
       throw new Error(
-        "Bash cannot cd into workspace skills/ guesses. Enable the installed Skill, then set cwd to skill://<enabled-skill>/scripts.",
+        `Bash cannot cd into workspace skills/ guesses. ${skillExecutionGuidance}`,
       );
     }
     if (commandSearchesFilesystemForSkills(params.command)) {
@@ -791,7 +800,7 @@ export function createShellTools(params: {
       /(\.arcforge\/skills|~\/\.arcforge\/skills|\bskills\/[^ \n;&|]+\/scripts\b)/.test(combined)
     ) {
       hints.push(
-        "Hint: To run a Skill script, set cwd to skill://<enabled-skill>/scripts and use a relative command, or execute the absolute script path directly when the Skill is enabled.",
+        `Hint: ${skillExecutionGuidance}`,
       );
     }
 
@@ -813,7 +822,7 @@ export function createShellTools(params: {
       )
     ) {
       hints.push(
-        "Hint: Use List/Glob with the same skill:// path to locate the script or file, then retry Bash with that Skill cwd.",
+        "Hint: If the current Skill instructions permit path recovery, use List/Glob with the same skill:// path and retry only with a returned path; otherwise stop and report the missing file.",
       );
     }
 
@@ -823,7 +832,7 @@ export function createShellTools(params: {
       )
     ) {
       hints.push(
-        "Hint: This is an application or script error rather than a path normalization error. Inspect the script help or source with Read, then retry with the required arguments or dependency setup.",
+        "Hint: This is an application or script error rather than a path normalization error. Follow the current Skill's error and stop conditions; inspect or retry only when those instructions permit it.",
       );
     }
 
@@ -832,7 +841,7 @@ export function createShellTools(params: {
 
   const toolBash: Tool = {
     name: "Bash",
-    description: `Execute a non-interactive shell command on the local machine for builds, tests, package managers, external CLIs, curl/API calls, running Skill scripts, or explicitly requested shell work. Runtime platform: ${platformLabel}. ${shellPolicy} Reserve it for commands that truly require a shell — do NOT use Bash for file operations the dedicated tools handle: use Read/List/Glob/Grep instead of cat/ls/find/grep/rg for any workspace or Skill content; use Delete instead of rm/rmdir/unlink/find -delete; use Image instead of open/xdg-open/file paths to show pictures. Use curl with an explicit timeout such as \`--max-time 30\` for endpoint tests. ${backgroundPolicy} Running a Skill script: set cwd to \`skill://<enabled-skill>/scripts\` and run a relative command, or execute the absolute script path directly when that Skill is enabled. ${shellPathPolicy} Returns stdout, stderr, exit_code, platform, profile, and shell_family. For ${timeoutPolicy.providerLabel}, timeout defaults to ${timeoutPolicy.defaultTimeoutMs}ms and is capped at ${timeoutPolicy.maxTimeoutMs}ms; larger timeout_ms values are accepted by the schema but clamped before execution. High risk: use carefully.`,
+    description: `Execute a non-interactive shell command on the local machine for builds, tests, package managers, external CLIs, curl/API calls, or explicitly requested shell work. Runtime platform: ${platformLabel}. ${shellPolicy} Reserve it for commands that truly require a shell — do NOT use Bash for file operations the dedicated tools handle: use Read/List/Glob/Grep instead of cat/ls/find/grep/rg for any workspace or Skill content; use Delete instead of rm/rmdir/unlink/find -delete; use Image instead of open/xdg-open/file paths to show pictures. Use curl with an explicit timeout such as \`--max-time 30\` for endpoint tests. ${backgroundPolicy} ${skillExecutionGuidance} ${shellPathPolicy} Returns stdout, stderr, exit_code, platform, profile, and shell_family. For ${timeoutPolicy.providerLabel}, timeout defaults to ${timeoutPolicy.defaultTimeoutMs}ms and is capped at ${timeoutPolicy.maxTimeoutMs}ms; larger timeout_ms values are accepted by the schema but clamped before execution. High risk: use carefully.`,
     parameters: strictToolParameters({
       command: Type.String({
         description: "Shell command to execute (prefer non-interactive, idempotent commands).",
@@ -855,7 +864,7 @@ export function createShellTools(params: {
 
   const toolManagedProcess: Tool = {
     name: "ManagedProcess",
-    description: `Start, inspect, read logs for, or stop a long-running local process such as a dev server, watcher, or preview server. Runtime platform: ${platformLabel}; commands use the same platform shell policy as Bash. Use this instead of detached shell/background syntax. action="start" runs a foreground command under ArcForge process management, redirects stdout/stderr to a log file, and returns immediately with process_id, pid, and log_path. By default managed processes are terminated automatically when ArcForge exits; pass isolated=true only when the user explicitly wants the service to outlive ArcForge. Use action="status" to list or inspect processes, action="read_log" to read recent log output, and action="stop" to terminate the process tree.`,
+    description: `Start, inspect, read logs for, or stop a long-running local process such as a dev server, watcher, or preview server. Runtime platform: ${platformLabel}; commands use the same platform shell policy as Bash. ${skillExecutionGuidance} Use this instead of detached shell/background syntax. action="start" runs a foreground command under ArcForge process management, redirects stdout/stderr to a log file, and returns immediately with process_id, pid, and log_path. By default managed processes are terminated automatically when ArcForge exits; pass isolated=true only when the user explicitly wants the service to outlive ArcForge. Use action="status" to list or inspect processes, action="read_log" to read recent log output, and action="stop" to terminate the process tree.`,
     parameters: strictToolParameters({
       action: Type.Union(
         [
@@ -1081,7 +1090,7 @@ export function createShellTools(params: {
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         content: [{ type: "text", text: asErrorMessage(err) }],
-        details: {},
+        details: shellAccessErrorDetails(err),
         isError: true,
         timestamp: now,
       };
@@ -1214,7 +1223,7 @@ export function createShellTools(params: {
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         content: [{ type: "text", text: asErrorMessage(err) }],
-        details: {},
+        details: shellAccessErrorDetails(err),
         isError: true,
         timestamp: now,
       };

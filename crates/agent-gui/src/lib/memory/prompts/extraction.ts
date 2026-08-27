@@ -10,6 +10,7 @@ import {
   MEMORY_CONFIDENCE_RUBRIC,
   MEMORY_CONFLICT_ARBITRATION_LINES,
   MEMORY_SKIP_LIST_ITEMS,
+  MEMORY_TRANSIENT_EXECUTION_POLICY,
   MEMORY_WRITE_EVIDENCE_POLICY,
   PROJECT_MEMORY_WRITE_EVIDENCE_GATE,
 } from "./shared";
@@ -160,6 +161,8 @@ export function buildExtractionInstructionPrompt(params: {
     buildReviewerModeLines(reviewerMode),
     "",
     "# Memory Extraction — Read-then-Decide",
+    "",
+    MEMORY_TRANSIENT_EXECUTION_POLICY,
     "",
     PROJECT_MEMORY_WRITE_EVIDENCE_GATE,
     "",

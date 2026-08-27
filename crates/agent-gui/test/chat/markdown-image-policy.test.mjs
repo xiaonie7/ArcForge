@@ -308,6 +308,18 @@ test("agent tool rules route installed Skill scripts through skill cwd", () => {
   assert.match(suffix, /Do not cd into ~\/\.arcforge\/skills or workspace skills\/ guesses/);
 });
 
+test("agent tool rules distinguish Skill execution denial from recoverable missing paths", () => {
+  const suffix = agentRunnerModule.buildToolsSuffix("C:/workspace", [
+    "Bash", "ManagedProcess", "SkillsManager", "Read", "List", "Glob",
+  ], "windows");
+  assert.match(suffix, /Skill file access does not grant script execution/);
+  assert.match(suffix, /Only when execution is permitted, use cwd=/);
+  assert.match(suffix, /SKILL_EXECUTION_BLOCKED means the command did not start/);
+  assert.match(suffix, /Stop the dependent workflow/);
+  assert.match(suffix, /execution\/permission denial is not a missing-path error/);
+  assert.doesNotMatch(suffix, /accepted as long as the referenced Skill is enabled/);
+});
+
 test("agent Bash compatibility rules are native PowerShell-first on Windows", () => {
   const suffix = agentRunnerModule.buildToolsSuffix(
     "/workspace",

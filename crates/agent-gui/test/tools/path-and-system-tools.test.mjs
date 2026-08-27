@@ -729,6 +729,49 @@ test("file tools allow direct mutations inside enabled Skills when mutation is g
   ]);
 });
 
+test("enabled read-only Skills still reject every file mutation before backend access", async () => {
+  const invocations = [];
+  const loader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          invocations.push({ command, args });
+          throw new Error("unexpected invoke");
+        },
+      },
+    },
+  });
+  const { createFsTools } = loader.loadModule("src/lib/tools/fsTools.ts");
+  const { createFileToolState } = loader.loadModule("src/lib/tools/fileToolState.ts");
+  const bundle = createFsTools({
+    workdir: "/workspace",
+    skillsRootEnabled: true,
+    skillsRootDir: "/Users/me/.arcforge/skills",
+    skillAccessPolicy: {
+      allowedSkillNames: ["demo"],
+      allowedSkillBaseDirs: ["demo"],
+      allowSkillMutation: false,
+    },
+    fileState: createFileToolState(),
+  });
+  for (const [name, args] of [
+    ["Write", { content: "changed" }],
+    ["Edit", { old_string: "before", new_string: "after" }],
+    ["Delete", {}],
+  ]) {
+    const result = await bundle.executeToolCall({
+      type: "toolCall",
+      id: `readonly-skill-${name}`,
+      name,
+      arguments: { path: "skill://demo/SKILL.md", ...args },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /is not writable in this conversation/);
+    assert.match(result.content[0].text, /enabling a Skill for reading does not grant write permission/);
+  }
+  assert.deepEqual(invocations, []);
+});
+
 test("Write strips legacy mode before schema validation and omits it from the schema", async () => {
   const fsLoader = createTsModuleLoader();
   const fsTools = fsLoader.loadModule("src/lib/tools/fsTools.ts");

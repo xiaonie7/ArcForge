@@ -652,6 +652,7 @@ export function buildSkillsSystemPrompt(params: {
     "- Only the Skills listed below are enabled for this conversation. SkillsManager(action=list) may be used to review the enabled Skills visible to this chat, but it must not be used to enumerate or infer other installed Skills.",
     "- Only when you determine that a metadata Skill is genuinely needed should you call SkillsManager with action=read to read the full Skill file and then follow its workflow exactly.",
     "- SkillsManager.path uses the skillFile below and may point to SKILL.md, skill.md, skill.json, or README.md.",
+    "- Use the current enabled Skill entry and its referenced files as the source of invocation instructions. After a Skill update, read the current entry; auditing old workspace copies (such as run/) is not a prerequisite. Inspect historical copies or execution notes only for explicitly requested work on past runs, or when the current Skill explicitly requires them, within current tool permissions.",
     '- For files referenced inside an enabled Skill, use file tools with skill://<baseDir>/... paths, for example Read(path="skill://<baseDir>/references/guide.md"), List, Glob, Grep, Write, Edit, or Delete.',
     "- You may update files inside enabled Skills when the user asks you to optimize or maintain them. Create, install, search/install from ClawHub, validate, package, or delete user Skills through SkillsManager actions.",
     "- Absolute local paths, ~/..., and file:// forms are auto-normalized by file tools; prefer skill://<baseDir>/... for enabled Skill files.",

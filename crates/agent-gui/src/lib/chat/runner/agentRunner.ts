@@ -259,7 +259,7 @@ export function buildToolsSuffix(
         "- Absolute paths, `~/...`, and `file://` URLs are also accepted and auto-normalized; never construct one when a returned path is available.",
         "- Write, Edit, and Delete operate only inside the workspace or enabled Skills. Bash `cwd` may point outside the workspace when the task requires it.",
         "- Use `/` as the separator everywhere, including Glob and Grep patterns; Windows `\\` is auto-normalized.",
-        '- On a path error, follow its guidance: reuse a "Did you mean" candidate verbatim, or locate the file with Glob/Grep first, then retry with the returned path.',
+        '- On a missing-path error, locate the required file using a returned "Did you mean" candidate or Glob/Grep, only when current instructions permit recovery. An execution/permission denial is not a missing-path error: stop that operation instead of trying other paths or historical outputs.',
       ].join("\n"),
     );
   }
@@ -409,12 +409,13 @@ export function buildToolsSuffix(
         "## Bash",
         "- Bash.cwd follows the path rules in **Workspace & Paths**.",
         ...bashPlatformLines,
-        '- To run installed Skill scripts, use cwd="skill://<enabled-skill>/scripts" plus a relative command.',
-        "- Passing an absolute Skill script path inside the command is also accepted as long as the referenced Skill is enabled in this conversation.",
+        "- Skill file access does not grant script execution. Follow the current Bash/ManagedProcess tool description and the enabled Skill's execution rules; do not infer permission from Skill enablement alone.",
+        '- Only when execution is permitted, use cwd="skill://<enabled-skill>/scripts" plus a relative command. Absolute script paths additionally require permission from the current Skill instructions.',
+        "- SKILL_EXECUTION_BLOCKED means the command did not start and produced no current results. Stop the dependent workflow; do not change encoding/flags/paths, stage scripts or configuration in the workspace, or reuse historical runners, scope, or output files to bypass the denial. Report the missing execution capability to the administrator.",
         "- For endpoint tests with curl, include an explicit timeout such as `--max-time 30` so a stalled local server or upstream request cannot hold the whole turn indefinitely.",
         "- Use ManagedProcess instead of Bash for dev servers, watchers, preview servers, or anything that should keep running.",
         "- For reading, listing, or searching Skill content, always use Read/List/Glob/Grep with skill:// paths — Bash cat/ls/find/grep/rg/sed/awk against ~/.arcforge/skills is still routed back to the file tools.",
-        "- Do not guess `skills/` paths inside the workspace; if a Skill is needed, enable it in the chat Skills selector first.",
+        "- Do not guess `skills/` paths inside the workspace. A missing Skill must be enabled through the local chat selector or channel permission settings as appropriate; this does not override a separate execution denial.",
         "- Do not cd into ~/.arcforge/skills or workspace skills/ guesses.",
       ].join("\n"),
     );

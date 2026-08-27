@@ -146,7 +146,7 @@ export function buildSkillAccessDeniedMessage(params: {
   return [
     `${params.operation} is blocked: ${target} is not enabled for this conversation.`,
     allowedText,
-    "Enable the Skill in the chat Skills selector before reading, searching, or running files from it.",
+    "Ask the administrator to allow this Skill for the conversation: use the chat Skills selector for local chats or the channel permission settings for channel sessions.",
     "Do not bypass this with Bash, absolute paths, find /, or ~/.arcforge/skills.",
   ].join(" ");
 }
@@ -222,6 +222,42 @@ export function assertSkillManagementAllowed(
   );
 }
 
+export function isSkillShellExecutionRestricted(policy?: SkillAccessPolicy) {
+  return isSkillAccessPolicyRestrictive(policy) && policy?.allowSkillMutation !== true;
+}
+
+export const SKILL_SHELL_EXECUTION_RESTRICTION =
+  "Running Skill scripts through Bash or ManagedProcess is disabled in this conversation, even when the Skill is enabled for reading. " +
+  "A blocked command has not started and has produced no results. " +
+  "Do not retry with different encoding, interpreter flags, paths, or workspace copies of Skill scripts/configuration; do not reuse cached results. " +
+  "Ask the administrator to provide an authorized execution mechanism. Re-enabling the Skill does not grant execution permission.";
+
+export class SkillShellExecutionBlockedError extends Error {
+  readonly code = "SKILL_EXECUTION_BLOCKED";
+
+  constructor(operation: string, path?: string) {
+    super(
+      `${operation} is blocked [SKILL_EXECUTION_BLOCKED]: ${
+        path ? `Skill path "${path}"` : "the fixed Skills root"
+      } cannot be used for shell execution. ${SKILL_SHELL_EXECUTION_RESTRICTION}`,
+    );
+    this.name = "SkillShellExecutionBlockedError";
+  }
+}
+
+export function assertSkillShellExecutionAllowed(
+  policy: SkillAccessPolicy | undefined,
+  operation: string,
+  path?: string,
+) {
+  // Until a controlled execution mechanism exists, arbitrary shell commands
+  // retain the same permission boundary as Skill mutation. Report the actual
+  // missing capability instead of suggesting that re-enabling the Skill helps.
+  if (isSkillShellExecutionRestricted(policy)) {
+    throw new SkillShellExecutionBlockedError(operation, path);
+  }
+}
+
 export function assertSkillMutationAllowed(
   policy: SkillAccessPolicy | undefined,
   operation: string,
@@ -246,8 +282,8 @@ export function assertSkillMutationAllowed(
       `${operation} is blocked: ${
         path ? `Skill path "${path}"` : "the fixed Skills root"
       } is not writable in this conversation.`,
-      "Enable the Skill in the chat Skills selector before changing files inside it.",
-      "If this is a new Skill or package-level install, use SkillsManager with the skills-creator or skills-installer flow.",
+      "Skill file changes are disabled by this conversation's policy; enabling a Skill for reading does not grant write permission.",
+      "Ask the administrator to update the Skill through Settings > Skills or an authorized SkillsManager management flow. Do not copy its files elsewhere to bypass this restriction.",
     ].join(" "),
   );
 }

@@ -77,3 +77,18 @@ test("buildSkillsSystemPrompt marks explicit mentions without granting disabled 
   assert.doesNotMatch(prompt, /root=["']skills["']/);
   assert.doesNotMatch(prompt, /Read\(root=/);
 });
+
+test("Skill updates use the current entry without auditing old workspace copies", () => {
+  const prompt = skills.buildSkillsSystemPrompt({ rootDir: "/skills", selected: enabledSkills });
+  assert.match(prompt, /current enabled Skill entry and its referenced files/);
+  assert.match(prompt, /After a Skill update, read the current entry/);
+  assert.match(prompt, /auditing old workspace copies \(such as run\/\) is not a prerequisite/);
+});
+
+test("historical inspection remains available when requested or required by the current Skill", () => {
+  const prompt = skills.buildSkillsSystemPrompt({ rootDir: "/skills", selected: enabledSkills });
+  assert.match(prompt, /only for explicitly requested work on past runs/);
+  assert.match(prompt, /or when the current Skill explicitly requires them/);
+  assert.match(prompt, /within current tool permissions/);
+  assert.equal(skills.buildSkillsSystemPrompt({ rootDir: "/skills", selected: [] }), "");
+});

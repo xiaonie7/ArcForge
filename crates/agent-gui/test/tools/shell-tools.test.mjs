@@ -898,8 +898,122 @@ test("Bash blocks direct Skill execution when the restrictive policy denies muta
 
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /Bash command is blocked/);
-  assert.match(result.content[0].text, /is not writable in this conversation/);
+  assert.match(result.content[0].text, /SKILL_EXECUTION_BLOCKED/);
+  assert.match(result.content[0].text, /has not started/);
+  assert.doesNotMatch(result.content[0].text, /Enable the Skill in the chat Skills selector/);
+  assert.deepEqual(result.details, {
+    code: "SKILL_EXECUTION_BLOCKED",
+    execution_started: false,
+    retryable: false,
+  });
   assert.deepEqual(calls, []);
+});
+
+test("Bash reports a non-retryable execution denial for enabled Skill cwd on Windows", async () => {
+  const calls = [];
+  const loader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          throw new Error("unexpected invoke");
+        },
+      },
+    },
+  });
+  const { createShellTools } = loader.loadModule("src/lib/tools/shellTools.ts");
+  const bundle = createShellTools({
+    workdir: "C:/repo",
+    providerId: "claude_code",
+    runtimePlatform: "windows",
+    skillsRootEnabled: true,
+    skillsRootDir: "C:/Users/me/.arcforge/skills",
+    skillAccessPolicy: {
+      allowedSkillNames: ["data-analyst"],
+      allowedSkillBaseDirs: ["data-analyst"],
+      allowSkillMutation: false,
+    },
+  });
+
+  for (const command of [
+    "python resolve_row_scope.py --wecom-userid test-user --bot-id test-bot",
+    "$env:PYTHONIOENCODING='utf-8'; python resolve_row_scope.py --wecom-userid test-user --bot-id test-bot",
+    "python -B resolve_row_scope.py --help",
+    "Write-Output readonly",
+    "python C:/Users/me/.arcforge/skills/data-analyst/scripts/resolve_row_scope.py",
+    "cd ..; python scripts/resolve_row_scope.py",
+  ]) {
+    const result = await bundle.executeToolCall({
+      type: "toolCall",
+      id: "blocked-skill-cwd",
+      name: "Bash",
+      arguments: { cwd: "skill://data-analyst/scripts", command },
+    });
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.details, {
+      code: "SKILL_EXECUTION_BLOCKED",
+      execution_started: false,
+      retryable: false,
+    });
+    assert.match(result.content[0].text, /Re-enabling the Skill does not grant execution permission/);
+    assert.match(result.content[0].text, /do not reuse cached results/);
+  }
+  assert.deepEqual(calls, []);
+
+  for (const tool of bundle.tools) {
+    assert.match(tool.description, /Running Skill scripts through Bash or ManagedProcess is disabled/);
+    assert.doesNotMatch(tool.description, /Running a Skill script: set cwd/);
+  }
+});
+
+test("Bash keeps authorized Windows Skill cwd execution working", async () => {
+  const calls = [];
+  const loader = createTsModuleLoader({
+    mocks: {
+      "@tauri-apps/api/core": {
+        async invoke(command, args) {
+          calls.push({ command, args });
+          return {
+            exit_code: 0,
+            shell: "powershell",
+            stdout: "ok\n",
+            stderr: "",
+            stdout_truncated: false,
+            stderr_truncated: false,
+            timed_out: false,
+            cancelled: false,
+            effective_timeout_ms: args.timeout_ms,
+            duration_ms: 1,
+          };
+        },
+      },
+    },
+  });
+  const { createShellTools } = loader.loadModule("src/lib/tools/shellTools.ts");
+  const bundle = createShellTools({
+    workdir: "C:/repo",
+    providerId: "claude_code",
+    runtimePlatform: "windows",
+    skillsRootEnabled: true,
+    skillsRootDir: "C:/Users/me/.arcforge/skills",
+    skillAccessPolicy: {
+      allowedSkillNames: ["data-analyst"],
+      allowedSkillBaseDirs: ["data-analyst"],
+      allowSkillMutation: true,
+    },
+  });
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "allowed-skill-cwd",
+    name: "Bash",
+    arguments: { cwd: "skill://data-analyst/scripts", command: "python -B report.py" },
+  });
+  assert.equal(result.isError, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "shell_run");
+  assert.equal(calls[0].args.cwd, "C:/Users/me/.arcforge/skills/data-analyst/scripts");
+  assert.match(bundle.tools[0].description, /Running a Skill script: set cwd/);
+  assert.doesNotMatch(bundle.tools[0].description, /Running Skill scripts through Bash or ManagedProcess is disabled/);
 });
 
 test("Bash empty Skill allowlist rejects direct absolute Skill execution", async () => {
@@ -982,7 +1096,12 @@ test("ManagedProcess applies the same read-only Skill policy before start", asyn
 
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /ManagedProcess command is blocked/);
-  assert.match(result.content[0].text, /is not writable in this conversation/);
+  assert.match(result.content[0].text, /SKILL_EXECUTION_BLOCKED/);
+  assert.deepEqual(result.details, {
+    code: "SKILL_EXECUTION_BLOCKED",
+    execution_started: false,
+    retryable: false,
+  });
   assert.deepEqual(calls, []);
 });
 

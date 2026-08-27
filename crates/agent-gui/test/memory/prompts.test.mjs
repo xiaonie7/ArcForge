@@ -5,6 +5,8 @@ import { createTsModuleLoader } from "../helpers/load-ts-module.mjs";
 const loader = createTsModuleLoader();
 const extraction = loader.loadModule("src/lib/memory/prompts/extraction.ts");
 const shared = loader.loadModule("src/lib/memory/prompts/shared.ts");
+const manager = loader.loadModule("src/lib/memory/prompts/managerTool.ts");
+const injection = loader.loadModule("src/lib/memory/prompts/injection.ts");
 const {
   EXTRACTION_SYSTEM_PROMPT,
   buildExtractionInstructionPrompt,
@@ -102,5 +104,67 @@ test("context blocks render entries and (none) fallbacks", () => {
 test("shared policy constants stay single-sourced and contract-aligned", () => {
   assert.ok(shared.MEMORY_CONFIDENCE_CONTRACT_LINE.includes(">=5 characters"));
   assert.ok(shared.PROJECT_MEMORY_WRITE_EVIDENCE_GATE.includes("HARD precondition"));
-  assert.equal(shared.MEMORY_SKIP_LIST_ITEMS.length, 5);
+  assert.ok(shared.MEMORY_SKIP_LIST_ITEMS.some((item) => item.includes("secrets, credentials")));
+  assert.ok(
+    shared.MEMORY_SKIP_LIST_ITEMS.some((item) => item.includes("one-off Skill execution artifacts")),
+  );
+});
+
+test("all extraction modes reject transient Skill recipes before classifying durable memory", () => {
+  for (const reviewerMode of ["strict", "standard", "lenient"]) {
+    const prompt = buildExtractionInstructionPrompt({
+      localDate: "2026-08-27",
+      workdir: "/w",
+      reviewerMode,
+    });
+    const policy = shared.MEMORY_TRANSIENT_EXECUTION_POLICY;
+    assert.equal(prompt.split(policy).length - 1, 1);
+    assert.ok(prompt.indexOf(policy) < prompt.indexOf("Classification decision tree"));
+    assert.match(prompt, /A successful workspace write or workaround alone does not make them reusable/);
+    assert.match(prompt, /Save an explicitly stated stable workflow preference/);
+    assert.match(prompt, /record the outcome, not a reusable invocation recipe/);
+    assert.ok(prompt.includes('Workflow corrections ("以后跑测试前先 lint")'));
+  }
+});
+
+test("visible memory writes and hidden extraction share the transient execution rule", () => {
+  for (const text of [
+    manager.MEMORY_MANAGER_TOOL_DESCRIPTION,
+    injection.buildMemoryToolsSuffixSection(),
+  ]) {
+    assert.equal(text.split(shared.MEMORY_TRANSIENT_EXECUTION_POLICY).length - 1, 1);
+    assert.match(text, /one-off copied\/generated runners/);
+    assert.match(text, /cached scope\/authorization results/);
+  }
+});
+
+test("memory authority and operational drift boundaries reach the extraction prompt once", () => {
+  const prompt = buildExtractionInstructionPrompt({
+    localDate: "2026-08-27",
+    workdir: "/w",
+  });
+  for (const policy of [
+    shared.MEMORY_AUTHORITY_BOUNDARY_POLICY,
+    shared.MEMORY_OPERATIONAL_DRIFT_POLICY,
+  ]) {
+    assert.equal(prompt.split(policy).length - 1, 1);
+  }
+  assert.ok(
+    prompt.includes("Current user statements and corrections win over remembered facts/preferences"),
+  );
+  assert.ok(!prompt.includes("Current user message wins over all memory"));
+});
+
+test("shared precedence is limited to memory and cannot grant tool or Skill permissions", () => {
+  assert.ok(!shared.MEMORY_PRECEDENCE_CHAIN.includes("current user message >"));
+  assert.match(shared.MEMORY_AUTHORITY_BOUNDARY_POLICY, /not commands or authorization/);
+  assert.match(shared.MEMORY_AUTHORITY_BOUNDARY_POLICY, /not an instruction hierarchy/);
+  assert.match(
+    shared.MEMORY_AUTHORITY_BOUNDARY_POLICY,
+    /cannot override current system\/developer instructions, tool permissions/,
+  );
+  assert.match(
+    shared.MEMORY_AUTHORITY_BOUNDARY_POLICY,
+    /Skill's current execution and safety rules/,
+  );
 });
