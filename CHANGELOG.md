@@ -1,5 +1,27 @@
 # 更新日志
 
+## v0.3.5
+
+本次发布为 **功能版本**，新增企微（WeCom）"客户端能力同步"机制，让远程会话的默认权限跟随桌面端当前启用的 Skill 与工具；同时将 Skill 脚本执行与 Skill 文件改动权限解耦，使只读 Skill 策略下也能运行已启用 Skill 的脚本。
+
+### 新功能
+
+- **企微客户端能力同步（Desktop Capability Sync）**：企微安装级默认权限可"跟随客户端"，桌面端当前启用的 Skill 与工具会反映到默认权限策略，新请求使用更新后的策略；单独配置的用户与群组权限不受影响，Skill 文件修改权限仍独立控制。
+  - **安装默认权限采纳（adopt）**：后端 `channel_control` 服务新增 `adopt_installation_default`，基于乐观并发期望（binding_id / profile_id / profile_revision / profile_current_revision / policy_hash）创建新的跟随型默认配置；旧版或手动配置的默认不被自动覆盖，确认后保留原配置及单独配置的用户、群组权限。
+  - **权限修订版本追踪**：新增 `channel_permission_profile_revisions` 修订历史与 `last_synced_revision`，`next_profile_revision` 生成单调修订号；显式编辑会把配置所有权转回桌面用户，绑定可指向较旧修订并在采纳时校准。
+  - **新命令与字段**：新增 Tauri 命令 `channel_installation_default_adopt`；`InstallationDefault` 增加 `follows_desktop` 与 `profile_current_revision`。
+  - **前端同步与设置 UI**：新增 `buildWecomInstallationDefaultSyncKey`、`adoptWecomInstallationDefault`、`resolveWecomPermissionProfile`，并按安装维度串行化默认权限写入；设置页新增"客户端能力同步"区块，展示跟随状态、提供"确认跟随客户端"与"刷新权限状态"入口。
+  - **Gateway 桥接解析**：企微请求鉴权改用 `resolveWecomPermissionProfile`，仅同步本机安装后再解析生效权限，并把 `settings` 传入桥接监听。
+
+### 改进
+
+- **Skill 脚本执行与文件改动权限分离**：移除 `isSkillShellExecutionRestricted` / `SkillShellExecutionBlockedError` / `assertSkillShellExecutionAllowed` 等执行阻断逻辑；已启用 Skill 可通过 Bash / ManagedProcess 运行其脚本（按 Skill 当前指令），而 Skill 文件写入（Write / Edit / Delete）仍由 `ToolPathResolver` 独立强制。由此一个只读 Skill 策略的渠道也能执行已批准的数据工作流，同时禁止改写 Skill 包文件。同步更新 Bash 工具后缀与 shell 执行指引文案。
+
+### 其他
+
+- 新增 `wecom-permission-sync`、`wecom-permission-ui` 回归测试，并更新 shell-tools、gateway-bridge-listeners、wecom-settings、markdown-image-policy 等既有测试。
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.5。
+
 ## v0.3.4
 
 本次发布为 **功能版本**，通过内置 Office Runtime 新增 Word DOCX 文档的可审查交付能力，并修复 Skill 运行器在陈旧恢复与执行拒绝上的边界问题。

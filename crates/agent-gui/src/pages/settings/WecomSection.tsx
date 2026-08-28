@@ -25,9 +25,14 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
 import { useLocale } from "../../i18n";
+import type { ChannelInstallationDefault } from "../../lib/channelControl";
 import type { AppSettings, WecomGatewayMode, WecomSettings } from "../../lib/settings";
 import { isSupportedGatewayUrl } from "../../lib/settings/normalize";
-import { ensureWecomInstallationDefault } from "../../lib/wecomPermissionProfile";
+import {
+  adoptWecomInstallationDefault,
+  buildWecomInstallationDefaultSyncKey,
+  ensureWecomInstallationDefault,
+} from "../../lib/wecomPermissionProfile";
 import { AgentActivationSwitch } from "./shared";
 import type { SettingsSectionProps } from "./types";
 
@@ -197,7 +202,24 @@ export function WecomSection(props: WecomSectionProps) {
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [activating, setActivating] = useState(false);
   const activatingRef = useRef(false);
-  const defaultProfileEnsuredRef = useRef(false);
+  const defaultProfileEnsuredRef = useRef("");
+  const permissionSettingsRef = useRef(settings);
+  permissionSettingsRef.current = settings;
+  const [installationDefault, setInstallationDefault] =
+    useState<ChannelInstallationDefault | null>(null);
+  const [permissionLoading, setPermissionLoading] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [adoptingDefault, setAdoptingDefault] = useState(false);
+  const adoptingDefaultRef = useRef(false);
+  const defaultProfileKey = useMemo(() => {
+    try {
+      return buildWecomInstallationDefaultSyncKey(settings);
+    } catch {
+      return "";
+    }
+  }, [settings]);
+  const currentInstallationDefault =
+    defaultProfileEnsuredRef.current === defaultProfileKey ? installationDefault : null;
   const [activationError, setActivationError] = useState<string | null>(null);
   const [runtimeStatus, setRuntimeStatus] = useState<WecomRuntimeStatus | null>(null);
   const [runtimeLoading, setRuntimeLoading] = useState(true);
@@ -421,38 +443,77 @@ export function WecomSection(props: WecomSectionProps) {
   }, [missingConfiguration, onOpenRemote]);
 
   const ensureInstallationDefaultForCurrentSettings = useCallback(async () => {
-    await ensureWecomInstallationDefault(settings);
-  }, [settings]);
+    const current = permissionSettingsRef.current;
+    const key = buildWecomInstallationDefaultSyncKey(current);
+    const result = await ensureWecomInstallationDefault(current);
+    if (buildWecomInstallationDefaultSyncKey(permissionSettingsRef.current) === key) {
+      defaultProfileEnsuredRef.current = key;
+      setInstallationDefault(result);
+    }
+    return result;
+  }, []);
 
   useEffect(() => {
-    if (
-      !settings.wecom.enabled ||
-      !connectorReady ||
-      defaultProfileEnsuredRef.current ||
-      activatingRef.current
-    ) {
+    if (!settings.wecom.enabled || !connectorReady || !defaultProfileKey) {
+      defaultProfileEnsuredRef.current = "";
+      setInstallationDefault(null);
+      setPermissionLoading(false);
       return;
     }
-    activatingRef.current = true;
-    setActivating(true);
-    setActivationError(null);
+    if (defaultProfileEnsuredRef.current === defaultProfileKey) {
+      setPermissionLoading(false);
+      setPermissionError(null);
+      return;
+    }
+    let cancelled = false;
+    setPermissionLoading(true);
+    setPermissionError(null);
     void ensureInstallationDefaultForCurrentSettings()
-      .then(() => {
-        defaultProfileEnsuredRef.current = true;
-      })
       .catch((error) => {
-        setActivationError(error instanceof Error ? error.message : String(error));
+        if (!cancelled) {
+          setPermissionError(error instanceof Error ? error.message : String(error));
+        }
       })
       .finally(() => {
-        activatingRef.current = false;
-        setActivating(false);
+        if (!cancelled) setPermissionLoading(false);
       });
-  }, [connectorReady, ensureInstallationDefaultForCurrentSettings, settings.wecom.enabled]);
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    connectorReady,
+    defaultProfileKey,
+    ensureInstallationDefaultForCurrentSettings,
+    settings.wecom.enabled,
+  ]);
+
+  const handleFollowDesktop = useCallback(async () => {
+    if (!currentInstallationDefault || adoptingDefaultRef.current) return;
+    adoptingDefaultRef.current = true;
+    setAdoptingDefault(true);
+    setPermissionError(null);
+    try {
+      const current = permissionSettingsRef.current;
+      const key = buildWecomInstallationDefaultSyncKey(current);
+      const adopted = await adoptWecomInstallationDefault(current, currentInstallationDefault);
+      if (buildWecomInstallationDefaultSyncKey(permissionSettingsRef.current) === key) {
+        setInstallationDefault(adopted);
+        defaultProfileEnsuredRef.current = key;
+      }
+    } catch (error) {
+      setPermissionError(error instanceof Error ? error.message : String(error));
+      // Refresh the displayed revision after a concurrent permission edit.
+      await ensureInstallationDefaultForCurrentSettings().catch(() => {});
+    } finally {
+      adoptingDefaultRef.current = false;
+      setAdoptingDefault(false);
+    }
+  }, [currentInstallationDefault, ensureInstallationDefaultForCurrentSettings]);
 
   const handleActivationToggle = useCallback(async () => {
     if (activatingRef.current) return;
     if (settings.wecom.enabled) {
-      defaultProfileEnsuredRef.current = false;
+      defaultProfileEnsuredRef.current = "";
       setActivationError(null);
       updateWecomSettings(setSettings, { enabled: false });
       return;
@@ -467,7 +528,6 @@ export function WecomSection(props: WecomSectionProps) {
     setActivationError(null);
     try {
       await ensureInstallationDefaultForCurrentSettings();
-      defaultProfileEnsuredRef.current = true;
       updateWecomSettings(setSettings, { enabled: true });
     } catch (error) {
       setActivationError(error instanceof Error ? error.message : String(error));
@@ -586,6 +646,63 @@ export function WecomSection(props: WecomSectionProps) {
         <p className="whitespace-pre-wrap break-words rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {activationError}
         </p>
+      ) : null}
+
+      {settings.wecom.enabled && defaultProfileKey ? (
+        <div className="space-y-3 rounded-xl border border-border/60 bg-card p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <Shield className="h-4 w-4 text-muted-foreground" />
+              {t("settings.wecomDesktopCapabilities")}
+            </div>
+            {currentInstallationDefault?.followsDesktop ? (
+              <span className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+                <Check className="h-3.5 w-3.5" />
+                {t("settings.wecomFollowingDesktop")}
+              </span>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={permissionLoading || adoptingDefault || !currentInstallationDefault}
+                onClick={() => void handleFollowDesktop()}
+              >
+                {permissionLoading || adoptingDefault ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="h-3.5 w-3.5" />
+                )}
+                {t("settings.wecomFollowDesktop")}
+              </Button>
+            )}
+          </div>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {t(
+              currentInstallationDefault?.followsDesktop
+                ? "settings.wecomFollowingDesktopHint"
+                : "settings.wecomFollowDesktopHint",
+            )}
+          </p>
+          {permissionError ? (
+            <div className="space-y-2 text-xs text-destructive">
+              <p className="whitespace-pre-wrap break-words">{permissionError}</p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setPermissionError(null);
+                  void ensureInstallationDefaultForCurrentSettings().catch((error) => {
+                    setPermissionError(error instanceof Error ? error.message : String(error));
+                  });
+                }}
+              >
+                {t("settings.wecomRefreshPermissions")}
+              </Button>
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       {

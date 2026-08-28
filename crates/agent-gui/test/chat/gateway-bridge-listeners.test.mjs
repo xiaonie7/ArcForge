@@ -165,6 +165,7 @@ function createCommandListenerLoader(
   invoke,
   resolveEffectiveProfile = async () => channelPermissionProfile(),
   principalContext,
+  resolveWecomProfile,
 ) {
   const mocks = {
     react: hookHarness.react,
@@ -174,8 +175,15 @@ function createCommandListenerLoader(
         return () => {};
       },
     },
-    "../../../lib/channelControl": {
-      channelControl: { resolveEffectiveProfile },
+    "../../../lib/wecomPermissionProfile": {
+      resolveWecomPermissionProfile(settings, principal, conversationId) {
+        if (resolveWecomProfile) return resolveWecomProfile(settings, principal, conversationId);
+        return resolveEffectiveProfile({
+          installationId: principal.installationId,
+          userId: principal.externalUserId,
+          conversationId,
+        });
+      },
     },
     "../../../lib/settings": {
       normalizeChatRuntimeControls(value) {
@@ -191,6 +199,91 @@ function createCommandListenerLoader(
   }
   return createTsModuleLoader({
     mocks,
+  });
+}
+
+for (const syncFails of [false, true]) {
+  test(`trusted requests ${syncFails ? "fail closed when desktop sync fails" : "wait for desktop sync before queueing"}`, async () => {
+    const restoreGlobals = installBrowserGlobals();
+    const hookHarness = createHookHarness();
+    const calls = [];
+    const queued = [];
+    const settings = { skills: { enabled: true, selected: ["current-skill"] } };
+    let claim = claimedCommand("compact");
+    let finishSync;
+    const sync = new Promise((resolve, reject) => {
+      finishSync = () => (syncFails ? reject(new Error("desktop sync failed")) : resolve());
+    });
+    let syncStarted = false;
+    try {
+      const loader = createCommandListenerLoader(
+        hookHarness,
+        async (command, payload) => {
+          calls.push({ command, payload });
+          if (command === "gateway_chat_claim_next") {
+            const result = claim;
+            claim = null;
+            return result;
+          }
+          return undefined;
+        },
+        undefined,
+        undefined,
+        async (currentSettings, principal) => {
+          assert.equal(currentSettings, settings);
+          assert.equal(principal.externalUserId, "user-1");
+          syncStarted = true;
+          await sync;
+          return channelPermissionProfile({
+            policy: { executionMode: "tools", allowedSkills: ["current-skill"] },
+          });
+        },
+      );
+      const { useGatewayBridgeListeners } = loader.loadModule(
+        "src/pages/chat/gateway/useGatewayBridgeListeners.ts",
+      );
+      hookHarness.render(() =>
+        useGatewayBridgeListeners({
+          settings,
+          allowWecomGroupMessages: true,
+          currentConversationIdRef: { current: "local-conversation" },
+          conversationRuntimeCacheRef: { current: new Map() },
+          ensureGatewayBridgeConversationReadyRef: { current: async (id) => id },
+          sendActionRef: { current: async () => false },
+          queueGatewayBridgeEventForRequest() {},
+          shouldQueueGatewayChatRequest() {
+            return true;
+          },
+          async enqueueGatewayChatRequest(...args) {
+            queued.push(args);
+            return true;
+          },
+          isConversationRunning() {
+            return false;
+          },
+          getConversationAbortController() {
+            return null;
+          },
+        }),
+      );
+      await waitFor(() => syncStarted, "desktop sync did not start");
+      assert.equal(queued.length, 0);
+      assert.equal(calls.some((call) => call.command === "gateway_chat_mark_started"), false);
+      finishSync();
+      const finalCommand = syncFails ? "gateway_chat_fail" : "gateway_chat_mark_queued_in_gui";
+      await waitFor(() => calls.some((call) => call.command === finalCommand), finalCommand);
+      if (syncFails) {
+        assert.equal(queued.length, 0);
+        assert.equal(calls.some((call) => call.command === "gateway_chat_mark_started"), false);
+      } else {
+        assert.deepEqual(queued[0][3].policy.allowedSkills, ["current-skill"]);
+        assert.ok(Object.isFrozen(queued[0][3].policy.allowedSkills));
+      }
+    } finally {
+      finishSync();
+      hookHarness.cleanup();
+      restoreGlobals();
+    }
   });
 }
 

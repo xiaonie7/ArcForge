@@ -7,6 +7,7 @@ export type SkillAccessPolicy = {
   protectedSkillBaseDirs?: readonly string[];
   allowSkillInventory?: boolean;
   allowSkillManagement?: boolean;
+  /** Controls Skill file writes; it never controls execution of enabled scripts. */
   allowSkillMutation?: boolean;
 };
 
@@ -220,42 +221,6 @@ export function assertSkillManagementAllowed(
       "Ordinary chat runs may only use Skills that are enabled in the chat Skills selector.",
     ].join(" "),
   );
-}
-
-export function isSkillShellExecutionRestricted(policy?: SkillAccessPolicy) {
-  return isSkillAccessPolicyRestrictive(policy) && policy?.allowSkillMutation !== true;
-}
-
-export const SKILL_SHELL_EXECUTION_RESTRICTION =
-  "Running Skill scripts through Bash or ManagedProcess is disabled in this conversation, even when the Skill is enabled for reading. " +
-  "A blocked command has not started and has produced no results. " +
-  "Do not retry with different encoding, interpreter flags, paths, or workspace copies of Skill scripts/configuration; do not reuse cached results. " +
-  "Ask the administrator to provide an authorized execution mechanism. Re-enabling the Skill does not grant execution permission.";
-
-export class SkillShellExecutionBlockedError extends Error {
-  readonly code = "SKILL_EXECUTION_BLOCKED";
-
-  constructor(operation: string, path?: string) {
-    super(
-      `${operation} is blocked [SKILL_EXECUTION_BLOCKED]: ${
-        path ? `Skill path "${path}"` : "the fixed Skills root"
-      } cannot be used for shell execution. ${SKILL_SHELL_EXECUTION_RESTRICTION}`,
-    );
-    this.name = "SkillShellExecutionBlockedError";
-  }
-}
-
-export function assertSkillShellExecutionAllowed(
-  policy: SkillAccessPolicy | undefined,
-  operation: string,
-  path?: string,
-) {
-  // Until a controlled execution mechanism exists, arbitrary shell commands
-  // retain the same permission boundary as Skill mutation. Report the actual
-  // missing capability instead of suggesting that re-enabling the Skill helps.
-  if (isSkillShellExecutionRestricted(policy)) {
-    throw new SkillShellExecutionBlockedError(operation, path);
-  }
 }
 
 export function assertSkillMutationAllowed(

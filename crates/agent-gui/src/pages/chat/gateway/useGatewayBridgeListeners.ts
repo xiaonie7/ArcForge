@@ -1,15 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useEffect, useRef } from "react";
-import { type ChannelPermissionProfile, channelControl } from "../../../lib/channelControl";
+import type { ChannelPermissionProfile } from "../../../lib/channelControl";
 import type { HistoryMessageRef } from "../../../lib/chat/conversation/conversationState";
 import {
   derivePrincipalConversationId,
   type PrincipalContext,
   resolvePrincipalContext,
 } from "../../../lib/security/principalContext";
-import { normalizeChatRuntimeControls, normalizeSystemToolSelection } from "../../../lib/settings";
+import {
+  type AppSettings,
+  normalizeChatRuntimeControls,
+  normalizeSystemToolSelection,
+} from "../../../lib/settings";
 import { createUuid } from "../../../lib/shared/id";
+import { resolveWecomPermissionProfile } from "../../../lib/wecomPermissionProfile";
 import {
   type ActiveGatewayBridgeRequest,
   type ChannelPermissionProfileSnapshot,
@@ -23,6 +28,7 @@ import {
 } from "./gatewayBridgeTypes";
 
 type UseGatewayBridgeListenersParams = GatewayBridgeRuntimeRefs & {
+  settings: AppSettings;
   /** Group WeCom messages are opt-in and checked before queueing or execution. */
   allowWecomGroupMessages: boolean;
   queueGatewayBridgeEventForRequest: (
@@ -399,11 +405,11 @@ export function useGatewayBridgeListeners(params: UseGatewayBridgeListenersParam
         }
         let resolvedPermissionProfile: ChannelPermissionProfile | null;
         try {
-          resolvedPermissionProfile = await channelControl.resolveEffectiveProfile({
-            installationId: principal.installationId,
-            userId: principal.externalUserId,
-            conversationId: principal.chatType === "group" ? principal.chatId : undefined,
-          });
+          resolvedPermissionProfile = await resolveWecomPermissionProfile(
+            latestParamsRef.current.settings,
+            principal,
+            principal.chatType === "group" ? principal.chatId : undefined,
+          );
         } catch (error) {
           const message = asErrorMessage(
             error,

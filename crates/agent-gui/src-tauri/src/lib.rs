@@ -141,6 +141,7 @@ macro_rules! app_invoke_handler {
             commands::channel_control::channel_profiles_list,
             commands::channel_control::channel_profile_save,
             commands::channel_control::channel_installation_default_ensure,
+            commands::channel_control::channel_installation_default_adopt,
             commands::channel_control::channel_principal_bind,
             commands::channel_control::channel_profile_resolve,
             commands::channel_control::channel_profile_resolve_effective,

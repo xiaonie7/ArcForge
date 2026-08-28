@@ -860,14 +860,26 @@ test("Bash tool allows enabled Skill scripts by direct absolute path without cd"
   assert.equal(calls[0].args.command, command);
 });
 
-test("Bash blocks direct Skill execution when the restrictive policy denies mutation", async () => {
+test("Bash runs an enabled Skill script when the restrictive policy denies mutation", async () => {
   const calls = [];
   const loader = createTsModuleLoader({
     mocks: {
       "@tauri-apps/api/core": {
         async invoke(command, args) {
           calls.push({ command, args });
-          throw new Error("unexpected invoke");
+          assert.equal(command, "shell_run");
+          return {
+            exit_code: 0,
+            shell: "zsh",
+            stdout: "ok\n",
+            stderr: "",
+            stdout_truncated: false,
+            stderr_truncated: false,
+            timed_out: false,
+            cancelled: false,
+            effective_timeout_ms: args.timeout_ms,
+            duration_ms: 12,
+          };
         },
       },
     },
@@ -886,37 +898,44 @@ test("Bash blocks direct Skill execution when the restrictive policy denies muta
     },
   });
 
+  const command = "python3 /Users/me/.arcforge/skills/review/scripts/review.py";
   const result = await bundle.executeToolCall({
     type: "toolCall",
     id: "blocked-readonly-skill-bash",
     name: "Bash",
     arguments: {
-      command: "python3 /Users/me/.arcforge/skills/review/scripts/review.py",
+      command,
       timeout_ms: 1000,
     },
   });
 
-  assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /Bash command is blocked/);
-  assert.match(result.content[0].text, /SKILL_EXECUTION_BLOCKED/);
-  assert.match(result.content[0].text, /has not started/);
-  assert.doesNotMatch(result.content[0].text, /Enable the Skill in the chat Skills selector/);
-  assert.deepEqual(result.details, {
-    code: "SKILL_EXECUTION_BLOCKED",
-    execution_started: false,
-    retryable: false,
-  });
-  assert.deepEqual(calls, []);
+  assert.equal(result.isError, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.command, command);
+  assert.equal(calls[0].args.workdir, "/repo");
+  assert.match(bundle.tools[0].description, /Skill script execution is separate from Skill file mutation/);
 });
 
-test("Bash reports a non-retryable execution denial for enabled Skill cwd on Windows", async () => {
+test("Bash keeps Skill path restrictions separate from mutation policy on Windows", async () => {
   const calls = [];
   const loader = createTsModuleLoader({
     mocks: {
       "@tauri-apps/api/core": {
         async invoke(command, args) {
           calls.push({ command, args });
-          throw new Error("unexpected invoke");
+          assert.equal(command, "shell_run");
+          return {
+            exit_code: 0,
+            shell: "powershell",
+            stdout: "ok\n",
+            stderr: "",
+            stdout_truncated: false,
+            stderr_truncated: false,
+            timed_out: false,
+            cancelled: false,
+            effective_timeout_ms: args.timeout_ms,
+            duration_ms: 1,
+          };
         },
       },
     },
@@ -940,8 +959,6 @@ test("Bash reports a non-retryable execution denial for enabled Skill cwd on Win
     "$env:PYTHONIOENCODING='utf-8'; python resolve_row_scope.py --wecom-userid test-user --bot-id test-bot",
     "python -B resolve_row_scope.py --help",
     "Write-Output readonly",
-    "python C:/Users/me/.arcforge/skills/data-analyst/scripts/resolve_row_scope.py",
-    "cd ..; python scripts/resolve_row_scope.py",
   ]) {
     const result = await bundle.executeToolCall({
       type: "toolCall",
@@ -949,20 +966,38 @@ test("Bash reports a non-retryable execution denial for enabled Skill cwd on Win
       name: "Bash",
       arguments: { cwd: "skill://data-analyst/scripts", command },
     });
-    assert.equal(result.isError, true);
-    assert.deepEqual(result.details, {
-      code: "SKILL_EXECUTION_BLOCKED",
-      execution_started: false,
-      retryable: false,
-    });
-    assert.match(result.content[0].text, /Re-enabling the Skill does not grant execution permission/);
-    assert.match(result.content[0].text, /do not reuse cached results/);
+    assert.equal(result.isError, false);
   }
-  assert.deepEqual(calls, []);
+  assert.equal(calls.length, 4);
+
+  const absolutePathResult = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "blocked-skill-cwd-absolute",
+    name: "Bash",
+    arguments: {
+      cwd: "skill://data-analyst/scripts",
+      command: "python C:/Users/me/.arcforge/skills/data-analyst/scripts/resolve_row_scope.py",
+    },
+  });
+  assert.equal(absolutePathResult.isError, true);
+  assert.match(absolutePathResult.content[0].text, /must use paths relative to that cwd/);
+
+  const escapedPathResult = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "blocked-skill-cwd-parent",
+    name: "Bash",
+    arguments: {
+      cwd: "skill://data-analyst/scripts",
+      command: "cd ..; python scripts/resolve_row_scope.py",
+    },
+  });
+  assert.equal(escapedPathResult.isError, true);
+  assert.match(escapedPathResult.content[0].text, /cannot use \.\.|cd \.\./);
+  assert.equal(calls.length, 4);
 
   for (const tool of bundle.tools) {
-    assert.match(tool.description, /Running Skill scripts through Bash or ManagedProcess is disabled/);
-    assert.doesNotMatch(tool.description, /Running a Skill script: set cwd/);
+    assert.match(tool.description, /Running a Skill script: set cwd/);
+    assert.match(tool.description, /Skill script execution is separate from Skill file mutation/);
   }
 });
 
@@ -999,7 +1034,7 @@ test("Bash keeps authorized Windows Skill cwd execution working", async () => {
     skillAccessPolicy: {
       allowedSkillNames: ["data-analyst"],
       allowedSkillBaseDirs: ["data-analyst"],
-      allowSkillMutation: true,
+      allowSkillMutation: false,
     },
   });
   const result = await bundle.executeToolCall({
@@ -1057,14 +1092,29 @@ test("Bash empty Skill allowlist rejects direct absolute Skill execution", async
   assert.deepEqual(calls, []);
 });
 
-test("ManagedProcess applies the same read-only Skill policy before start", async () => {
+test("ManagedProcess starts an enabled Skill process when mutation is denied", async () => {
   const calls = [];
   const loader = createTsModuleLoader({
     mocks: {
       "@tauri-apps/api/core": {
         async invoke(command, args) {
           calls.push({ command, args });
-          throw new Error("unexpected invoke");
+          assert.equal(command, "managed_process_start");
+          return {
+            process: {
+              id: "proc-skill",
+              label: null,
+              command: args.command,
+              cwd: "/Users/me/.arcforge/skills/review/scripts",
+              shell: "zsh",
+              pid: 456,
+              log_path: "/tmp/proc-skill.log",
+              started_at: 10,
+              finished_at: null,
+              exit_code: null,
+              running: true,
+            },
+          };
         },
       },
     },
@@ -1094,15 +1144,10 @@ test("ManagedProcess applies the same read-only Skill policy before start", asyn
     },
   });
 
-  assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /ManagedProcess command is blocked/);
-  assert.match(result.content[0].text, /SKILL_EXECUTION_BLOCKED/);
-  assert.deepEqual(result.details, {
-    code: "SKILL_EXECUTION_BLOCKED",
-    execution_started: false,
-    retryable: false,
-  });
-  assert.deepEqual(calls, []);
+  assert.equal(result.isError, false);
+  assert.match(result.content[0].text, /ManagedProcess started/);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.cwd, "/Users/me/.arcforge/skills/review/scripts");
 });
 
 test("ManagedProcess empty Skill allowlist rejects direct absolute Skill execution", async () => {

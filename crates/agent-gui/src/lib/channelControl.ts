@@ -39,6 +39,8 @@ export type ChannelPrincipalBinding = {
 export type ChannelInstallationDefault = {
   profile: ChannelPermissionProfile;
   binding: ChannelPrincipalBinding;
+  followsDesktop: boolean;
+  profileCurrentRevision: number;
 };
 
 export type ChannelDeliveryTarget = {
@@ -89,6 +91,21 @@ export const channelControl = {
     policy: ChannelPermissionPolicy;
   }) =>
     invoke<ChannelInstallationDefault>("channel_installation_default_ensure", {
+      input,
+    }),
+  adoptInstallationDefault: (input: {
+    installationId: string;
+    name: string;
+    policy: ChannelPermissionPolicy;
+    expected: {
+      bindingId: string;
+      profileId: string;
+      profileRevision: number;
+      profileCurrentRevision: number;
+      policyHash: string;
+    };
+  }) =>
+    invoke<ChannelInstallationDefault>("channel_installation_default_adopt", {
       input,
     }),
   bindPrincipal: (input: {

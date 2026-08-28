@@ -199,7 +199,7 @@ test("WeCom settings do not expose a per-user permission editor", () => {
   assert.doesNotMatch(i18nSource, /settings\.wecomAccessControl|settings\.wecomAddAccessRule/);
 });
 
-test("WeCom activation persists an immutable installation default before enabling", () => {
+test("WeCom activation prepares a default and settings changes refresh its capability key", () => {
   assert.match(
     wecomSectionSource,
     /await ensureInstallationDefaultForCurrentSettings\(\)[\s\S]*updateWecomSettings\(setSettings, \{ enabled: true \}\)/,
@@ -210,11 +210,34 @@ test("WeCom activation persists an immutable installation default before enablin
   assert.match(wecomSectionSource, /defaultProfileEnsuredRef/);
   assert.match(
     wecomSectionSource,
-    /!settings\.wecom\.enabled[\s\S]*defaultProfileEnsuredRef\.current[\s\S]*ensureInstallationDefaultForCurrentSettings/,
+    /defaultProfileEnsuredRef\.current === defaultProfileKey[\s\S]*ensureInstallationDefaultForCurrentSettings/,
   );
-  assert.match(appSource, /if \(!settingsReady \|\| !settings\.wecom\.enabled/);
+  assert.match(appSource, /if \(!settingsReady\) return;/);
   assert.match(appSource, /ensureWecomInstallationDefault\(settings\)/);
-  assert.match(appSource, /ensuredWecomInstallationRef\.current === installationId/);
+  assert.match(appSource, /buildWecomInstallationDefaultSyncKey\(settings\)/);
+  assert.match(appSource, /pendingWecomDefaultRef\.current\?\.key === key/);
+  assert.match(appSource, /ensuredWecomSettingsKeyRef\.current === key/);
+  assert.doesNotMatch(appSource, /ensuredWecomInstallationRef/);
+});
+
+test("legacy default adoption is explicit and is not part of background activation", () => {
+  assert.match(wecomSectionSource, /onClick=\{\(\) => void handleFollowDesktop\(\)\}/);
+  assert.match(wecomSectionSource, /adoptWecomInstallationDefault\(current, currentInstallationDefault\)/);
+  const followStart = wecomSectionSource.indexOf("const handleFollowDesktop");
+  const activationStart = wecomSectionSource.indexOf("const handleActivationToggle");
+  assert.ok(followStart >= 0 && activationStart > followStart);
+  assert.doesNotMatch(wecomSectionSource.slice(activationStart), /await adoptWecomInstallationDefault/);
+  assert.doesNotMatch(appSource, /adoptWecomInstallationDefault/);
+  for (const key of [
+    "settings.wecomDesktopCapabilities",
+    "settings.wecomFollowingDesktop",
+    "settings.wecomFollowDesktop",
+    "settings.wecomFollowingDesktopHint",
+    "settings.wecomFollowDesktopHint",
+    "settings.wecomRefreshPermissions",
+  ]) {
+    assert.equal(i18nSource.split(`"${key}"`).length - 1, 2, key);
+  }
 });
 
 test("WeCom autosave waits for Remote Gateway settings before validating WeCom", async () => {

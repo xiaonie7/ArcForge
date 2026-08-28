@@ -45,6 +45,8 @@ pub struct PrincipalBinding {
 pub struct InstallationDefault {
     pub profile: PermissionProfile,
     pub binding: PrincipalBinding,
+    pub follows_desktop: bool,
+    pub profile_current_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -129,6 +131,25 @@ pub struct EnsureInstallationDefault {
     pub installation_id: String,
     pub name: String,
     pub policy: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallationDefaultExpectation {
+    pub binding_id: String,
+    pub profile_id: String,
+    pub profile_revision: u64,
+    pub profile_current_revision: u64,
+    pub policy_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptInstallationDefault {
+    pub installation_id: String,
+    pub name: String,
+    pub policy: Value,
+    pub expected: InstallationDefaultExpectation,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -361,7 +382,10 @@ impl ChannelControlStore {
         let now = now_ms();
         let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut conn = self.lock()?;
-        let current: Option<(u64, i64)> = conn
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let current: Option<(u64, i64)> = tx
             .query_row(
                 "SELECT current_revision,created_at FROM channel_permission_profiles WHERE id=?1",
                 params![id],
@@ -369,10 +393,16 @@ impl ChannelControlStore {
             )
             .optional()
             .map_err(|e| e.to_string())?;
-        let revision = current.map(|(r, _)| r + 1).unwrap_or(1);
+        let revision = next_profile_revision(current.map(|(r, _)| r).unwrap_or(0))?;
         let created = current.map(|(_, c)| c).unwrap_or(now);
         let json = serde_json::to_string(&policy).map_err(|e| e.to_string())?;
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        // Explicit edits transfer ownership back to the desktop user, even
+        // when only the profile name or enabled state changes.
+        tx.execute(
+            "DELETE FROM channel_managed_installation_defaults WHERE profile_id=?1",
+            params![id],
+        )
+        .map_err(|e| e.to_string())?;
         tx.execute("INSERT OR IGNORE INTO channel_permission_profiles (id,name,current_revision,enabled,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6)", params![id,input.name,revision as i64,input.enabled as i64,created,now]).map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO channel_permission_profile_revisions (profile_id,revision,policy_json,policy_hash,created_at) VALUES (?1,?2,?3,?4,?5)", params![id,revision as i64,json,policy_hash,now]).map_err(|e| e.to_string())?;
         tx.execute("INSERT INTO channel_permission_profiles (id,name,current_revision,enabled,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET name=excluded.name,current_revision=excluded.current_revision,enabled=excluded.enabled,updated_at=excluded.updated_at", params![id,input.name,revision as i64,input.enabled as i64,created,now]).map_err(|e| e.to_string())?;
@@ -395,9 +425,20 @@ impl ChannelControlStore {
         require_non_empty("principal id", &input.principal_id)?;
         let now = now_ms();
         let id = input.id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let conn = self.lock()?;
-        let revision: i64 = conn.query_row("SELECT current_revision FROM channel_permission_profiles WHERE id=?1 AND enabled=1", params![input.profile_id], |r| r.get(0)).map_err(|e| format!("enabled profile not found: {e}"))?;
-        conn.execute("INSERT INTO channel_principal_bindings (id,installation_id,principal_type,principal_id,profile_id,profile_revision,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(installation_id,principal_type,principal_id) DO UPDATE SET id=excluded.id,profile_id=excluded.profile_id,profile_revision=excluded.profile_revision,updated_at=excluded.updated_at", params![id,input.installation_id,input.principal_type,input.principal_id,input.profile_id,revision,now]).map_err(|e| e.to_string())?;
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let revision: i64 = tx.query_row("SELECT current_revision FROM channel_permission_profiles WHERE id=?1 AND enabled=1", params![input.profile_id], |r| r.get(0)).map_err(|e| format!("enabled profile not found: {e}"))?;
+        if input.principal_type == "installation" && input.principal_id == "*" {
+            tx.execute(
+                "DELETE FROM channel_managed_installation_defaults WHERE installation_id=?1",
+                params![input.installation_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.execute("INSERT INTO channel_principal_bindings (id,installation_id,principal_type,principal_id,profile_id,profile_revision,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(installation_id,principal_type,principal_id) DO UPDATE SET id=excluded.id,profile_id=excluded.profile_id,profile_revision=excluded.profile_revision,updated_at=excluded.updated_at", params![id,input.installation_id,input.principal_type,input.principal_id,input.profile_id,revision,now]).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(PrincipalBinding {
             id,
             installation_id: input.installation_id,
@@ -424,31 +465,90 @@ impl ChannelControlStore {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
         if let Some(existing) = read_installation_default(&tx, &input.installation_id)? {
+            // Ownership also checks the current profile revision. A binding
+            // can still point at an older revision after a manual profile edit.
+            if existing.follows_desktop && existing.profile.policy_hash != policy_hash {
+                let revision = next_profile_revision(existing.profile_current_revision)?;
+                tx.execute(
+                    "INSERT INTO channel_permission_profile_revisions (profile_id,revision,policy_json,policy_hash,created_at) VALUES (?1,?2,?3,?4,?5)",
+                    params![existing.profile.id, revision as i64, policy_json, policy_hash, now],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "UPDATE channel_permission_profiles SET current_revision=?1,updated_at=?2 WHERE id=?3",
+                    params![revision as i64, now, existing.profile.id],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "UPDATE channel_principal_bindings SET profile_revision=?1,updated_at=?2 WHERE id=?3 AND installation_id=?4 AND principal_type='installation' AND principal_id='*'",
+                    params![revision as i64, now, existing.binding.id, input.installation_id],
+                )
+                .map_err(|e| e.to_string())?;
+                tx.execute(
+                    "UPDATE channel_managed_installation_defaults SET last_synced_revision=?1 WHERE installation_id=?2",
+                    params![revision as i64, input.installation_id],
+                )
+                .map_err(|e| e.to_string())?;
+                let synced = read_installation_default(&tx, &input.installation_id)?
+                    .ok_or_else(|| "installation default disappeared during sync".to_string())?;
+                tx.commit().map_err(|e| e.to_string())?;
+                return Ok(synced);
+            }
             tx.commit().map_err(|e| e.to_string())?;
             return Ok(existing);
         }
 
-        let profile_id = Uuid::new_v4().to_string();
-        let binding_id = Uuid::new_v4().to_string();
-        tx.execute(
-            "INSERT INTO channel_permission_profiles (id,name,current_revision,enabled,created_at,updated_at) VALUES (?1,?2,1,1,?3,?3)",
-            params![profile_id, input.name, now],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT INTO channel_permission_profile_revisions (profile_id,revision,policy_json,policy_hash,created_at) VALUES (?1,1,?2,?3,?4)",
-            params![profile_id, policy_json, policy_hash, now],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT INTO channel_principal_bindings (id,installation_id,principal_type,principal_id,profile_id,profile_revision,updated_at) VALUES (?1,?2,'installation','*',?3,1,?4)",
-            params![binding_id, input.installation_id, profile_id, now],
-        )
-        .map_err(|e| e.to_string())?;
-        let created = read_installation_default(&tx, &input.installation_id)?
-            .ok_or_else(|| "installation default was not created".to_string())?;
+        let created = create_managed_installation_default_in_transaction(
+            &tx,
+            &input.installation_id,
+            &input.name,
+            &policy_json,
+            &policy_hash,
+            now,
+        )?;
         tx.commit().map_err(|e| e.to_string())?;
         Ok(created)
+    }
+
+    pub fn adopt_installation_default(
+        &self,
+        input: AdoptInstallationDefault,
+    ) -> Result<InstallationDefault, String> {
+        require_non_empty("installation id", &input.installation_id)?;
+        require_non_empty("profile name", &input.name)?;
+        let policy = normalize_permission_policy(&input.policy)?;
+        let policy_hash = policy_hash(&policy)?;
+        let policy_json = serde_json::to_string(&policy).map_err(|e| e.to_string())?;
+        let mut conn = self.lock()?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        let existing = read_installation_default(&tx, &input.installation_id)?;
+        let matches_expectation = existing.as_ref().is_some_and(|existing| {
+            existing.binding.id == input.expected.binding_id
+                && existing.profile.id == input.expected.profile_id
+                && existing.binding.profile_revision == input.expected.profile_revision
+                && existing.profile_current_revision == input.expected.profile_current_revision
+                && existing.profile.policy_hash == input.expected.policy_hash
+        });
+        if !matches_expectation {
+            return Err(
+                "installation default conflict: reload the current profile before following desktop permissions"
+                    .to_string(),
+            );
+        }
+        // Create a new profile so explicit user and conversation bindings keep
+        // their previous policy, even if they share the old default profile.
+        let adopted = create_managed_installation_default_in_transaction(
+            &tx,
+            &input.installation_id,
+            &input.name,
+            &policy_json,
+            &policy_hash,
+            now_ms(),
+        )?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(adopted)
     }
 
     pub fn resolve_profile(
@@ -597,6 +697,55 @@ fn profile_from_row(
     ))
 }
 
+fn next_profile_revision(current: u64) -> Result<u64, String> {
+    current
+        .checked_add(1)
+        .filter(|revision| *revision <= i64::MAX as u64)
+        .ok_or_else(|| "permission profile revision exhausted".to_string())
+}
+
+/// The caller must hold an immediate transaction and either have observed no
+/// default or verified the user's expectation before replacing its binding.
+fn create_managed_installation_default_in_transaction(
+    conn: &Connection,
+    installation_id: &str,
+    name: &str,
+    policy_json: &str,
+    policy_hash: &str,
+    now: i64,
+) -> Result<InstallationDefault, String> {
+    let profile_id = Uuid::new_v4().to_string();
+    let binding_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "DELETE FROM channel_managed_installation_defaults WHERE installation_id=?1",
+        params![installation_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO channel_permission_profiles (id,name,current_revision,enabled,created_at,updated_at) VALUES (?1,?2,1,1,?3,?3)",
+        params![profile_id, name, now],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO channel_permission_profile_revisions (profile_id,revision,policy_json,policy_hash,created_at) VALUES (?1,1,?2,?3,?4)",
+        params![profile_id, policy_json, policy_hash, now],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO channel_principal_bindings (id,installation_id,principal_type,principal_id,profile_id,profile_revision,updated_at) VALUES (?1,?2,'installation','*',?3,1,?4)
+         ON CONFLICT(installation_id,principal_type,principal_id) DO UPDATE SET id=excluded.id,profile_id=excluded.profile_id,profile_revision=excluded.profile_revision,updated_at=excluded.updated_at",
+        params![binding_id, installation_id, profile_id, now],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO channel_managed_installation_defaults (installation_id,profile_id,binding_id,last_synced_revision) VALUES (?1,?2,?3,1)",
+        params![installation_id, profile_id, binding_id],
+    )
+    .map_err(|e| e.to_string())?;
+    read_installation_default(conn, installation_id)?
+        .ok_or_else(|| "installation default was not created".to_string())
+}
+
 fn read_installation_default(
     conn: &Connection,
     installation_id: &str,
@@ -612,16 +761,25 @@ fn read_installation_default(
         i64,
         i64,
         i64,
+        i64,
+        bool,
     );
     let raw: Option<Raw> = conn
         .query_row(
-            "SELECT b.id,b.updated_at,p.id,p.name,b.profile_revision,r.policy_json,r.policy_hash,p.enabled,p.created_at,p.updated_at
+            "SELECT b.id,b.updated_at,p.id,p.name,b.profile_revision,r.policy_json,r.policy_hash,p.enabled,p.created_at,p.updated_at,p.current_revision,
+                    EXISTS(
+                        SELECT 1 FROM channel_managed_installation_defaults m
+                        WHERE m.installation_id=b.installation_id
+                          AND m.profile_id=b.profile_id AND m.binding_id=b.id
+                          AND m.last_synced_revision=b.profile_revision
+                          AND p.current_revision=b.profile_revision AND p.enabled=1
+                    )
              FROM channel_principal_bindings b
              JOIN channel_permission_profiles p ON p.id=b.profile_id
              JOIN channel_permission_profile_revisions r ON r.profile_id=b.profile_id AND r.revision=b.profile_revision
              WHERE b.installation_id=?1 AND b.principal_type='installation' AND b.principal_id='*'",
             params![installation_id],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?)),
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,row.get(10)?,row.get(11)?)),
         )
         .optional()
         .map_err(|e| e.to_string())?;
@@ -647,6 +805,8 @@ fn read_installation_default(
             updated_at: raw.1,
         },
         profile,
+        follows_desktop: raw.11,
+        profile_current_revision: raw.10 as u64,
     }))
 }
 fn parse_profile(
@@ -871,8 +1031,22 @@ fn outbox_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DeliveryOutboxEn
 pub fn initialize_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE IF NOT EXISTS channel_control_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS channel_permission_profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL,current_revision INTEGER NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS channel_permission_profile_revisions (profile_id TEXT NOT NULL,revision INTEGER NOT NULL,policy_json TEXT NOT NULL,policy_hash TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(profile_id,revision),FOREIGN KEY(profile_id) REFERENCES channel_permission_profiles(id)); CREATE TABLE IF NOT EXISTS channel_principal_bindings (id TEXT PRIMARY KEY,installation_id TEXT NOT NULL,principal_type TEXT NOT NULL,principal_id TEXT NOT NULL,profile_id TEXT NOT NULL,profile_revision INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(installation_id,principal_type,principal_id),FOREIGN KEY(profile_id,profile_revision) REFERENCES channel_permission_profile_revisions(profile_id,revision)); CREATE INDEX IF NOT EXISTS idx_channel_bindings_profile ON channel_principal_bindings(profile_id); CREATE TABLE IF NOT EXISTS channel_delivery_targets (id TEXT PRIMARY KEY,channel TEXT NOT NULL,installation_id TEXT NOT NULL,external_target_id TEXT NOT NULL,target_type TEXT NOT NULL,display_name TEXT NOT NULL DEFAULT '',enabled INTEGER NOT NULL DEFAULT 1,validation_status TEXT NOT NULL DEFAULT 'pending',revision INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(channel,installation_id,target_type,external_target_id)); CREATE TABLE IF NOT EXISTS channel_delivery_outbox (id TEXT PRIMARY KEY,target_id TEXT NOT NULL,run_id TEXT,idempotency_key TEXT NOT NULL UNIQUE,body TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('prepared','sending','sent','failed','unknown')),attempt_count INTEGER NOT NULL DEFAULT 0,lease_until INTEGER,last_error TEXT,sent_at INTEGER,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,FOREIGN KEY(target_id) REFERENCES channel_delivery_targets(id)); CREATE INDEX IF NOT EXISTS idx_channel_outbox_claim ON channel_delivery_outbox(status,lease_until,created_at); CREATE INDEX IF NOT EXISTS idx_channel_outbox_run ON channel_delivery_outbox(run_id,status);")
         .map_err(|e| format!("initialize channel control schema failed: {e}"))?;
+    // Existing defaults deliberately receive no ownership marker. Their origin
+    // cannot be inferred safely; only an explicit adoption can claim them.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS channel_managed_installation_defaults (
+            installation_id TEXT PRIMARY KEY,
+            profile_id TEXT NOT NULL UNIQUE,
+            binding_id TEXT NOT NULL UNIQUE,
+            last_synced_revision INTEGER NOT NULL,
+            FOREIGN KEY(profile_id,last_synced_revision)
+                REFERENCES channel_permission_profile_revisions(profile_id,revision),
+            FOREIGN KEY(binding_id) REFERENCES channel_principal_bindings(id)
+        );",
+    )
+    .map_err(|e| format!("initialize managed installation defaults failed: {e}"))?;
     conn.execute(
-        "INSERT INTO channel_control_meta (key,value) VALUES ('schema_version','1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        "INSERT INTO channel_control_meta (key,value) VALUES ('schema_version','2') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [],
     )
     .map_err(|e| format!("stamp channel control schema failed: {e}"))?;
@@ -903,6 +1077,135 @@ fn recover_expired_sends(conn: &Connection, now: i64) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn default_input(skills: &[&str]) -> EnsureInstallationDefault {
+        EnsureInstallationDefault {
+            installation_id: "wecom-bot".into(),
+            name: "WeCom bot default".into(),
+            policy: serde_json::json!({"executionMode":"tools","allowedSkills":skills}),
+        }
+    }
+
+    fn current_default(store: &ChannelControlStore) -> InstallationDefault {
+        read_installation_default(&store.lock().unwrap(), "wecom-bot")
+            .unwrap()
+            .unwrap()
+    }
+
+    fn default_expectation(default: &InstallationDefault) -> InstallationDefaultExpectation {
+        InstallationDefaultExpectation {
+            binding_id: default.binding.id.clone(),
+            profile_id: default.profile.id.clone(),
+            profile_revision: default.binding.profile_revision,
+            profile_current_revision: default.profile_current_revision,
+            policy_hash: default.profile.policy_hash.clone(),
+        }
+    }
+
+    fn adoption_input(default: &InstallationDefault) -> AdoptInstallationDefault {
+        let input = default_input(&["read", "scripts"]);
+        AdoptInstallationDefault {
+            installation_id: input.installation_id,
+            name: input.name,
+            policy: input.policy,
+            expected: default_expectation(default),
+        }
+    }
+
+    fn legacy_default(store: &ChannelControlStore) -> InstallationDefault {
+        let input = default_input(&["read"]);
+        let profile = store
+            .save_profile(SavePermissionProfile {
+                id: None,
+                name: input.name,
+                policy: input.policy,
+                enabled: true,
+            })
+            .unwrap();
+        store
+            .bind_principal(SavePrincipalBinding {
+                id: None,
+                installation_id: input.installation_id,
+                principal_type: "installation".into(),
+                principal_id: "*".into(),
+                profile_id: profile.id,
+            })
+            .unwrap();
+        current_default(store)
+    }
+
+    fn revision_count(store: &ChannelControlStore, profile_id: &str) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM channel_permission_profile_revisions WHERE profile_id=?1",
+                params![profile_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn managed_default_syncs_the_complete_policy_with_immutable_revisions() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        assert!(original.follows_desktop);
+        assert_eq!(original.profile_current_revision, 1);
+        let mut input = default_input(&["read", "scripts"]);
+        input.policy["allowedSystemTools"] = serde_json::json!(["execute"]);
+        input.policy["allowedMcpServers"] = serde_json::json!(["business"]);
+        input.policy["workdir"] = serde_json::json!("E:/workspace");
+        input.policy["memoryEnabled"] = serde_json::json!(true);
+        input.policy["maxDurationSeconds"] = serde_json::json!(300);
+        let expected_policy = normalize_permission_policy(&input.policy).unwrap();
+        let synced = store.ensure_installation_default(input).unwrap();
+        assert_eq!(synced.profile.id, original.profile.id);
+        assert_eq!(synced.binding.id, original.binding.id);
+        assert_eq!(synced.profile.revision, 2);
+        assert_eq!(synced.binding.profile_revision, 2);
+        assert_eq!(synced.profile_current_revision, 2);
+        assert!(synced.follows_desktop);
+        assert_eq!(synced.profile.policy, expected_policy);
+        assert_eq!(
+            synced.profile.policy_hash,
+            policy_hash(&expected_policy).unwrap()
+        );
+        assert_ne!(synced.profile.policy_hash, original.profile.policy_hash);
+        assert_eq!(revision_count(&store, &original.profile.id), 2);
+        let stored_original: (String, String) = store.lock().unwrap().query_row(
+            "SELECT policy_json,policy_hash FROM channel_permission_profile_revisions WHERE profile_id=?1 AND revision=1",
+            params![original.profile.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored_original.0).unwrap(),
+            original.profile.policy
+        );
+        assert_eq!(stored_original.1, original.profile.policy_hash);
+        assert_eq!(store.list_profiles().unwrap(), vec![synced.profile]);
+    }
+
+    #[test]
+    fn managed_default_same_normalized_hash_is_a_complete_noop() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        let mut input = default_input(&["read"]);
+        input.policy = serde_json::json!({
+            "nativeWebSearchEnabled": false,
+            "allowedSkills": ["read"],
+            "allowEmptyWorkdir": false,
+            "executionMode": "tools"
+        });
+        let unchanged = store.ensure_installation_default(input).unwrap();
+        assert_eq!(unchanged, original);
+        assert_eq!(revision_count(&store, &original.profile.id), 1);
+    }
+
     #[test]
     fn profile_revision_and_hash_are_stable() {
         let store = ChannelControlStore::open_in_memory().unwrap();
@@ -928,6 +1231,50 @@ mod tests {
         assert_eq!(a.policy["allowEmptyWorkdir"], false);
         assert_eq!(a.policy["nativeWebSearchEnabled"], false);
     }
+    #[test]
+    fn managed_default_sync_preserves_user_and_group_bindings() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        let principals = [
+            ("wecom-bot", "user", "alice"),
+            ("wecom-bot", "conversation", "room"),
+            ("wecom-bot", "group", "legacy-room"),
+            ("other-bot", "installation", "*"),
+        ];
+        for (installation, principal_type, principal_id) in principals {
+            store
+                .bind_principal(SavePrincipalBinding {
+                    id: None,
+                    installation_id: installation.into(),
+                    principal_type: principal_type.into(),
+                    principal_id: principal_id.into(),
+                    profile_id: original.profile.id.clone(),
+                })
+                .unwrap();
+        }
+        let synced = store
+            .ensure_installation_default(default_input(&["read", "scripts"]))
+            .unwrap();
+        assert!(synced.follows_desktop);
+        assert_eq!(synced.profile.revision, 2);
+        for (installation, principal_type, principal_id) in principals {
+            let frozen = store
+                .resolve_profile(installation, principal_type, principal_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(frozen.revision, 1);
+            assert_eq!(frozen.policy, original.profile.policy);
+            assert_eq!(frozen.policy_hash, original.profile.policy_hash);
+        }
+        let fallback = store
+            .resolve_effective_profile("wecom-bot", "bob", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fallback, synced.profile);
+    }
+
     #[test]
     fn binding_freezes_the_profile_revision() {
         let store = ChannelControlStore::open_in_memory().unwrap();
@@ -1045,6 +1392,376 @@ mod tests {
         );
     }
     #[test]
+    fn manual_profile_edits_and_disabling_stop_default_sync() {
+        for (enabled, keep_policy) in [(true, false), (true, true), (false, true)] {
+            let store = ChannelControlStore::open_in_memory().unwrap();
+            let original = store
+                .ensure_installation_default(default_input(&["read"]))
+                .unwrap();
+            let edited = store
+                .save_profile(SavePermissionProfile {
+                    id: Some(original.profile.id.clone()),
+                    name: "Manual default".into(),
+                    policy: if keep_policy {
+                        original.profile.policy.clone()
+                    } else {
+                        serde_json::json!({"executionMode":"text","allowedSkills":[]})
+                    },
+                    enabled,
+                })
+                .unwrap();
+            let before = current_default(&store);
+            assert!(!before.follows_desktop);
+            assert_eq!(before.profile_current_revision, 2);
+            assert_eq!(before.binding.profile_revision, 1);
+            let after = store
+                .ensure_installation_default(default_input(&["scripts"]))
+                .unwrap();
+            assert_eq!(after, before);
+            assert_eq!(store.list_profiles().unwrap(), vec![edited]);
+            assert_eq!(revision_count(&store, &original.profile.id), 2);
+            if !enabled {
+                assert!(store
+                    .resolve_effective_profile("wecom-bot", "alice", None)
+                    .unwrap()
+                    .is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_installation_rebinding_stops_sync_even_for_the_same_profile() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        store
+            .bind_principal(SavePrincipalBinding {
+                id: Some(original.binding.id.clone()),
+                installation_id: "wecom-bot".into(),
+                principal_type: "installation".into(),
+                principal_id: "*".into(),
+                profile_id: original.profile.id.clone(),
+            })
+            .unwrap();
+        let before = current_default(&store);
+        assert!(!before.follows_desktop);
+        let after = store
+            .ensure_installation_default(default_input(&["scripts"]))
+            .unwrap();
+        assert_eq!(before, after);
+        assert_eq!(revision_count(&store, &original.profile.id), 1);
+    }
+
+    #[test]
+    fn schema_upgrade_does_not_claim_legacy_defaults() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let mut original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        {
+            let conn = store.lock().unwrap();
+            conn.execute_batch(
+                "DROP TABLE channel_managed_installation_defaults;
+                 UPDATE channel_control_meta SET value='1' WHERE key='schema_version';",
+            )
+            .unwrap();
+            initialize_schema(&conn).unwrap();
+            initialize_schema(&conn).unwrap();
+            let version: String = conn
+                .query_row(
+                    "SELECT value FROM channel_control_meta WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, "2");
+        }
+        original.follows_desktop = false;
+        let untouched = store
+            .ensure_installation_default(default_input(&["scripts"]))
+            .unwrap();
+        assert_eq!(untouched, original);
+        assert_eq!(revision_count(&store, &original.profile.id), 1);
+        assert_eq!(store.list_profiles().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn adoption_rejects_every_stale_expectation_without_writing() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = legacy_default(&store);
+        for field in 0..5 {
+            let mut input = adoption_input(&original);
+            match field {
+                0 => input.expected.binding_id = "different-binding".into(),
+                1 => input.expected.profile_id = "different-profile".into(),
+                2 => input.expected.profile_revision += 1,
+                3 => input.expected.profile_current_revision += 1,
+                _ => input.expected.policy_hash = "different-hash".into(),
+            }
+            let error = store.adopt_installation_default(input).unwrap_err();
+            assert!(error.contains("installation default conflict"), "{error}");
+            assert_eq!(current_default(&store), original);
+            assert_eq!(store.list_profiles().unwrap().len(), 1);
+            assert_eq!(revision_count(&store, &original.profile.id), 1);
+        }
+        let missing = ChannelControlStore::open_in_memory().unwrap();
+        assert!(missing
+            .adopt_installation_default(adoption_input(&original))
+            .unwrap_err()
+            .contains("conflict"));
+        assert!(missing.list_profiles().unwrap().is_empty());
+    }
+
+    #[test]
+    fn explicit_adoption_creates_a_new_profile_and_preserves_explicit_bindings() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = legacy_default(&store);
+        for (principal_type, principal_id) in [
+            ("user", "alice"),
+            ("conversation", "room"),
+            ("group", "legacy-room"),
+        ] {
+            store
+                .bind_principal(SavePrincipalBinding {
+                    id: None,
+                    installation_id: "wecom-bot".into(),
+                    principal_type: principal_type.into(),
+                    principal_id: principal_id.into(),
+                    profile_id: original.profile.id.clone(),
+                })
+                .unwrap();
+        }
+        let adopted = store
+            .adopt_installation_default(adoption_input(&original))
+            .unwrap();
+        assert!(adopted.follows_desktop);
+        assert_ne!(adopted.profile.id, original.profile.id);
+        assert_eq!(adopted.profile.revision, 1);
+        assert_eq!(adopted.binding.profile_revision, 1);
+        assert_eq!(adopted.profile_current_revision, 1);
+        assert_eq!(
+            adopted.profile.policy["allowedSkills"],
+            serde_json::json!(["read", "scripts"])
+        );
+        for (principal_type, principal_id) in [
+            ("user", "alice"),
+            ("conversation", "room"),
+            ("group", "legacy-room"),
+        ] {
+            let frozen = store
+                .resolve_profile("wecom-bot", principal_type, principal_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(frozen, original.profile);
+        }
+        let profiles = store.list_profiles().unwrap();
+        assert_eq!(profiles.len(), 2);
+        assert_eq!(
+            profiles
+                .iter()
+                .find(|profile| profile.id == original.profile.id),
+            Some(&original.profile)
+        );
+        assert!(store
+            .adopt_installation_default(adoption_input(&original))
+            .unwrap_err()
+            .contains("conflict"));
+        assert_eq!(store.list_profiles().unwrap().len(), 2);
+        let synced = store
+            .ensure_installation_default(default_input(&["scripts"]))
+            .unwrap();
+        assert_eq!(synced.profile.id, adopted.profile.id);
+        assert_eq!(synced.profile.revision, 2);
+    }
+
+    #[test]
+    fn stale_ownership_and_adoption_expectations_do_not_override_manual_edits() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        store
+            .save_profile(SavePermissionProfile {
+                id: Some(original.profile.id.clone()),
+                name: "Manual".into(),
+                policy: serde_json::json!({"executionMode":"text"}),
+                enabled: true,
+            })
+            .unwrap();
+        store.lock().unwrap().execute(
+            "INSERT INTO channel_managed_installation_defaults (installation_id,profile_id,binding_id,last_synced_revision) VALUES (?1,?2,?3,1)",
+            params!["wecom-bot", original.profile.id, original.binding.id],
+        ).unwrap();
+        let before = current_default(&store);
+        assert!(!before.follows_desktop);
+        assert_eq!(before.profile_current_revision, 2);
+        assert_eq!(before.profile.revision, 1);
+        assert_eq!(before.profile.policy_hash, original.profile.policy_hash);
+        assert_eq!(
+            store
+                .ensure_installation_default(default_input(&["scripts"]))
+                .unwrap(),
+            before
+        );
+        assert!(store
+            .adopt_installation_default(adoption_input(&original))
+            .unwrap_err()
+            .contains("conflict"));
+        assert_eq!(current_default(&store), before);
+        assert_eq!(revision_count(&store, &original.profile.id), 2);
+    }
+
+    #[test]
+    fn installation_default_dtos_use_camel_case() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = legacy_default(&store);
+        let response = serde_json::to_value(&original).unwrap();
+        assert_eq!(response["followsDesktop"], false);
+        assert_eq!(response["profileCurrentRevision"], 1);
+        assert!(response.get("follows_desktop").is_none());
+        assert!(response.get("profile_current_revision").is_none());
+        let input: AdoptInstallationDefault = serde_json::from_value(serde_json::json!({
+            "installationId": "wecom-bot",
+            "name": "Desktop default",
+            "policy": {"executionMode":"tools","allowedSkills":["scripts"]},
+            "expected": {
+                "bindingId": original.binding.id,
+                "profileId": original.profile.id,
+                "profileRevision": original.binding.profile_revision,
+                "profileCurrentRevision": original.profile_current_revision,
+                "policyHash": original.profile.policy_hash
+            }
+        }))
+        .unwrap();
+        let adopted = store.adopt_installation_default(input).unwrap();
+        assert_eq!(
+            serde_json::to_value(adopted).unwrap()["followsDesktop"],
+            true
+        );
+    }
+
+    #[test]
+    fn concurrent_default_sync_uses_one_revision_across_connections() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("channel-control-test.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection.busy_timeout(Duration::from_secs(5)).unwrap();
+        connection
+            .pragma_update(None, "journal_mode", "WAL")
+            .unwrap();
+        initialize_schema(&connection).unwrap();
+        let store = ChannelControlStore {
+            conn: Mutex::new(connection),
+        };
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let connection = Connection::open(path).unwrap();
+                    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+                    connection
+                        .pragma_update(None, "foreign_keys", true)
+                        .unwrap();
+                    let store = ChannelControlStore {
+                        conn: Mutex::new(connection),
+                    };
+                    barrier.wait();
+                    store
+                        .ensure_installation_default(default_input(&["read", "scripts"]))
+                        .unwrap()
+                })
+            })
+            .collect();
+        for handle in handles {
+            let synced = handle.join().unwrap();
+            assert_eq!(synced.profile.id, original.profile.id);
+            assert_eq!(synced.profile.revision, 2);
+            assert_eq!(synced.binding.profile_revision, 2);
+            assert_eq!(synced.profile_current_revision, 2);
+            assert!(synced.follows_desktop);
+            assert_eq!(
+                synced.profile.policy_hash,
+                policy_hash(&synced.profile.policy).unwrap()
+            );
+        }
+        assert_eq!(store.list_profiles().unwrap().len(), 1);
+        assert_eq!(revision_count(&store, &original.profile.id), 2);
+    }
+
+    #[test]
+    fn failed_manual_changes_preserve_managed_ownership() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        store
+            .bind_principal(SavePrincipalBinding {
+                id: Some("reserved-binding".into()),
+                installation_id: "wecom-bot".into(),
+                principal_type: "user".into(),
+                principal_id: "alice".into(),
+                profile_id: original.profile.id.clone(),
+            })
+            .unwrap();
+        assert!(store
+            .bind_principal(SavePrincipalBinding {
+                id: Some("reserved-binding".into()),
+                installation_id: "wecom-bot".into(),
+                principal_type: "installation".into(),
+                principal_id: "*".into(),
+                profile_id: original.profile.id.clone(),
+            })
+            .is_err());
+        assert_eq!(current_default(&store), original);
+        store.lock().unwrap().execute_batch(
+            "CREATE TEMP TRIGGER fail_profile_revision BEFORE INSERT ON channel_permission_profile_revisions
+             BEGIN SELECT RAISE(ABORT, 'test profile write failure'); END;"
+        ).unwrap();
+        assert!(store
+            .save_profile(SavePermissionProfile {
+                id: Some(original.profile.id.clone()),
+                name: "Manual".into(),
+                policy: original.profile.policy.clone(),
+                enabled: true,
+            })
+            .is_err());
+        assert_eq!(current_default(&store), original);
+        assert_eq!(revision_count(&store, &original.profile.id), 1);
+    }
+
+    #[test]
+    fn disabled_profile_with_a_stale_marker_is_not_reenabled() {
+        let store = ChannelControlStore::open_in_memory().unwrap();
+        let original = store
+            .ensure_installation_default(default_input(&["read"]))
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE channel_permission_profiles SET enabled=0 WHERE id=?1",
+                params![original.profile.id],
+            )
+            .unwrap();
+        let disabled = current_default(&store);
+        assert!(!disabled.follows_desktop);
+        assert!(!disabled.profile.enabled);
+        assert_eq!(
+            store
+                .ensure_installation_default(default_input(&["scripts"]))
+                .unwrap(),
+            disabled
+        );
+        assert_eq!(revision_count(&store, &original.profile.id), 1);
+    }
+
+    #[test]
     fn ensure_installation_default_is_atomic_and_idempotent() {
         let store = std::sync::Arc::new(ChannelControlStore::open_in_memory().unwrap());
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
@@ -1060,7 +1777,7 @@ mod tests {
                             name: format!("Default {index}"),
                             policy: serde_json::json!({
                                 "executionMode":"tools",
-                                "maxOutputChars": 1000 + index
+                                "maxOutputChars": 1000
                             }),
                         })
                         .unwrap()

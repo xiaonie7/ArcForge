@@ -33,7 +33,7 @@ import {
 } from "./lib/settings/sync";
 import { applyStoredGlobalShortcuts } from "./lib/shortcuts/globalShortcuts";
 import {
-  buildWecomInstallationDefaultInput,
+  buildWecomInstallationDefaultSyncKey,
   ensureWecomInstallationDefault,
 } from "./lib/wecomPermissionProfile";
 import { ChatPage } from "./pages/ChatPage";
@@ -148,7 +148,8 @@ export default function App() {
   const saveSequenceRef = useRef(0);
   const saveChainRef = useRef<Promise<unknown>>(Promise.resolve());
   const defaultWorkdirRef = useRef("");
-  const ensuredWecomInstallationRef = useRef("");
+  const ensuredWecomSettingsKeyRef = useRef("");
+  const pendingWecomDefaultRef = useRef<{ key: string } | null>(null);
   // Mirrors `settings` so setSettings/queueSettingsSave can read the latest value
   // synchronously without passing a (side-effecting) function into setSettingsState —
   // React 18 StrictMode double-invokes functional state updaters in development,
@@ -185,22 +186,36 @@ export default function App() {
   }, [settingsReady, settings.closeWindowBehavior]);
 
   useEffect(() => {
-    if (!settingsReady || !settings.wecom.enabled || !settings.wecom.botId.trim()) return;
-    let installationId: string;
+    if (!settingsReady) return;
+    if (!settings.wecom.enabled || !settings.wecom.botId.trim()) {
+      ensuredWecomSettingsKeyRef.current = "";
+      pendingWecomDefaultRef.current = null;
+      return;
+    }
+    let key: string;
     try {
-      installationId = buildWecomInstallationDefaultInput(settings).installationId;
+      key = buildWecomInstallationDefaultSyncKey(settings);
     } catch (error) {
       console.warn("Failed to build the WeCom installation permission default", error);
       return;
     }
-    if (ensuredWecomInstallationRef.current === installationId) return;
-    ensuredWecomInstallationRef.current = installationId;
-    void ensureWecomInstallationDefault(settings).catch((error) => {
-      if (ensuredWecomInstallationRef.current === installationId) {
-        ensuredWecomInstallationRef.current = "";
-      }
-      console.warn("Failed to ensure the WeCom installation permission default", error);
-    });
+    if (pendingWecomDefaultRef.current?.key === key) return;
+    if (!pendingWecomDefaultRef.current && ensuredWecomSettingsKeyRef.current === key) return;
+    const pending = { key };
+    pendingWecomDefaultRef.current = pending;
+    void ensureWecomInstallationDefault(settings)
+      .then(() => {
+        if (pendingWecomDefaultRef.current !== pending) return;
+        ensuredWecomSettingsKeyRef.current = key;
+        pendingWecomDefaultRef.current = null;
+      })
+      .catch((error) => {
+        if (pendingWecomDefaultRef.current === pending) {
+          ensuredWecomSettingsKeyRef.current = "";
+          pendingWecomDefaultRef.current = null;
+        }
+        console.warn("Failed to sync the WeCom installation permission default", error);
+      });
   }, [settings, settingsReady]);
 
   // 启动时恢复本机保存的全局快捷键（桌面端专属，非 Tauri 环境内部自动忽略）。

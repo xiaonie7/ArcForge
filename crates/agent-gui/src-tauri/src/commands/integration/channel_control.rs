@@ -3,9 +3,10 @@ use std::sync::Arc;
 use serde::Deserialize;
 
 use crate::services::channel_control::{
-    ChannelControlStore, ClaimedDelivery, DeliveryOutboxEntry, DeliveryTarget, EnqueueDelivery,
-    EnsureInstallationDefault, InstallationDefault, PermissionProfile, PrincipalBinding,
-    SaveDeliveryTarget, SavePermissionProfile, SavePrincipalBinding,
+    AdoptInstallationDefault, ChannelControlStore, ClaimedDelivery, DeliveryOutboxEntry,
+    DeliveryTarget, EnqueueDelivery, EnsureInstallationDefault, InstallationDefault,
+    PermissionProfile, PrincipalBinding, SaveDeliveryTarget, SavePermissionProfile,
+    SavePrincipalBinding,
 };
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +65,17 @@ pub async fn channel_installation_default_ensure(
     tauri::async_runtime::spawn_blocking(move || store.ensure_installation_default(input))
         .await
         .map_err(|e| format!("channel_installation_default_ensure join failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn channel_installation_default_adopt(
+    input: AdoptInstallationDefault,
+    store: tauri::State<'_, Arc<ChannelControlStore>>,
+) -> Result<InstallationDefault, String> {
+    let store = Arc::clone(store.inner());
+    tauri::async_runtime::spawn_blocking(move || store.adopt_installation_default(input))
+        .await
+        .map_err(|e| format!("channel_installation_default_adopt join failed: {e}"))?
 }
 
 #[tauri::command]

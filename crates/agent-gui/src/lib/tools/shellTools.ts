@@ -20,11 +20,7 @@ import { type BuiltinToolBundle, createBuiltinMetadataMap } from "./builtinTypes
 import { formatResolvedTarget, type ResolvedPath, ToolPathResolver } from "./pathUtils";
 import {
   assertSkillPathAllowedByPolicy,
-  assertSkillShellExecutionAllowed,
-  isSkillShellExecutionRestricted,
-  SKILL_SHELL_EXECUTION_RESTRICTION,
   type SkillAccessPolicy,
-  SkillShellExecutionBlockedError,
 } from "./skillAccessPolicy";
 
 type ShellRunResponse = {
@@ -91,12 +87,6 @@ type SystemListSkillFilesResponse = {
 
 function asErrorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err);
-}
-
-function shellAccessErrorDetails(err: unknown) {
-  return err instanceof SkillShellExecutionBlockedError
-    ? { code: err.code, execution_started: false, retryable: false }
-    : {};
 }
 
 function createShellRunId(toolCallId: string) {
@@ -563,9 +553,8 @@ export function createShellTools(params: {
   const allowSkillsRoot = params.skillsRootEnabled === true;
   const allowManagedProcess = params.managedProcessEnabled !== false;
   const skillAccessPolicy = params.skillAccessPolicy;
-  const skillExecutionGuidance = isSkillShellExecutionRestricted(skillAccessPolicy)
-    ? SKILL_SHELL_EXECUTION_RESTRICTION
-    : "Running a Skill script: set cwd to skill://<enabled-skill>/scripts and use a relative command, or execute the absolute script path directly when that Skill is enabled and its current instructions permit it.";
+  const skillExecutionGuidance =
+    "Running a Skill script: set cwd to skill://<enabled-skill>/scripts and use a relative command, or execute the absolute script path directly when that Skill is enabled and its current instructions permit it. Skill script execution is separate from Skill file mutation; a read-only Skill policy still prevents Write/Edit/Delete from changing Skill files.";
   let cachedSkillsRootDir =
     typeof params.skillsRootDir === "string" ? params.skillsRootDir.trim() : "";
 
@@ -693,12 +682,11 @@ export function createShellTools(params: {
     cwd: ResolvedPath;
     command: string;
   }) {
+    // An enabled Skill authorizes its scripts to run. Skill file mutation is
+    // enforced independently by ToolPathResolver for Write/Edit/Delete, so a
+    // channel can execute an approved data workflow while file-tool writes
+    // to the Skill package remain blocked.
     if (params.cwd.scope === "skill") {
-      assertSkillShellExecutionAllowed(
-        skillAccessPolicy,
-        `${params.operation} command`,
-        params.cwd.relativePath,
-      );
       if (commandReferencesFixedSkillsRoot(params.command)) {
         throw new Error(
           "Bash with a Skill cwd must use paths relative to that cwd. Do not cd into or execute absolute ~/.arcforge/skills paths.",
@@ -742,11 +730,6 @@ export function createShellTools(params: {
       }
       for (const baseDir of referencedSkills) {
         assertSkillPathAllowedByPolicy(skillAccessPolicy, `${baseDir}/`, params.operation);
-        assertSkillShellExecutionAllowed(
-          skillAccessPolicy,
-          `${params.operation} command`,
-          `${baseDir}/`,
-        );
       }
       // All referenced Skills are enabled — allow the absolute path through.
     }
@@ -1090,7 +1073,7 @@ export function createShellTools(params: {
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         content: [{ type: "text", text: asErrorMessage(err) }],
-        details: shellAccessErrorDetails(err),
+        details: {},
         isError: true,
         timestamp: now,
       };
@@ -1223,7 +1206,7 @@ export function createShellTools(params: {
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         content: [{ type: "text", text: asErrorMessage(err) }],
-        details: shellAccessErrorDetails(err),
+        details: {},
         isError: true,
         timestamp: now,
       };

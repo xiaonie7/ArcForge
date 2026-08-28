@@ -1797,6 +1797,14 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.wecomNotReady": "待配置",
     "settings.wecomEnable": "启用企业微信连接",
     "settings.wecomDisable": "关闭企业微信连接",
+    "settings.wecomDesktopCapabilities": "客户端能力同步",
+    "settings.wecomFollowingDesktop": "已跟随客户端",
+    "settings.wecomFollowDesktop": "确认跟随客户端",
+    "settings.wecomFollowingDesktopHint":
+      "默认权限随客户端当前启用的 Skill 和工具更新。新请求使用更新后的权限；单独配置的用户或群组权限不受影响。Skill 文件修改权限仍独立控制。",
+    "settings.wecomFollowDesktopHint":
+      "旧版或手动配置的默认权限不会被自动覆盖。确认后将新建跟随客户端的默认配置，保留原配置及单独配置的用户、群组权限。",
+    "settings.wecomRefreshPermissions": "刷新权限状态",
     "settings.wecomConnection": "连接标识",
     "settings.wecomGatewayMode": "Gateway 模式",
     "settings.wecomGatewayModeLocal": "本机托管",
@@ -4111,6 +4119,14 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.wecomNotReady": "Needs setup",
     "settings.wecomEnable": "Enable WeCom connection",
     "settings.wecomDisable": "Disable WeCom connection",
+    "settings.wecomDesktopCapabilities": "Desktop capability sync",
+    "settings.wecomFollowingDesktop": "Following desktop",
+    "settings.wecomFollowDesktop": "Confirm following desktop",
+    "settings.wecomFollowingDesktopHint":
+      "Default permissions follow the Skills and tools currently enabled on the desktop. New requests use the updated policy; explicit user and group permissions stay unchanged. Skill file mutation remains separately controlled.",
+    "settings.wecomFollowDesktopHint":
+      "Legacy or manually configured defaults are not overwritten automatically. Confirm to create a desktop-following default while preserving the previous profile and explicit user and group permissions.",
+    "settings.wecomRefreshPermissions": "Refresh permissions",
     "settings.wecomConnection": "Connection Identity",
     "settings.wecomGatewayMode": "Gateway Mode",
     "settings.wecomGatewayModeLocal": "Managed locally",
