@@ -64,6 +64,7 @@ impl GatewayController {
             tunnel_proxy: TunnelProxy::new(),
             workspace_watch,
             pending_chat_queue_requests: Mutex::new(HashMap::new()),
+            pending_channel_binding_requests: Mutex::new(HashMap::new()),
             terminal_forwarder_once: Once::new(),
             terminal_stream_forwarder_once: Once::new(),
             sftp_forwarder_once: Once::new(),

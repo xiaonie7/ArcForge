@@ -120,6 +120,23 @@ test("decodeServerFrame dispatches on the oneof arm", () => {
   );
   assert.deepEqual(agentError, { kind: "error", requestId: "req-4", message: "boom" });
 
+  const archiveResponse = decodeServerFrame(
+    roundtrip(
+      serverFrame({
+        request_id: "req-archive",
+        agent_response: {
+          history_archive_resp: { result_json: '{"total_count":1,"items":[{"id":"a"}]}' },
+        },
+      }),
+    ),
+    { agentOnline: false },
+  );
+  assert.deepEqual(archiveResponse, {
+    kind: "response",
+    requestId: "req-archive",
+    payload: { total_count: 1, items: [{ id: "a" }] },
+  });
+
   // 空载荷帧被忽略。
   const empty = decodeServerFrame(pb.create(v2.WebServerFrameSchema, {}), { agentOnline: false });
   assert.equal(empty, null);
@@ -214,6 +231,27 @@ test("encodeRequestFrame maps v1 request types onto GatewayEnvelope arms", () =>
       cwd: listFrame.payload.value.payload.value.cwd,
     },
     { page: 2, pageSize: 50, cwd: "/tmp/p" },
+  );
+
+  const archiveArgs = {
+    input: {
+      page: 1,
+      pageSize: 50,
+      filter: { archiveState: "archived", sourceId: "wecom" },
+    },
+  };
+  const archiveFrame = decodeClientFrame(
+    encodeRequestFrame("req-archive", "history.archive", {
+      command: "query",
+      args_json: JSON.stringify(archiveArgs),
+    }),
+  );
+  assert.equal(archiveFrame.payload.case, "agentRequest");
+  assert.equal(archiveFrame.payload.value.payload.case, "historyArchive");
+  assert.equal(archiveFrame.payload.value.payload.value.command, "query");
+  assert.deepEqual(
+    JSON.parse(archiveFrame.payload.value.payload.value.argsJson),
+    archiveArgs,
   );
 
   const terminalFrame = decodeClientFrame(

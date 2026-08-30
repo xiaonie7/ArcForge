@@ -81,6 +81,7 @@ pub(crate) fn build_client_hello(
         channel_tenant_id: String::new(),
         channel_bot_id: String::new(),
         connector_id: String::new(),
+        channel_lifecycle_version: 0,
     }
 }
 

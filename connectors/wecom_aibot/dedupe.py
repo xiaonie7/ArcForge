@@ -480,6 +480,16 @@ class DedupeStore:
             claim_token=claim_token,
         )
 
+    async def bound_session_async(self, session_key: SessionKey, external_message_id: str, session_id: str = "", generation: int = 0):
+        if self._state_store is None:
+            return (session_id, generation) if session_id else None
+        token = self._claim_token(DedupeKey.from_session(session_key, external_message_id))
+        if not token:
+            raise RuntimeError("WeCom message claim is unavailable")
+        return await self._state_store.run_async(
+            self._state_store.inbox_session, session_key, external_message_id, token, session_id, generation,
+        )
+
     async def save_rotation_async(
         self,
         session_key: SessionKey,

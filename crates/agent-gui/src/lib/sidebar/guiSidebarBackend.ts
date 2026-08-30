@@ -12,6 +12,7 @@ import {
   setChatHistoryPinned,
 } from "../chat/history/chatHistory";
 import type { SidebarBackend } from "./backend";
+import { archiveConversation } from "../conversationArchive/api";
 import type { SidebarBackendEvent } from "./types";
 
 // The desktop history sync wire protocol. The Rust side emits one event per
@@ -77,6 +78,7 @@ export function createGuiSidebarBackend(): SidebarBackend {
 
     renameConversation: (id, title) => renameChatHistory(id, title),
     setConversationPinned: (id, isPinned) => setChatHistoryPinned(id, isPinned),
+    archiveConversation,
     deleteConversation: (id) => deleteChatHistory(id),
 
     subscribeEvents: (listener) => {

@@ -1,6 +1,6 @@
 [package]
 name = "arcforge"
-version = "0.3.5"
+version = "0.3.6"
 description = "ArcForge desktop Work Agent for Windows"
 authors = ["nieli"]
 edition = "2021"
@@ -53,6 +53,8 @@ sqlx-postgres = { version = "0.8.6", default-features = false, features = ["chro
 keyring = { version = "3.6.3", features = ["apple-native", "windows-native"] }
 leveldb-core = "0.1.0"
 chrono = "0.4.45"
+chrono-tz = "0.10.4"
+iana-time-zone = "0.1.65"
 tokio-cron-scheduler = "0.15.1"
 rustls = { version = "0.23.41", default-features = false, features = ["ring", "std"] }
 prost = "0.14.4"

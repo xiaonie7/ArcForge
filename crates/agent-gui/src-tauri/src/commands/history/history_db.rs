@@ -1,10 +1,10 @@
 use rusqlite::{Connection, OptionalExtension};
-use std::{collections::HashSet, fs, path::PathBuf, sync::Mutex, time::Duration};
+use std::{collections::HashSet, path::PathBuf, sync::Mutex, time::Duration};
 
 use crate::runtime::app_paths::app_storage_dir;
 
 const DB_FILENAME: &str = "chat-history.sqlite3";
-const HISTORY_DB_SCHEMA_VERSION: i64 = 2;
+const HISTORY_DB_SCHEMA_VERSION: i64 = 5;
 
 static HISTORY_DB_MIGRATION_LOCK: Mutex<()> = Mutex::new(());
 
@@ -85,6 +85,22 @@ fn migrate_history_db_inner(conn: &Connection) -> Result<(), String> {
     if current_version < 2 {
         migrate_to_v2(conn)?;
         set_user_version(conn, 2)?;
+    }
+
+    if current_version < 3 {
+        ensure_chat_history_schema(conn)?;
+        crate::services::conversation_lifecycle::ensure_schema(conn)?;
+        set_user_version(conn, 3)?;
+    }
+
+    if current_version < 4 {
+        ensure_chat_history_schema(conn)?;
+        set_user_version(conn, 4)?;
+    }
+
+    if current_version < 5 {
+        crate::services::conversation_lifecycle::ensure_schema(conn)?;
+        set_user_version(conn, 5)?;
     }
 
     // The subagent schema is versioned independently via subagentMeta and is
@@ -175,7 +191,17 @@ fn ensure_chat_history_schema(conn: &Connection) -> Result<(), String> {
             updated_at INTEGER NOT NULL,
             is_pinned INTEGER NOT NULL DEFAULT 0,
             pinned_at INTEGER,
-            selected_model_json TEXT
+            selected_model_json TEXT,
+            archived_at INTEGER,
+            archive_reason TEXT,
+            unarchived_at INTEGER,
+            lifecycle_version INTEGER NOT NULL DEFAULT 0,
+            last_user_message_at INTEGER,
+            last_turn_finished_at INTEGER,
+            activity_version INTEGER NOT NULL DEFAULT 0,
+            auto_archive_exempt INTEGER NOT NULL DEFAULT 0,
+            origin_source_id TEXT,
+            cwd_key TEXT NOT NULL DEFAULT ''
         );
 
         CREATE TABLE IF NOT EXISTS chatHistorySegment (
@@ -203,6 +229,14 @@ fn ensure_chat_history_schema(conn: &Connection) -> Result<(), String> {
             updated_at INTEGER NOT NULL,
             FOREIGN KEY (conversation_id) REFERENCES chatHistory(id) ON DELETE CASCADE
         );
+
+        -- Permanent deletion is authoritative. This marker prevents a delayed
+        -- content save from recreating a conversation after its history row
+        -- and channel replicas have already been deleted.
+        CREATE TABLE IF NOT EXISTS conversationHistoryTombstone (
+            conversation_id TEXT PRIMARY KEY,
+            deleted_at INTEGER NOT NULL
+        );
         ",
     )
     .map_err(|e| format!("初始化聊天历史表失败：{e}"))?;
@@ -220,6 +254,10 @@ fn ensure_chat_history_schema(conn: &Connection) -> Result<(), String> {
             ON chatHistory(is_pinned DESC, pinned_at DESC, updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_chatHistoryShare_token
             ON chatHistoryShare(token);
+        CREATE INDEX IF NOT EXISTS idx_chatHistory_archive_list
+            ON chatHistory(archived_at DESC, id);
+        CREATE INDEX IF NOT EXISTS idx_chatHistory_archive_scope
+            ON chatHistory(archived_at, origin_source_id, cwd_key);
         ",
     )
     .map_err(|e| format!("初始化聊天历史索引失败：{e}"))?;
@@ -287,6 +325,16 @@ fn ensure_chat_history_columns(conn: &Connection) -> Result<(), String> {
                 "selected_model_json",
                 "ALTER TABLE chatHistory ADD COLUMN selected_model_json TEXT;",
             ),
+            ("archived_at", "ALTER TABLE chatHistory ADD COLUMN archived_at INTEGER;"),
+            ("archive_reason", "ALTER TABLE chatHistory ADD COLUMN archive_reason TEXT;"),
+            ("unarchived_at", "ALTER TABLE chatHistory ADD COLUMN unarchived_at INTEGER;"),
+            ("lifecycle_version", "ALTER TABLE chatHistory ADD COLUMN lifecycle_version INTEGER NOT NULL DEFAULT 0;"),
+            ("last_user_message_at", "ALTER TABLE chatHistory ADD COLUMN last_user_message_at INTEGER;"),
+            ("last_turn_finished_at", "ALTER TABLE chatHistory ADD COLUMN last_turn_finished_at INTEGER;"),
+            ("activity_version", "ALTER TABLE chatHistory ADD COLUMN activity_version INTEGER NOT NULL DEFAULT 0;"),
+            ("auto_archive_exempt", "ALTER TABLE chatHistory ADD COLUMN auto_archive_exempt INTEGER NOT NULL DEFAULT 0;"),
+            ("origin_source_id", "ALTER TABLE chatHistory ADD COLUMN origin_source_id TEXT;"),
+            ("cwd_key", "ALTER TABLE chatHistory ADD COLUMN cwd_key TEXT NOT NULL DEFAULT '';"),
         ],
     )?;
 
@@ -334,6 +382,28 @@ fn ensure_chat_history_columns(conn: &Connection) -> Result<(), String> {
         ",
     )
     .map_err(|e| format!("修复聊天历史主表默认字段失败：{e}"))?;
+
+    // Only the project key is derived during migration. Old activity/source
+    // cannot be inferred from updated_at, a title, or an id prefix.
+    let projects = {
+        let mut stmt = conn
+            .prepare("SELECT id, cwd FROM chatHistory WHERE cwd_key = '' AND TRIM(COALESCE(cwd, '')) != ''")
+            .map_err(|e| format!("准备历史项目键迁移失败：{e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("查询历史项目键迁移失败：{e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取历史项目键迁移失败：{e}"))?
+    };
+    for (id, cwd) in projects {
+        conn.execute(
+            "UPDATE chatHistory SET cwd_key = ?1 WHERE id = ?2",
+            rusqlite::params![crate::runtime::project_path::project_path_key(&cwd), id],
+        )
+        .map_err(|e| format!("迁移历史项目键失败：{e}"))?;
+    }
 
     Ok(())
 }
@@ -744,6 +814,7 @@ mod tests {
             "chatHistory",
             "chatHistorySegment",
             "chatHistoryShare",
+            "conversationHistoryTombstone",
             "chatHistoryFtsSegmentIndex",
             "subagentMeta",
             "subagentIdentity",
@@ -760,6 +831,64 @@ mod tests {
                 .expect("query table existence");
             assert_eq!(exists, 1, "{table_name} should exist");
         }
+    }
+
+    #[test]
+    fn migrate_v3_adds_permanent_history_tombstones() {
+        let conn = Connection::open_in_memory().expect("open v3 history database");
+        ensure_chat_history_schema(&conn).expect("create v3 history schema");
+        crate::services::conversation_lifecycle::ensure_schema(&conn)
+            .expect("create v3 lifecycle schema");
+        conn.execute_batch(
+            "DROP TABLE conversationHistoryTombstone;
+             PRAGMA user_version = 3;",
+        )
+        .expect("simulate v3 schema");
+
+        initialize_connection(&conn).expect("migrate v3 history database");
+
+        assert_eq!(
+            read_user_version(&conn).expect("read migrated version"),
+            HISTORY_DB_SCHEMA_VERSION
+        );
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = 'conversationHistoryTombstone'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query tombstone table");
+        assert_eq!(exists, 1);
+    }
+
+    #[test]
+    fn migrate_v4_adds_renderer_editing_lease_column() {
+        let conn = Connection::open_in_memory().expect("open v4 history database");
+        conn.execute_batch(
+            "CREATE TABLE conversationAdmission (
+                token TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                origin_source_id TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            PRAGMA user_version = 4;",
+        )
+        .expect("simulate v4 lifecycle schema");
+
+        initialize_connection(&conn).expect("migrate v4 history database");
+
+        assert_eq!(
+            read_user_version(&conn).expect("read migrated version"),
+            HISTORY_DB_SCHEMA_VERSION
+        );
+        assert!(
+            read_table_columns(&conn, "conversationAdmission", "会话接纳")
+                .expect("read migrated admission columns")
+                .contains("expires_at")
+        );
     }
 
     #[test]

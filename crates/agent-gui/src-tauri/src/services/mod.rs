@@ -1,6 +1,8 @@
 pub mod automation;
 pub mod channel_control;
 pub mod chat_run_ledger;
+pub mod conversation_archive;
+pub mod conversation_lifecycle;
 pub mod gateway;
 pub mod gateway_bridge;
 pub mod local_wecom;

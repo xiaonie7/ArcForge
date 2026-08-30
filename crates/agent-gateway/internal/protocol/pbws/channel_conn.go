@@ -61,10 +61,11 @@ var channelCommandAllowlist = map[string]struct{}{
 }
 
 type channelBinding struct {
-	tenantID    string
-	botID       string
-	connectorID string
-	authAt      time.Time
+	tenantID         string
+	botID            string
+	connectorID      string
+	authAt           time.Time
+	lifecycleVersion uint32
 }
 
 type channelPresentedFile struct {
@@ -166,6 +167,8 @@ func (c *channelConn) serve() {
 	if !c.handshake() {
 		return
 	}
+	c.srv.registerLifecycleChannel(c)
+	defer c.srv.unregisterLifecycleChannel(c)
 	observability.Usage.V2ChannelConnectionsTotal.Add(1)
 	observability.Usage.V2ChannelConnectionsActive.Add(1)
 	defer observability.Usage.V2ChannelConnectionsActive.Add(-1)
@@ -187,6 +190,10 @@ func (c *channelConn) serve() {
 			go c.handleInbound(frame.GetRequestId(), payload.Inbound)
 		case *gatewayv2.ChannelClientFrame_InputAnswer:
 			go c.handleInputAnswer(frame.GetRequestId(), payload.InputAnswer)
+		case *gatewayv2.ChannelClientFrame_BindingResponse:
+			c.srv.receiveBindingResponse(c, frame.GetRequestId(), payload.BindingResponse)
+		case *gatewayv2.ChannelClientFrame_BindingSnapshot:
+			go c.forwardBindingSnapshot(payload.BindingSnapshot)
 		case nil:
 			_ = c.sendLocalError(frame.GetRequestId(), "frame payload is required")
 		default:
@@ -244,13 +251,17 @@ func (c *channelConn) vetChannelHello(hello *gatewayv2.ClientHello) (helloVerdic
 		return helloVerdict{message: "unauthorized"}, channelBinding{}
 	}
 	binding := channelBinding{
-		tenantID:    strings.TrimSpace(hello.GetChannelTenantId()),
-		botID:       strings.TrimSpace(hello.GetChannelBotId()),
-		connectorID: strings.TrimSpace(hello.GetConnectorId()),
-		authAt:      time.Now().UTC(),
+		tenantID:         strings.TrimSpace(hello.GetChannelTenantId()),
+		botID:            strings.TrimSpace(hello.GetChannelBotId()),
+		connectorID:      strings.TrimSpace(hello.GetConnectorId()),
+		lifecycleVersion: hello.GetChannelLifecycleVersion(),
+		authAt:           time.Now().UTC(),
 	}
 	if binding.tenantID == "" || binding.botID == "" || binding.connectorID == "" {
 		return helloVerdict{message: "channel tenant_id, bot_id and connector_id are required"}, channelBinding{}
+	}
+	if binding.lifecycleVersion > 1 {
+		return helloVerdict{message: "unsupported channel lifecycle version"}, channelBinding{}
 	}
 	if expected := strings.TrimSpace(c.cfg.ChannelTenantID); expected != "" && expected != binding.tenantID {
 		return helloVerdict{message: "unexpected channel tenant"}, channelBinding{}
@@ -291,6 +302,12 @@ func (c *channelConn) handleInbound(requestID string, inbound *gatewayv2.Channel
 		_ = c.sendLocalError(requestID, err.Error())
 		return
 	}
+	if c.binding.lifecycleVersion == 1 &&
+		(strings.TrimSpace(inbound.GetChannelScopeKey()) == "" ||
+			inbound.GetChannelSessionGeneration() == 0) {
+		_ = c.sendLocalError(requestID, "channel lifecycle metadata is required")
+		return
+	}
 	if strings.EqualFold(strings.TrimSpace(inbound.GetChatType()), "group") &&
 		(c.cfg == nil || !c.cfg.ChannelAllowGroupMessages) {
 		_ = c.sendLocalError(requestID, "group messages are disabled for this channel")
@@ -298,6 +315,7 @@ func (c *channelConn) handleInbound(requestID string, inbound *gatewayv2.Channel
 	}
 
 	conversationID := channelConversationID(c.binding, inbound)
+	c.srv.rememberInboundBinding(c, inbound, conversationID)
 	clientRequestID := channelRequestID(c.binding, inbound)
 	channelCommand := strings.ToLower(strings.TrimSpace(inbound.GetCommand()))
 	if existing, ok := c.sm.LookupChatCommand(clientRequestID); ok {
@@ -470,15 +488,21 @@ func channelTrustedOrigin(
 		AuthenticatedAt:   binding.authAt.Unix(),
 		// The desktop bridge validates this against the envelope request id,
 		// which is the session run id, not the connector frame request id.
-		GatewayRequestId: strings.TrimSpace(runID),
-		ChannelSessionId: strings.TrimSpace(inbound.GetChannelSessionId()),
-		ChannelCommand:   channelCommand,
+		GatewayRequestId:         strings.TrimSpace(runID),
+		ChannelSessionId:         strings.TrimSpace(inbound.GetChannelSessionId()),
+		ChannelCommand:           channelCommand,
+		ChannelScopeKey:          inbound.GetChannelScopeKey(),
+		ChannelSessionGeneration: inbound.GetChannelSessionGeneration(),
+		ChannelLifecycleVersion:  binding.lifecycleVersion,
 	}
 }
 
 func validateChannelInbound(inbound *gatewayv2.ChannelInboundMessage) error {
 	if inbound == nil {
 		return errors.New("inbound message is required")
+	}
+	if len(inbound.GetChannelScopeKey()) > 2048 || inbound.GetChannelSessionGeneration() > channelMaxJSONInteger {
+		return errors.New("invalid channel binding metadata")
 	}
 	for label, value := range map[string]string{
 		"external_message_id": inbound.GetExternalMessageId(),

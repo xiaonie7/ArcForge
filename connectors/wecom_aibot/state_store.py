@@ -9,6 +9,7 @@ process claim/CAS guarantees.
 from __future__ import annotations
 
 import hashlib
+import json
 import asyncio
 import functools
 import secrets
@@ -36,7 +37,7 @@ class InboxResult:
 class SQLiteStateStore:
     """SQLite-backed sessions and durable callback inbox."""
 
-    schema_version = 4
+    schema_version = 5
 
     def __init__(
         self,
@@ -93,6 +94,12 @@ class SQLiteStateStore:
                 self._db.execute(
                     "ALTER TABLE channel_sessions ADD COLUMN generation INTEGER NOT NULL DEFAULT 1"
                 )
+            if "closed_at_ms" not in session_columns:
+                self._db.execute("ALTER TABLE channel_sessions ADD COLUMN closed_at_ms INTEGER")
+            self._db.execute("""CREATE TABLE IF NOT EXISTS channel_binding_operations (
+                installation_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+                parameters TEXT NOT NULL, result_json TEXT NOT NULL, created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (installation_id, operation_id))""")
 
             inbox_columns = self._db.execute(
                 "PRAGMA table_info(channel_inbox)"
@@ -116,6 +123,8 @@ class SQLiteStateStore:
                 ("rotation_candidate_session_id", "TEXT"),
                 ("rotation_expected_generation", "INTEGER"),
                 ("response_files_status", "TEXT NOT NULL DEFAULT ''"),
+                ("bound_session_id", "TEXT"),
+                ("bound_generation", "INTEGER"),
             ):
                 if column not in inbox_column_names:
                     self._db.execute(
@@ -223,12 +232,22 @@ class SQLiteStateStore:
         now = utc_now_ms()
         with self._lock, self._db:
             row = self._db.execute(
-                "SELECT session_id FROM channel_sessions WHERE installation_id=? AND scope_mode=? AND chat_type=? AND chat_id=? AND external_user_id=?",
+                "SELECT session_id,closed_at_ms FROM channel_sessions WHERE installation_id=? AND scope_mode=? AND chat_type=? AND chat_id=? AND external_user_id=?",
                 (self.installation_id, scope, chat_type, chat_id, user_id),
             ).fetchone()
-            if row:
+            if row and row[1] is None:
                 return str(row[0])
             session_id = id_factory()
+            if row:
+                if session_id == str(row[0]):
+                    raise ValueError("session id factory returned the closed session id")
+                # A close leaves a tombstone. Only this first new message opens
+                # the next generation; closing itself never creates a session.
+                self._db.execute(
+                    "UPDATE channel_sessions SET session_id=?,generation=generation+1,closed_at_ms=NULL,updated_at_ms=? "
+                    "WHERE installation_id=? AND scope_mode=? AND chat_type=? AND chat_id=? AND external_user_id=? AND closed_at_ms IS NOT NULL",
+                    (session_id, now, self.installation_id, scope, chat_type, chat_id, user_id),
+                )
             self._db.execute(
                 "INSERT OR IGNORE INTO channel_sessions(installation_id,scope_mode,chat_type,chat_id,external_user_id,session_id,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?)",
                 (
@@ -268,6 +287,114 @@ class SQLiteStateStore:
         if candidate == current:
             raise ValueError("session id factory returned the current session id")
         return SessionRotation(key, current, candidate, generation)
+
+    def session_generation(self, key: SessionKey) -> int:
+        chat_type, chat_id, user_id, scope = self._session_values(key)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT generation FROM channel_sessions WHERE installation_id=? AND scope_mode=? AND chat_type=? AND chat_id=? AND external_user_id=?",
+                (self.installation_id, scope, chat_type, chat_id, user_id),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def current_bindings(
+        self, offset: int = 0, limit: int | None = 100
+    ) -> list[dict]:
+        sql = (
+            "SELECT chat_type,chat_id,external_user_id,session_id,generation "
+            "FROM channel_sessions WHERE installation_id=? AND closed_at_ms IS NULL "
+            "ORDER BY scope_mode,chat_type,chat_id,external_user_id LIMIT ? OFFSET ?"
+        )
+        limit_value = -1 if limit is None else max(1, int(limit))
+        with self._lock:
+            rows = self._db.execute(
+                sql,
+                (self.installation_id, limit_value, max(0, offset)),
+            ).fetchall()
+        return [{"chat_type":r[0],"chat_id":r[1] if r[0] == "group" else "", "external_user_id":r[2],
+                 "channel_session_id":r[3],"channel_session_generation":r[4],
+                 "channel_scope_key":SessionKey(r[0],r[1],r[2]).scope_key()} for r in rows]
+
+    def inbox_session(self, key: SessionKey, message_id: str, claim_token: str, session_id: str = "", generation: int = 0):
+        chat_type, chat_id, user_id, _ = self._session_values(key)
+        where = "installation_id=? AND external_message_id=? AND chat_type=? AND chat_id=? AND external_user_id=? AND claim_token=? AND state='processing'"
+        args = (self.installation_id, message_id, chat_type, chat_id, user_id, claim_token)
+        with self._lock, self._db:
+            if session_id:
+                self._db.execute(
+                    "UPDATE channel_inbox SET bound_session_id=?,bound_generation=? WHERE " + where + " AND bound_session_id IS NULL",
+                    (session_id, generation, *args),
+                )
+            row = self._db.execute("SELECT bound_session_id,bound_generation FROM channel_inbox WHERE " + where, args).fetchone()
+            if row is None:
+                raise RuntimeError("message claim is no longer owned")
+            return (str(row[0]), int(row[1] or 0)) if row[0] else None
+
+    def binding_operation(self, request) -> dict:
+        """Own one installation's durable close/query; caller holds the scope lease."""
+        operation_id = request.operation_id.strip()
+        if not operation_id or len(operation_id) > 256:
+            raise ValueError("invalid lifecycle operation id")
+        if request.installation_id != self.installation_id:
+            raise ValueError("lifecycle installation mismatch")
+        if request.action not in {"close", "query"}:
+            raise ValueError("unsupported lifecycle action")
+        key = SessionKey.from_scope_key(request.scope_key)
+        if not request.expected_session_id or request.expected_generation < 1:
+            raise ValueError("expected session and generation are required")
+        parameters = json.dumps(
+            [request.action, request.scope_key, request.expected_session_id, request.expected_generation],
+            separators=(",", ":"),
+        )
+        chat_type, chat_id, user_id, scope = self._session_values(key)
+        with self._lock, self._db:
+            # BEGIN IMMEDIATE closes the read-then-write race across processes.
+            self._db.execute("BEGIN IMMEDIATE")
+            previous = self._db.execute(
+                "SELECT parameters,result_json FROM channel_binding_operations WHERE installation_id=? AND operation_id=?",
+                (self.installation_id, operation_id),
+            ).fetchone()
+            if previous:
+                if str(previous[0]) != parameters:
+                    raise ValueError("lifecycle operation parameters changed")
+                return json.loads(previous[1])
+            result = {"operation_id": operation_id, "status": "not_found", "session_id": "", "generation": 0}
+            row = self._db.execute(
+                "SELECT session_id,generation,closed_at_ms FROM channel_sessions WHERE installation_id=? AND scope_mode=? AND chat_type=? AND chat_id=? AND external_user_id=?",
+                (self.installation_id, scope, chat_type, chat_id, user_id),
+            ).fetchone()
+            if row:
+                result.update(session_id=str(row[0]), generation=int(row[1]))
+                if row[0] != request.expected_session_id:
+                    result["status"] = "not_current"
+                elif int(row[1]) > request.expected_generation:
+                    # A route may deliberately reuse its opaque session id
+                    # after reconnecting. The higher generation is still a
+                    # newer binding, so an operation frozen against the old
+                    # generation must not close it.
+                    result["status"] = "not_current"
+                elif int(row[1]) < request.expected_generation:
+                    result["status"] = "conflict"
+                elif row[2] is not None:
+                    result["status"] = "closed"
+                elif request.action == "query":
+                    result["status"] = "current"
+                else:
+                    self._db.execute(
+                        "UPDATE channel_sessions SET closed_at_ms=?,updated_at_ms=? "
+                        "WHERE installation_id=? AND scope_mode=? AND chat_type=? AND chat_id=? AND external_user_id=? AND session_id=? AND generation=? AND closed_at_ms IS NULL",
+                        (utc_now_ms(), utc_now_ms(), self.installation_id, scope, chat_type, chat_id, user_id, request.expected_session_id, request.expected_generation),
+                    )
+                    result["status"] = "closed"
+            else:
+                # An absent current mapping cannot route new messages to this
+                # old session; record that fact, not a fabricated close.
+                result["status"] = "not_found" if request.action == "query" else "not_current"
+            self._db.execute(
+                "INSERT INTO channel_binding_operations VALUES(?,?,?,?,?)",
+                (self.installation_id, operation_id, parameters, json.dumps(result), utc_now_ms()),
+            )
+            return result
 
     def commit_rotation(self, rotation: SessionRotation) -> bool:
         chat_type, chat_id, user_id, scope = self._session_values(rotation.key)

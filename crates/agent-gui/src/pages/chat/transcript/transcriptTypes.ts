@@ -27,7 +27,7 @@ export type ChatTranscriptProps = {
   liveTranscriptStore: LiveTranscriptStore;
   isCompactionRunning: boolean;
   bottomReservePx?: number;
-  onResendFromEdit: (
+  onResendFromEdit?: (
     messageRef: HistoryMessageRef,
     text: string,
     attachments: PendingUploadedFile[],

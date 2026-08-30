@@ -7,7 +7,9 @@ fn delete_chat_history_sync(
         return Err("历史对话 id 不能为空".to_string());
     }
 
-    let existing = conn
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("开启删除历史事务失败：{e}"))?;
+    let existing = tx
         .query_row(
             "SELECT id FROM chatHistory WHERE id = ?1",
             params![chat_id.as_str()],
@@ -20,24 +22,43 @@ fn delete_chat_history_sync(
         return Err("未找到对应的历史对话".to_string());
     }
 
-    let tx = conn
-        .transaction()
-        .map_err(|e| format!("开启删除历史事务失败：{e}"))?;
+    if crate::services::conversation_lifecycle::has_blocking_admission(
+        &tx,
+        &chat_id,
+        true,
+        now_ms(),
+    )? {
+        return Err("conversation_busy".into());
+    }
+    if crate::services::conversation_lifecycle::has_pending_operation(&tx, &chat_id)? {
+        return Err("conversation_archive_pending".into());
+    }
+    let subagent_prune_result = delete_chat_history_in_transaction(&tx, &chat_id)?;
+    tx.commit().map_err(|e| format!("提交删除历史事务失败：{e}"))?;
+    Ok(subagent_prune_result)
+}
+
+fn delete_chat_history_in_transaction(
+    tx: &Connection,
+    chat_id: &str,
+) -> Result<subagent_store::SubagentPruneResult, String> {
     let subagent_prune_result =
-        subagent_store::delete_subagent_history_for_parent_conversation(&tx, chat_id.as_str())?;
-    delete_chat_history_conversation_fts(&tx, chat_id.as_str())?;
+        subagent_store::delete_subagent_history_for_parent_conversation(tx, chat_id)?;
+    delete_chat_history_conversation_fts(tx, chat_id)?;
+    tx.execute("INSERT OR REPLACE INTO conversationHistoryTombstone(conversation_id,deleted_at) VALUES(?1,?2)", params![chat_id,now_ms()])
+        .map_err(|e| e.to_string())?;
     tx.execute(
         "DELETE FROM chatHistorySegment WHERE conversation_id = ?1",
-        params![chat_id.as_str()],
+        params![chat_id],
     )
     .map_err(|e| format!("删除历史分段失败：{e}"))?;
     tx.execute(
         "DELETE FROM chatHistory WHERE id = ?1",
-        params![chat_id.as_str()],
+        params![chat_id],
     )
     .map_err(|e| format!("删除历史对话失败：{e}"))?;
-    tx.commit()
-        .map_err(|e| format!("提交删除历史事务失败：{e}"))?;
+    tx.execute("DELETE FROM conversationActivityFact WHERE conversation_id = ?1", [chat_id]).map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM conversationArchivePolicyCandidate WHERE conversation_id = ?1", [chat_id]).map_err(|e| e.to_string())?;
     Ok(subagent_prune_result)
 }
 

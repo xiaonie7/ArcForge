@@ -43,6 +43,7 @@ import {
 } from "../lib/chat/conversation/conversationState";
 import type { ChatHistorySummary } from "../lib/chat/history/chatHistory";
 import { memoryExtraction } from "../lib/chat/memory/extractionController";
+import { setConversationEditing } from "../lib/conversationArchive/admission";
 import type { CodeMentionReference } from "../lib/chat/messages/mentionReferences";
 import {
   buildFallbackConversationTitle,
@@ -151,6 +152,7 @@ type ChatPageProps = {
   setContext: (next: Context) => void;
   onOpenSettings: (section?: SectionId) => void;
   onToggleTheme: () => void;
+  openConversationRequest?: { id: string; sequence: number } | null;
 };
 
 export function ChatPage(props: ChatPageProps) {
@@ -175,6 +177,7 @@ export function ChatPage(props: ChatPageProps) {
   );
   const [compactionStatus, setCompactionStatus] = useState<CompactionStatus>({ phase: "idle" });
   const [isSending, setIsSending] = useState(false);
+  const [composerHasDraft, setComposerHasDraft] = useState(false);
   const [isImportingPastedText, setIsImportingPastedText] = useState(false);
   const isImportingPastedTextRef = useRef(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -204,6 +207,7 @@ export function ChatPage(props: ChatPageProps) {
     showOverlay: false,
     errorCode: null,
   });
+  const editingConversationRef = useRef("");
   const { confirm: requestConfirmDialog, dialog: confirmDialog } = useConfirmDialog();
 
   const isAgentMode = isAgentExecutionMode(settings.system.executionMode);
@@ -1412,6 +1416,29 @@ export function ChatPage(props: ChatPageProps) {
     [openController],
   );
 
+  useEffect(() => {
+    const request = props.openConversationRequest;
+    const targetConversationId = request?.id.trim() ?? "";
+    if (!targetConversationId) {
+      return;
+    }
+    setActiveView("chat");
+    handleSelectConversation(targetConversationId);
+  }, [handleSelectConversation, props.openConversationRequest]);
+
+  const handleConversationArchived = useCallback(
+    (id: string) => {
+      const archivedAt = sidebarStore.peek(id)?.archivedAt;
+      if (archivedAt) {
+        updateConversationRuntimeEntry(id, (entry) => ({ ...entry, archivedAt }));
+      }
+      if (currentConversationIdRef.current === id) {
+        handleNewConversation();
+      }
+    },
+    [handleNewConversation, sidebarStore, updateConversationRuntimeEntry],
+  );
+
   // Called by the sidebar container after the store confirmed a deletion:
   // evict local caches, replace the visible conversation when it was the
   // deleted one, and drop the row from the shared-history list.
@@ -1423,21 +1450,32 @@ export function ChatPage(props: ChatPageProps) {
     [removeSharedHistoryItems],
   );
 
-  const handleSend = useCallback(() => {
-    const conversationId = currentConversationIdRef.current.trim();
-    const runtimeEntry = conversationRuntimeCacheRef.current.get(conversationId);
-    if (queuedChatTurnEditSlotRef.current?.conversationId === conversationId) {
-      if (enqueueCurrentComposerTurn("edit")) {
-        requestQueuedChatTurnProcessing(conversationId);
+  const handleSend = useCallback(async () => {
+    try {
+      const conversationId = currentConversationIdRef.current.trim();
+      const authoritative = sidebarStore.peek(conversationId);
+      const runtimeEntry = conversationRuntimeCacheRef.current.get(conversationId);
+      if (
+        (authoritative && Boolean(authoritative.archivedAt)) ||
+        (!authoritative && Boolean(runtimeEntry?.archivedAt))
+      ) {
+        return;
       }
-      return;
+      if (queuedChatTurnEditSlotRef.current?.conversationId === conversationId) {
+        if (await enqueueCurrentComposerTurn("edit")) {
+          requestQueuedChatTurnProcessing(conversationId);
+        }
+        return;
+      }
+      if (conversationId && (isConversationRunning(conversationId) || runtimeEntry?.isSending)) {
+        await enqueueCurrentComposerTurn("end");
+        return;
+      }
+      void sendActionRef.current();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : String(error));
     }
-    if (conversationId && (isConversationRunning(conversationId) || runtimeEntry?.isSending)) {
-      enqueueCurrentComposerTurn("end");
-      return;
-    }
-    void sendActionRef.current();
-  }, [enqueueCurrentComposerTurn, isConversationRunning]);
+  }, [enqueueCurrentComposerTurn, isConversationRunning, sidebarStore]);
 
   const handleStopSending = useCallback(() => {
     stopSendingActionRef.current();
@@ -1445,6 +1483,10 @@ export function ChatPage(props: ChatPageProps) {
 
   const handleComposerBusyChange = useCallback((isBusy: boolean) => {
     composerBusyRef.current = isBusy;
+  }, []);
+
+  const handleComposerDraftContentChange = useCallback((hasContent: boolean) => {
+    setComposerHasDraft(hasContent);
   }, []);
 
   const currentConversationWorkspaceRoot = (() => {
@@ -1456,17 +1498,52 @@ export function ChatPage(props: ChatPageProps) {
   const isCompactionRunning = compactionStatus.phase === "running";
   const isConversationHydrating = hydratingConversationId === currentConversationId;
   const isConversationHydrationFailed = hydrationFailedConversationId === currentConversationId;
+  const authoritativeCurrentConversation = sidebarConversationsById.get(currentConversationId);
+  const cachedCurrentConversation = conversationRuntimeCacheRef.current.get(currentConversationId);
+  const isCurrentConversationArchived = authoritativeCurrentConversation
+    ? Boolean(authoritativeCurrentConversation.archivedAt)
+    : Boolean(cachedCurrentConversation?.archivedAt);
+  useEffect(() => {
+    const targetConversationId =
+      composerHasDraft && !isCurrentConversationArchived ? currentConversationId.trim() : "";
+    const previousConversationId = editingConversationRef.current;
+    if (previousConversationId === targetConversationId) return;
+    editingConversationRef.current = targetConversationId;
+    if (previousConversationId) {
+      void setConversationEditing(previousConversationId, false).catch((error) => {
+        console.warn("Failed to release conversation editing admission", error);
+      });
+    }
+    if (targetConversationId) {
+      void setConversationEditing(targetConversationId, true).catch((error) => {
+        console.warn("Failed to acquire conversation editing admission", error);
+      });
+    }
+  }, [composerHasDraft, currentConversationId, isCurrentConversationArchived]);
+  useEffect(
+    () => () => {
+      const conversationId = editingConversationRef.current;
+      editingConversationRef.current = "";
+      if (conversationId) {
+        void setConversationEditing(conversationId, false).catch(() => undefined);
+      }
+    },
+    [],
+  );
   const composerPlaceholder = isCompactionRunning
     ? t("chat.compactingContextWait")
     : isConversationHydrating
       ? "正在补全完整历史，请稍候..."
       : isConversationHydrationFailed
         ? "当前会话完整历史加载失败，请重新打开会话..."
+        : isCurrentConversationArchived
+          ? t("archive.readOnlyPlaceholder")
         : enabledComposerSkills.length > 0
           ? t("chat.inputHintWithSkills")
           : t("chat.inputHint");
   const isComposerInputDisabled =
     isCompactionRunning ||
+    isCurrentConversationArchived ||
     isConversationHydrating ||
     isConversationHydrationFailed ||
     isImportingPastedText ||
@@ -1570,6 +1647,7 @@ export function ChatPage(props: ChatPageProps) {
             setActiveView("chat");
             handleSelectConversation(id);
           }}
+          onConversationArchived={handleConversationArchived}
           onConversationDeleted={handleConversationDeleted}
           canShareConversations={canShareHistory}
           sharedConversationCount={sharedHistoryItems.length}
@@ -1727,11 +1805,13 @@ export function ChatPage(props: ChatPageProps) {
                     liveTranscriptStore={liveTranscriptStore}
                     isCompactionRunning={isCompactionRunning}
                     bottomReservePx={composerOverlayHeight}
-                    onResendFromEdit={handleResendFromEdit}
+                    onResendFromEdit={isCurrentConversationArchived ? undefined : handleResendFromEdit}
                     onBranchConversation={
                       // 水合中/水合失败时 handler 只会静默 return——直接不传，
                       // 让 AssistantRow 的 disabled 分支给出可见的禁用态。
-                      isConversationHydrating || isConversationHydrationFailed
+                      isCurrentConversationArchived ||
+                      isConversationHydrating ||
+                      isConversationHydrationFailed
                         ? undefined
                         : handleBranchConversation
                     }
@@ -1740,6 +1820,15 @@ export function ChatPage(props: ChatPageProps) {
                   />
                 </ChangedFilesActionsProvider>
               </GeneratedFilesActionsProvider>
+
+              {isCurrentConversationArchived ? (
+                <div
+                  role="status"
+                  className="mx-auto mb-2 w-[min(820px,calc(100%-2rem))] rounded-xl border border-border/60 bg-muted/45 px-3 py-2 text-center text-xs text-muted-foreground"
+                >
+                  {t("archive.readOnlyNotice")}
+                </div>
+              ) : null}
 
               <ChatComposerBar
                 composerRef={composerRef}
@@ -1763,6 +1852,7 @@ export function ChatPage(props: ChatPageProps) {
                 onSend={handleSend}
                 onStop={handleStopSending}
                 onComposerBusyChange={handleComposerBusyChange}
+                onDraftContentChange={handleComposerDraftContentChange}
                 onSelectModel={handleSelectModel}
                 onSelectExecutionMode={(mode) =>
                   setSettings((prev) => {
@@ -1787,7 +1877,11 @@ export function ChatPage(props: ChatPageProps) {
                 queuedTurns={queuedChatTurnsForCurrentConversation}
                 onRunQueuedTurnNow={runQueuedTurnNow}
                 onMoveQueuedTurnUp={moveQueuedTurnUp}
-                onEditQueuedTurn={editQueuedTurn}
+                onEditQueuedTurn={(id) => {
+                  void editQueuedTurn(id).catch((error) => {
+                    setErrorMessage(error instanceof Error ? error.message : String(error));
+                  });
+                }}
                 onRemoveQueuedTurn={removeQueuedTurn}
                 onHeightChange={setComposerOverlayHeight}
               />

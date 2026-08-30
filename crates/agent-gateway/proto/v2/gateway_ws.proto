@@ -39,6 +39,9 @@ message ClientHello {
   string channel_tenant_id = 8;
   string channel_bot_id = 9;
   string connector_id = 10;
+  // Zero means legacy: no binding lifecycle support. Version one implements
+  // durable close/query and lazy session creation over this authenticated link.
+  uint32 channel_lifecycle_version = 11;
 }
 
 // ServerHello 是服务端对 ClientHello 的应答；ok=false 时随即关闭连接。
@@ -182,6 +185,8 @@ message ChannelInboundMessage {
   // inline bytes, then stages them through UploadReadableFiles before the chat
   // command is accepted by the desktop runtime.
   repeated ChannelInboundFile files = 9;
+  string channel_scope_key = 10;
+  uint64 channel_session_generation = 11;
 }
 
 message ChannelAccepted {
@@ -282,6 +287,8 @@ message ChannelClientFrame {
     ChannelInboundMessage inbound = 3;
     PongFrame pong = 4;
     ChannelInputAnswer input_answer = 5;
+    liveagent.gateway.v1.ChannelBindingResponse binding_response = 6;
+    ChannelSessionSnapshot binding_snapshot = 7;
   }
 }
 
@@ -299,6 +306,7 @@ message ChannelServerFrame {
     ChannelInputRequest input_request = 9;
     ChannelInputAnswerResult input_answer_result = 10;
     ChannelInputResolved input_resolved = 11;
+    liveagent.gateway.v1.ChannelBindingRequest binding_request = 12;
   }
 }
 
@@ -472,4 +480,10 @@ message WorkspaceSubscribeRequest {
 // WorkspaceUnsubscribeRequest 取消订阅；响应 AckResult。
 message WorkspaceUnsubscribeRequest {
   string workdir = 1;
+}
+
+// A bounded batch of existing routing identities, without conversation IDs.
+// The authenticated Gateway derives IDs using the unchanged provider adapter.
+message ChannelSessionSnapshot {
+  repeated ChannelInboundMessage bindings = 1;
 }

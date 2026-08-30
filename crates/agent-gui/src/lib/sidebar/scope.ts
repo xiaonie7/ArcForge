@@ -20,6 +20,9 @@ export function conversationMatchesScope(
   conversation: SidebarConversation,
   scope: SidebarScope,
 ): boolean {
+  if (typeof conversation.archivedAt === "number" && conversation.archivedAt > 0) {
+    return false;
+  }
   switch (scope.kind) {
     case "workdir": {
       const cwd = scope.cwd.trim();

@@ -14,6 +14,7 @@ pub async fn chat_history_list(
             ChatHistoryListFilter {
                 cwd,
                 cwd_empty: cwd_empty.unwrap_or(false),
+                ..Default::default()
             },
         )
     })
@@ -143,6 +144,15 @@ pub async fn chat_history_get_active_segment(
             is_pinned: record.is_pinned,
             pinned_at: record.pinned_at,
             is_shared: record.is_shared,
+            archived_at: record.archived_at,
+            archive_reason: record.archive_reason,
+            unarchived_at: record.unarchived_at,
+            lifecycle_version: record.lifecycle_version,
+            last_user_message_at: record.last_user_message_at,
+            last_turn_finished_at: record.last_turn_finished_at,
+            activity_version: record.activity_version,
+            auto_archive_exempt: record.auto_archive_exempt,
+            origin_source_id: record.origin_source_id,
         })
     })
     .await

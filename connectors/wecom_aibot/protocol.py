@@ -43,6 +43,12 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
     v1_error = v1_file.message_type.add(name="ErrorResponse")
     _field(v1_error, "code", 1, 5)
     _field(v1_error, "message", 2, 9)
+    binding_request = v1_file.message_type.add(name="ChannelBindingRequest")
+    for name, number, kind in (("operation_id", 1, 9), ("action", 2, 9), ("installation_id", 3, 9), ("scope_key", 4, 9), ("expected_session_id", 5, 9), ("expected_generation", 6, 4)):
+        _field(binding_request, name, number, kind)
+    binding_response = v1_file.message_type.add(name="ChannelBindingResponse")
+    for name, number, kind in (("operation_id", 1, 9), ("status", 2, 9), ("session_id", 3, 9), ("generation", 4, 4), ("message", 5, 9)):
+        _field(binding_response, name, number, kind)
 
     file = descriptor_pb2.FileDescriptorProto(
         name="arcforge/connector_channel.proto",
@@ -58,6 +64,7 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
     for name, number, kind in (("protocol_version", 1, 13), ("role", 2, 14), ("token", 3, 9), ("agent_id", 4, 9), ("agent_version", 5, 9), ("client_name", 6, 9), ("client_version", 7, 9), ("channel_tenant_id", 8, 9), ("channel_bot_id", 9, 9), ("connector_id", 10, 9)):
         _field(hello, name, number, kind, type_name=".liveagent.gateway.v2.ClientRole" if name == "role" else "")
     server = file.message_type.add(name="ServerHello")
+    _field(hello, "channel_lifecycle_version", 11, 13)
     for name, number, kind in (("ok", 1, 8), ("message", 2, 9), ("session_id", 3, 9), ("server_time", 4, 3), ("heartbeat_period_seconds", 5, 13), ("max_message_bytes", 6, 4)):
         _field(server, name, number, kind)
     ping = file.message_type.add(name="PingFrame")
@@ -83,6 +90,10 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
         repeated=True,
     )
     accepted = file.message_type.add(name="ChannelAccepted")
+    snapshot = file.message_type.add(name="ChannelSessionSnapshot")
+    _field(snapshot, "bindings", 1, 11, type_name=".liveagent.gateway.v2.ChannelInboundMessage", repeated=True)
+    _field(inbound, "channel_scope_key", 10, 9)
+    _field(inbound, "channel_session_generation", 11, 4)
     for name, number, kind in (("external_message_id", 1, 9), ("run_id", 2, 9), ("conversation_id", 3, 9), ("deduped", 4, 8)):
         _field(accepted, name, number, kind)
     delta = file.message_type.add(name="ChannelDelta")
@@ -184,21 +195,27 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
 
     client = file.message_type.add(name="ChannelClientFrame")
     _field(client, "request_id", 1, 9)
-    oneof = client.oneof_decl.add(name="payload")
+    client.oneof_decl.add(name="payload")
     for name, number, type_name in (("hello", 2, ".liveagent.gateway.v2.ClientHello"), ("inbound", 3, ".liveagent.gateway.v2.ChannelInboundMessage"), ("pong", 4, ".liveagent.gateway.v2.PongFrame"), ("input_answer", 5, ".liveagent.gateway.v2.ChannelInputAnswer")):
-        item = client.field.add(name=name, number=number, label=1, type=11, type_name=type_name, oneof_index=0)
+        client.field.add(name=name, number=number, label=1, type=11, type_name=type_name, oneof_index=0)
     server_frame = file.message_type.add(name="ChannelServerFrame")
+    client.field.add(name="binding_response", number=6, label=1, type=11, type_name=".liveagent.gateway.v1.ChannelBindingResponse", oneof_index=0)
+    client.field.add(name="binding_snapshot", number=7, label=1, type=11, type_name=".liveagent.gateway.v2.ChannelSessionSnapshot", oneof_index=0)
     _field(server_frame, "request_id", 1, 9)
-    server_oneof = server_frame.oneof_decl.add(name="payload")
+    server_frame.oneof_decl.add(name="payload")
     for name, number, type_name in (("hello", 2, ".liveagent.gateway.v2.ServerHello"), ("accepted", 3, ".liveagent.gateway.v2.ChannelAccepted"), ("delta", 4, ".liveagent.gateway.v2.ChannelDelta"), ("final", 5, ".liveagent.gateway.v2.ChannelFinal"), ("local_error", 6, ".liveagent.gateway.v1.ErrorResponse"), ("ping", 7, ".liveagent.gateway.v2.PingFrame"), ("file", 8, ".liveagent.gateway.v2.ChannelFile"), ("input_request", 9, ".liveagent.gateway.v2.ChannelInputRequest"), ("input_answer_result", 10, ".liveagent.gateway.v2.ChannelInputAnswerResult"), ("input_resolved", 11, ".liveagent.gateway.v2.ChannelInputResolved")):
         server_frame.field.add(name=name, number=number, label=1, type=11, type_name=type_name, oneof_index=0)
     pool = descriptor_pool.DescriptorPool()
+    server_frame.field.add(name="binding_request", number=12, label=1, type=11, type_name=".liveagent.gateway.v1.ChannelBindingRequest", oneof_index=0)
     pool.Add(v1_file)
     pool.Add(file)
     return pool
 
 
 _POOL = _build_pool()
+ChannelBindingRequest = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v1.ChannelBindingRequest"))
+ChannelBindingResponse = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v1.ChannelBindingResponse"))
+ChannelSessionSnapshot = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelSessionSnapshot"))
 ClientHello = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ClientHello"))
 ErrorResponse = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v1.ErrorResponse"))
 ServerHello = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ServerHello"))

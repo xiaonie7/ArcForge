@@ -1569,6 +1569,15 @@ export class GatewayWebSocketClient {
     );
   }
 
+  async chatQueueEditHeartbeat(conversationId: string, itemId: string): Promise<ChatQueueResponse> {
+    return normalizeChatQueueResponse(
+      await this.requestWithRecovery<RawChatQueueResponse>("chat_queue.edit_heartbeat", {
+        conversation_id: conversationId,
+        item_id: itemId,
+      }),
+    );
+  }
+
   async chatQueueEditCommit(input: {
     conversationId: string;
     itemId: string;
@@ -2235,6 +2244,13 @@ export class GatewayWebSocketClient {
   async deleteHistory(conversationId: string): Promise<void> {
     await this.request("history.delete", {
       conversation_id: conversationId,
+    });
+  }
+
+  async historyArchive<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    return this.request<T>("history.archive", {
+      command: command.trim(),
+      args_json: JSON.stringify(args ?? {}),
     });
   }
 
@@ -3272,6 +3288,7 @@ export type GatewayWebSocketClientLike = {
   ): Promise<ChatQueueResponse>;
   chatQueueRemove(conversationId: string, itemId: string): Promise<ChatQueueResponse>;
   chatQueueEditBegin(conversationId: string, itemId: string): Promise<ChatQueueResponse>;
+  chatQueueEditHeartbeat(conversationId: string, itemId: string): Promise<ChatQueueResponse>;
   chatQueueEditCommit(input: {
     conversationId: string;
     itemId: string;

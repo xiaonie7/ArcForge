@@ -7,6 +7,12 @@ import type {
 } from "../../../components/chat/MentionComposer";
 import type { LiveTranscriptStore } from "../../../lib/chat/conversation/liveTranscriptStore";
 import type { PendingUploadedFile } from "../../../lib/chat/messages/uploadedFiles";
+import {
+  admitConversation,
+  queueAdmissionToken,
+  releaseConversation,
+  setConversationEditing,
+} from "../../../lib/conversationArchive/admission";
 import type { PrincipalContext } from "../../../lib/security/principalContext";
 import {
   type AppSettings,
@@ -54,6 +60,10 @@ import {
   resolveQueuedChatTurnSlotIndex,
   takeNextQueuedChatTurn,
 } from "./chatTurnQueue";
+
+const REMOTE_QUEUE_EDIT_LEASE_MS = 90_000;
+const REMOTE_QUEUE_EDIT_RESTORE_AHEAD_MS = 10_000;
+const REMOTE_QUEUE_EDIT_WATCHDOG_MS = 2_000;
 
 type UseChatTurnQueueParams = {
   settings: AppSettings;
@@ -134,10 +144,58 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         item: QueuedChatTurn;
         slot: QueuedChatTurnEditSlot;
         revision: number;
+        expiresAt: number;
+        settling: boolean;
       }
     >
   >(new Map());
   const previousRunningConversationIdsRef = useRef<ReadonlySet<string>>(new Set());
+
+  const queueAdmissionInput = (
+    item: QueuedChatTurn,
+    phase: "queued" | "editing",
+  ) => ({
+    conversationId: item.conversationId,
+    token: queueAdmissionToken(item.id),
+    phase,
+    originSourceId:
+      item.gatewayRequest?.principal?.channel ?? (item.gatewayRequest ? "web" : "desktop"),
+  }) as const;
+
+  useEffect(() => {
+    const timer = globalThis.setInterval(() => {
+      const now = Date.now();
+      for (const [itemId, session] of remoteQueuedChatTurnEditSlotsRef.current) {
+        if (session.settling || session.expiresAt - now > REMOTE_QUEUE_EDIT_RESTORE_AHEAD_MS) {
+          continue;
+        }
+        session.settling = true;
+        void admitConversation(queueAdmissionInput(session.item, "queued"))
+          .then(() => {
+            if (remoteQueuedChatTurnEditSlotsRef.current.get(itemId) !== session) return;
+            remoteQueuedChatTurnEditSlotsRef.current.delete(itemId);
+            setQueuedChatTurnsState((current) =>
+              insertQueuedChatTurnAtSlot(current, session.item, session.slot),
+            );
+          })
+          .catch((error) => {
+            if (String(error).includes("conversation_archived")) {
+              if (remoteQueuedChatTurnEditSlotsRef.current.get(itemId) === session) {
+                remoteQueuedChatTurnEditSlotsRef.current.delete(itemId);
+              }
+              void releaseConversation(queueAdmissionToken(session.item.id)).catch((releaseError) => {
+                console.warn("Failed to release an archived remote queued edit", releaseError);
+              });
+              return;
+            }
+            session.settling = false;
+            session.expiresAt = Date.now() + REMOTE_QUEUE_EDIT_WATCHDOG_MS;
+            console.warn("Failed to restore an expired remote queued edit", error);
+          });
+      }
+    }, REMOTE_QUEUE_EDIT_WATCHDOG_MS);
+    return () => globalThis.clearInterval(timer);
+  }, []);
 
   function buildChatQueueSnapshot(
     conversationId: string,
@@ -289,7 +347,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     clearCachedComposerDraft(targetConversationId);
   }
 
-  function enqueueCurrentComposerTurn(position: "end" | "edit") {
+  async function enqueueCurrentComposerTurn(position: "end" | "edit") {
     const conversationId = currentConversationIdRef.current.trim();
     const draft = composerRef.current?.getDraft() ?? null;
     const uploadedFiles = pendingUploadedFiles.slice();
@@ -330,6 +388,12 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       gatewayRequest: editSlot?.gatewayRequest,
     });
 
+    await admitConversation({
+      conversationId,
+      token: queueAdmissionToken(queuedTurn.id),
+      phase: "queued",
+      originSourceId: queuedTurn.gatewayRequest?.principal?.channel ?? (queuedTurn.gatewayRequest ? "web" : "desktop"),
+    });
     setQueuedChatTurnsState((current) => {
       if (editSlot) {
         return insertQueuedChatTurnAtSlot(current, queuedTurn, editSlot);
@@ -409,6 +473,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
               }
             : undefined;
         const accepted = await sendActionRef.current({
+          lifecycleToken: queueAdmissionToken(queuedTurn.id),
           textOverride: gatewayRequest?.principal?.channelCommand ? "" : undefined,
           composerDraftOverride: queuedTurn.draft,
           uploadedFilesOverride: queuedTurn.uploadedFiles,
@@ -431,6 +496,8 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
             setQueuedChatTurnsState((current) =>
               promoteQueuedChatTurn(appendQueuedChatTurn(current, queuedTurn), queuedTurn.id),
             );
+          } else {
+            await releaseConversation(queueAdmissionToken(queuedTurn.id));
           }
           inFlightQueuedTurn = null;
         } else if (gatewayRequest) {
@@ -497,7 +564,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     setQueuedChatTurnsState((current) => moveQueuedChatTurn(current, id, "up"));
   }
 
-  function editQueuedTurn(id: string) {
+  async function editQueuedTurn(id: string) {
     const key = id.trim();
     const queuedTurnIndex = queuedChatTurnsRef.current.findIndex((item) => item.id === key);
     const queuedTurn = queuedTurnIndex >= 0 ? queuedChatTurnsRef.current[queuedTurnIndex] : null;
@@ -510,7 +577,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     const currentDraft = composerRef.current?.getDraft() ?? null;
     const currentUploads = pendingUploadedFiles.slice();
     if (queuedChatTurnHasContent(currentDraft, currentUploads)) {
-      enqueueCurrentComposerTurn(queuedChatTurnEditSlotRef.current ? "edit" : "end");
+      await enqueueCurrentComposerTurn(queuedChatTurnEditSlotRef.current ? "edit" : "end");
     }
 
     const sameConversationQueue = queuedChatTurnsRef.current.filter(
@@ -525,7 +592,7 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       sameConversationIndex >= 0
         ? (sameConversationQueue[sameConversationIndex + 1]?.id ?? null)
         : null;
-    queuedChatTurnEditSlotRef.current = {
+    const editSlot = {
       conversationId: targetConversationId,
       previousId,
       nextId,
@@ -539,6 +606,17 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       runtimeControls: { ...queuedTurn.runtimeControls },
       gatewayRequest: queuedTurn.gatewayRequest ? { ...queuedTurn.gatewayRequest } : undefined,
     };
+    // Transfer protection before removing the visible queue item. If either
+    // durable write fails, keep the item in the queue and let the caller retry;
+    // there is never a moment where automatic archive sees neither guard.
+    await setConversationEditing(targetConversationId, true);
+    try {
+      await releaseConversation(queueAdmissionToken(queuedTurn.id));
+    } catch (error) {
+      await setConversationEditing(targetConversationId, false).catch(() => undefined);
+      throw error;
+    }
+    queuedChatTurnEditSlotRef.current = editSlot;
     setQueuedChatTurnsState((current) => removeQueuedChatTurn(current, key));
     composerRef.current?.setDraft(queuedTurn.draft);
     setPendingUploadsForConversation(targetConversationId, queuedTurn.uploadedFiles);
@@ -549,6 +627,11 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
   function removeQueuedTurn(id: string) {
     const queuedTurn = queuedChatTurnsRef.current.find((item) => item.id === id.trim());
     setQueuedChatTurnsState((current) => removeQueuedChatTurn(current, id));
+    if (queuedTurn) {
+      void releaseConversation(queueAdmissionToken(queuedTurn.id)).catch((error) => {
+        console.error("Failed to release removed queued conversation admission", error);
+      });
+    }
     const gatewayRequest = queuedTurn?.gatewayRequest;
     if (gatewayRequest) {
       void invoke("gateway_chat_cancel_request", {
@@ -658,6 +741,12 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
       },
     });
 
+    await admitConversation({
+      conversationId: targetConversationId,
+      token: queueAdmissionToken(queuedTurn.id),
+      phase: "queued",
+      originSourceId: principal?.channel ?? "web",
+    });
     setQueuedChatTurnsState((current) => {
       const appended = appendQueuedChatTurn(current, queuedTurn);
       return payload.queuePolicy === "interrupt"
@@ -831,18 +920,43 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
               : null,
           index: sameConversationIndex >= 0 ? sameConversationIndex : undefined,
         };
-        remoteQueuedChatTurnEditSlotsRef.current.set(item.id, {
-          item,
-          slot,
-          revision: chatQueueRevisionRef.current,
-        });
-        const detail = buildChatQueueItemDetail(item);
-        setQueuedChatTurnsState((current) => removeQueuedChatTurn(current, item.id));
-        respond(requestId, {
-          accepted: true,
-          itemJson: JSON.stringify(detail),
-          snapshotJson: snapshotJson(conversationId),
-        });
+        void admitConversation(queueAdmissionInput(item, "editing"))
+          .then(() => {
+            remoteQueuedChatTurnEditSlotsRef.current.set(item.id, {
+              item,
+              slot,
+              revision: chatQueueRevisionRef.current,
+              expiresAt: Date.now() + REMOTE_QUEUE_EDIT_LEASE_MS,
+              settling: false,
+            });
+            const detail = buildChatQueueItemDetail(item);
+            setQueuedChatTurnsState((current) => removeQueuedChatTurn(current, item.id));
+            respond(requestId, {
+              accepted: true,
+              itemJson: JSON.stringify(detail),
+              snapshotJson: snapshotJson(conversationId),
+            });
+          })
+          .catch((error) => fail(String(error), "lifecycle_conflict"));
+        return;
+      }
+
+      if (action === "edit_heartbeat") {
+        const session = remoteQueuedChatTurnEditSlotsRef.current.get(itemId);
+        if (!session || session.slot.conversationId !== conversationId || session.settling) {
+          fail("queued edit session not found", "not_found");
+          return;
+        }
+        void admitConversation(queueAdmissionInput(session.item, "editing"))
+          .then(() => {
+            if (remoteQueuedChatTurnEditSlotsRef.current.get(itemId) !== session) {
+              fail("queued edit session not found", "not_found");
+              return;
+            }
+            session.expiresAt = Date.now() + REMOTE_QUEUE_EDIT_LEASE_MS;
+            respond(requestId, { accepted: true });
+          })
+          .catch((error) => fail(String(error), "lifecycle_conflict"));
         return;
       }
 
@@ -856,11 +970,27 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
           fail("queued edit session conversation mismatch", "not_found");
           return;
         }
-        remoteQueuedChatTurnEditSlotsRef.current.delete(itemId);
-        setQueuedChatTurnsState((current) =>
-          insertQueuedChatTurnAtSlot(current, session.item, session.slot),
-        );
-        respond(requestId, { accepted: true, snapshotJson: snapshotJson(conversationId) });
+        if (session.settling) {
+          fail("queued edit session is settling", "conflict");
+          return;
+        }
+        session.settling = true;
+        void admitConversation(queueAdmissionInput(session.item, "queued"))
+          .then(() => {
+            if (remoteQueuedChatTurnEditSlotsRef.current.get(itemId) !== session) {
+              fail("queued edit session not found", "not_found");
+              return;
+            }
+            remoteQueuedChatTurnEditSlotsRef.current.delete(itemId);
+            setQueuedChatTurnsState((current) =>
+              insertQueuedChatTurnAtSlot(current, session.item, session.slot),
+            );
+            respond(requestId, { accepted: true, snapshotJson: snapshotJson(conversationId) });
+          })
+          .catch((error) => {
+            session.settling = false;
+            fail(String(error), "lifecycle_conflict");
+          });
         return;
       }
 
@@ -872,6 +1002,10 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
         }
         if (session.slot.conversationId !== conversationId) {
           fail("queued edit session conversation mismatch", "not_found");
+          return;
+        }
+        if (session.settling) {
+          fail("queued edit session is settling", "conflict");
           return;
         }
         if (
@@ -898,11 +1032,23 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
           id: session.item.id,
           createdAt: session.item.createdAt,
         });
-        remoteQueuedChatTurnEditSlotsRef.current.delete(itemId);
-        setQueuedChatTurnsState((current) =>
-          insertQueuedChatTurnAtSlot(current, nextItem, session.slot),
-        );
-        respond(requestId, { accepted: true, snapshotJson: snapshotJson(conversationId) });
+        session.settling = true;
+        void admitConversation(queueAdmissionInput(nextItem, "queued"))
+          .then(() => {
+            if (remoteQueuedChatTurnEditSlotsRef.current.get(itemId) !== session) {
+              fail("queued edit session not found", "not_found");
+              return;
+            }
+            remoteQueuedChatTurnEditSlotsRef.current.delete(itemId);
+            setQueuedChatTurnsState((current) =>
+              insertQueuedChatTurnAtSlot(current, nextItem, session.slot),
+            );
+            respond(requestId, { accepted: true, snapshotJson: snapshotJson(conversationId) });
+          })
+          .catch((error) => {
+            session.settling = false;
+            fail(String(error), "lifecycle_conflict");
+          });
         return;
       }
 

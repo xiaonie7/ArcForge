@@ -52,6 +52,7 @@ import {
   GitRequestSchema,
   HistoryBranchRequestSchema,
   HistoryDeleteRequestSchema,
+  HistoryArchiveRequestSchema,
   HistoryGetRequestSchema,
   HistoryListRequestSchema,
   HistoryPinRequestSchema,
@@ -153,6 +154,10 @@ function toI64(value: unknown): bigint {
 // 64 位整数入站边界：bigint → number（详见文件头注释）。
 function num(value: number | bigint | undefined): number {
   return Number(value ?? 0);
+}
+
+function optNum(value: number | bigint | undefined): number | undefined {
+  return value === undefined ? undefined : Number(value);
 }
 
 function parseJson(text: string): unknown {
@@ -535,6 +540,14 @@ function agentRequestPayload(type: string, body: J): GatewayEnvelope["payload"] 
         case: "historyDelete",
         value: create(HistoryDeleteRequestSchema, {
           conversationId: trimStr(body.conversation_id),
+        }),
+      };
+    case "history.archive":
+      return {
+        case: "historyArchive",
+        value: create(HistoryArchiveRequestSchema, {
+          command: trimStr(body.command),
+          argsJson: trimStr(body.args_json) || "{}",
         }),
       };
     case "providers.list":
@@ -922,6 +935,8 @@ function decodeAgentResponse(envelope: AgentEnvelope, options: { agentOnline: bo
       return historyShareStatusPayload(payload.value.share);
     case "historyDeleteResp":
       return { ok: true };
+    case "historyArchiveResp":
+      return unmarshalJsonPayload(payload.value.resultJson);
     case "historyWorkdirsResp":
       return {
         workdirs: payload.value.workdirs.map((workdir) => ({
@@ -1128,6 +1143,15 @@ function conversationSummaryPayload(conversation: ConversationSummary): J {
     pinned_at: num(conversation.pinnedAt),
     is_shared: conversation.isShared,
     selected_model_json: conversation.selectedModelJson,
+    archived_at: optNum(conversation.archivedAt),
+    archive_reason: conversation.archiveReason,
+    unarchived_at: optNum(conversation.unarchivedAt),
+    last_user_message_at: optNum(conversation.lastUserMessageAt),
+    last_turn_finished_at: optNum(conversation.lastTurnFinishedAt),
+    origin_source_id: conversation.originSourceId,
+    lifecycle_version: num(conversation.lifecycleVersion),
+    activity_version: num(conversation.activityVersion),
+    auto_archive_exempt: conversation.autoArchiveExempt,
   };
 }
 

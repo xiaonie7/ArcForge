@@ -47,6 +47,7 @@ pub mod gateway_proto {
 /// 兼容别名：既有代码一律以 `proto::` 引用 v1 业务消息，别名使其零改动。
 pub use gateway_proto::v1 as proto;
 
+mod channel_lifecycle;
 mod chat;
 mod chat_inbox;
 mod connection;
@@ -63,6 +64,7 @@ mod types;
 mod util;
 mod ws_transport;
 
+pub use channel_lifecycle::*;
 pub(crate) use chat::*;
 pub(crate) use chat_inbox::*;
 pub(crate) use connection::*;
@@ -138,6 +140,8 @@ pub struct GatewayController {
     pub(crate) tunnel_proxy: TunnelProxy,
     pub(crate) workspace_watch: Arc<WorkspaceWatchService>,
     pending_chat_queue_requests: Mutex<HashMap<String, oneshot::Sender<proto::ChatQueueResponse>>>,
+    pending_channel_binding_requests:
+        Mutex<HashMap<String, (String, oneshot::Sender<proto::ChannelBindingResponse>)>>,
     terminal_forwarder_once: Once,
     terminal_stream_forwarder_once: Once,
     sftp_forwarder_once: Once,

@@ -110,6 +110,7 @@ type ChatHistorySidebarProps = {
   sharedConversationCount: number;
   onShareConversation: (item: SidebarConversation) => void;
   onOpenSharedConversations: () => void;
+  onArchiveConversation: (id: string) => void;
   onDeleteConversation: (id: string) => void;
   onLoadMore: () => void;
   onCloseSidebar: () => void;
@@ -161,6 +162,7 @@ const HistoryRow = memo(function HistoryRow(props: {
   onCancelRename: () => void;
   onSetPinned: (id: string, isPinned: boolean) => void;
   onShareConversation: (item: SidebarConversation) => void;
+  onArchiveConversation: (id: string) => void;
   onDeleteConversation: (id: string) => void;
   onSetPendingDelete: (id: string | null) => void;
 }) {
@@ -181,6 +183,7 @@ const HistoryRow = memo(function HistoryRow(props: {
     onCancelRename,
     onSetPinned,
     onShareConversation,
+    onArchiveConversation,
     onDeleteConversation,
     onSetPendingDelete,
   } = props;
@@ -211,6 +214,10 @@ const HistoryRow = memo(function HistoryRow(props: {
   const handleShare = useCallback(() => {
     onShareConversation(item);
   }, [item, onShareConversation]);
+
+  const handleArchive = useCallback(() => {
+    onArchiveConversation(item.id);
+  }, [item.id, onArchiveConversation]);
 
   const handleConfirmDelete = useCallback(() => {
     onSetPendingDelete(null);
@@ -401,6 +408,14 @@ const HistoryRow = memo(function HistoryRow(props: {
                 >
                   <Edit3 className="h-3.5 w-3.5" />
                   {t("chat.conversationRename")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={item.isPending || isRunning || isBusy}
+                  onSelect={handleArchive}
+                  className="gap-2"
+                >
+                  <Archive className="h-3.5 w-3.5" />
+                  {t("chat.conversationArchive")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={isDeleteDisabled || isBusy}
@@ -1032,6 +1047,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
     sharedConversationCount,
     onShareConversation,
     onOpenSharedConversations,
+    onArchiveConversation,
     onDeleteConversation,
     onLoadMore,
     onCloseSidebar,
@@ -1055,6 +1071,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
   const handleSetPinned = useStableEvent(onSetPinned);
   const handleShareConversation = useStableEvent(onShareConversation);
   const handleOpenSharedConversations = useStableEvent(onOpenSharedConversations);
+  const handleArchiveConversation = useStableEvent(onArchiveConversation);
   const handleDeleteConversation = useStableEvent(onDeleteConversation);
   const handleSelectProject = useStableEvent((project: WorkspaceProject) => {
     onSelectProject?.(project);
@@ -1193,6 +1210,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
         onCancelRename={handleCancelRename}
         onSetPinned={handleSetPinned}
         onShareConversation={handleShareConversation}
+        onArchiveConversation={handleArchiveConversation}
         onDeleteConversation={handleDeleteConversation}
         onSetPendingDelete={setPendingDeleteId}
       />
@@ -1202,6 +1220,7 @@ export const ChatHistorySidebar = memo(function ChatHistorySidebar(props: ChatHi
       currentConversationId,
       handleCancelRename,
       handleCommitRename,
+      handleArchiveConversation,
       handleDeleteConversation,
       handleRenameDraftChange,
       handleSelectConversation,

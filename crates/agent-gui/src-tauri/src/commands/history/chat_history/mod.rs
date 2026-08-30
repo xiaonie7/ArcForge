@@ -38,4 +38,5 @@ include!("search.rs");
 include!("commands.rs");
 include!("branch.rs");
 include!("delete.rs");
+include!("archiving.rs");
 include!("tests.rs");

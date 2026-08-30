@@ -8,12 +8,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/liveagent/agent-gateway/internal/config"
+	gatewayv1 "github.com/liveagent/agent-gateway/internal/proto/v1"
 	"github.com/liveagent/agent-gateway/internal/protocol/shared"
 	"github.com/liveagent/agent-gateway/internal/session"
 )
@@ -29,8 +31,12 @@ const closeCodeUnauthorized = 4401
 
 // Server 聚合三条 v2 链路的依赖，由 http 路由层构造一次、复用于全部连接。
 type Server struct {
-	cfg *config.Config
-	sm  *session.Manager
+	cfg              *config.Config
+	sm               *session.Manager
+	channelsMu       sync.Mutex
+	channels         map[string]*channelConn
+	bindingPending   map[string]*channelBindingPending
+	bindingSnapshots map[string]map[string]*gatewayv1.ChannelBindingRegistration
 }
 
 // NewServer 构造 v2 协议服务端。

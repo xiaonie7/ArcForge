@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
+  Archive,
   ArrowLeft,
   Blend,
   BookOpen,
@@ -21,6 +22,7 @@ import { useLocale } from "../i18n";
 import { isAgentExecutionMode } from "../lib/settings";
 import { McpHubPage } from "./mcp-hub/McpHubPage";
 import { AboutSection } from "./settings/AboutSection";
+import { ArchivedChatsSection } from "./settings/ArchivedChatsSection";
 import { AgentsSection } from "./settings/AgentsSection";
 import { DatabaseSection } from "./settings/DatabaseSection";
 import { GlobalShortcutsSection } from "./settings/GlobalShortcutsSection";
@@ -128,6 +130,10 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "about", icon: <Info className="h-3.5 w-3.5" /> },
     ],
   },
+  {
+    labelKey: "settings.groupArchived",
+    items: [{ id: "archived", icon: <Archive className="h-3.5 w-3.5" /> }],
+  },
 ];
 
 export function SettingsPage(props: SettingsPageProps) {
@@ -145,6 +151,7 @@ export function SettingsPage(props: SettingsPageProps) {
   const sectionLabels = useMemo<Record<SectionId, string>>(
     () => ({
       system: t("settings.navSystem"),
+      archived: t("archive.title"),
       shortcuts: t("settings.navShortcuts"),
       systemTools: t("settings.navSystemTools"),
       providers: t("settings.navProviders"),
@@ -188,6 +195,8 @@ export function SettingsPage(props: SettingsPageProps) {
   const saveIndicator = getSaveIndicator(saveState, t);
   const sectionContent = (() => {
     switch (section) {
+      case "archived":
+        return <ArchivedChatsSection onOpenConversation={props.onOpenConversation} projects={settings.system.workspaceProjects} />;
       case "providers":
         return <ProvidersSection settings={settings} setSettings={setSettings} />;
       case "system":
@@ -310,11 +319,11 @@ export function SettingsPage(props: SettingsPageProps) {
 
         <main className="flex min-w-0 flex-1 flex-col">
           <MacOsTitleBarSpacer />
-          <div className="border-b px-6 py-3.5">
+          {section !== "archived" ? <div className="border-b px-6 py-3.5">
             <div key={section} className="settings-section-title-enter text-base font-semibold">
               {sectionLabels[section]}
             </div>
-          </div>
+          </div> : null}
 
           <div
             key={section}

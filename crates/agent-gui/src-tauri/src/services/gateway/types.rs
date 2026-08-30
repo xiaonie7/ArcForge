@@ -69,6 +69,9 @@ pub struct GatewayTrustedOriginEvent {
     pub auth_time: i64,
     pub request_id: String,
     pub channel_session_id: String,
+    pub channel_scope_key: String,
+    pub channel_session_generation: u64,
+    pub channel_lifecycle_version: u32,
     pub channel_command: String,
 }
 
@@ -203,6 +206,15 @@ pub struct GatewayHistorySyncConversation {
     pub is_pinned: bool,
     pub pinned_at: Option<i64>,
     pub is_shared: bool,
+    pub archived_at: Option<i64>,
+    pub archive_reason: Option<String>,
+    pub unarchived_at: Option<i64>,
+    pub last_user_message_at: Option<i64>,
+    pub last_turn_finished_at: Option<i64>,
+    pub origin_source_id: Option<String>,
+    pub lifecycle_version: i64,
+    pub activity_version: i64,
+    pub auto_archive_exempt: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

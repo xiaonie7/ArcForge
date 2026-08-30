@@ -1,6 +1,7 @@
 package pbws
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -17,6 +18,7 @@ const (
 	maxHistoryListLimit        = 200
 	defaultHistoryListPage     = 1
 	defaultHistoryListPageSize = 80
+	maxHistoryArchiveArgsBytes = 1 << 20
 )
 
 // vetAgentRequest 校验并（必要时）原地修正一条直通请求；返回错误则拒绝转发，错误信息面向客户端。
@@ -29,6 +31,8 @@ func vetAgentRequest(sm *session.Manager, env *gatewayv1.GatewayEnvelope) error 
 	case *gatewayv1.GatewayEnvelope_HistoryList:
 		clampHistoryList(payload.HistoryList)
 		return nil
+	case *gatewayv1.GatewayEnvelope_HistoryArchive:
+		return vetHistoryArchive(payload.HistoryArchive)
 	case *gatewayv1.GatewayEnvelope_HistoryGet,
 		*gatewayv1.GatewayEnvelope_HistoryRename,
 		*gatewayv1.GatewayEnvelope_HistoryDelete,
@@ -102,6 +106,34 @@ func vetAgentRequest(sm *session.Manager, env *gatewayv1.GatewayEnvelope) error 
 		// （走 HTTP 上传）、history_share_resolve（公共分享端点专用）及网关内部推送臂。
 		return errors.New("unsupported agent_request payload")
 	}
+}
+
+func vetHistoryArchive(req *gatewayv1.HistoryArchiveRequest) error {
+	if req == nil {
+		return errors.New("history archive request is required")
+	}
+	command := strings.TrimSpace(req.GetCommand())
+	if command != req.GetCommand() {
+		return errors.New("invalid history archive command")
+	}
+	switch command {
+	case "query", "facets", "snapshot", "delete", "archive", "unarchive", "policy_get", "policy_set", "metadata", "editing":
+	default:
+		return errors.New("unsupported history archive command")
+	}
+	argsJSON := strings.TrimSpace(req.GetArgsJson())
+	if argsJSON == "" {
+		argsJSON = "{}"
+		req.ArgsJson = argsJSON
+	}
+	if len(argsJSON) > maxHistoryArchiveArgsBytes {
+		return errors.New("history archive arguments are too large")
+	}
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil || args == nil {
+		return errors.New("history archive arguments must be a JSON object")
+	}
+	return nil
 }
 
 // gitActionIsWrite 判定 git 直通请求是否为写操作：写操作受桌面端 Remote 设置

@@ -201,6 +201,44 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
   }
 
   switch (command) {
+    case "chat_history_query":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("query", {
+        input: args?.input ?? {},
+      });
+    case "chat_history_archive_facets":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("facets", {
+        archiveState: args?.archiveState ?? "archived",
+      });
+    case "chat_history_archive_snapshot":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("snapshot", {
+        input: args?.input ?? {},
+      });
+    case "chat_history_delete_archived":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("delete", {
+        input: args?.input ?? {},
+      });
+    case "chat_history_archive":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("archive", {
+        input: args?.input ?? {},
+      });
+    case "chat_history_unarchive":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("unarchive", {
+        input: args?.input ?? {},
+      });
+    case "chat_history_archive_policy_get":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("policy_get");
+    case "chat_history_archive_policy_set":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("policy_set", {
+        input: args?.input ?? {},
+      });
+    case "conversation_lifecycle_metadata":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("metadata", {
+        id: args?.id ?? "",
+      });
+    case "conversation_lifecycle_editing":
+      return getGatewayWebSocketClient(loadToken().trim()).historyArchive<T>("editing", {
+        input: args?.input ?? {},
+      });
     case "system_pick_folder":
       return (await pickWorkdirInBrowser()) as T;
     case "system_pick_file":
@@ -228,6 +266,15 @@ export async function invoke<T>(command: string, args?: Record<string, unknown>)
           isPinned: item.is_pinned,
           pinnedAt: item.pinned_at,
           isShared: item.is_shared,
+          archivedAt: item.archived_at,
+          archiveReason: item.archive_reason,
+          unarchivedAt: item.unarchived_at,
+          lastUserMessageAt: item.last_user_message_at,
+          lastTurnFinishedAt: item.last_turn_finished_at,
+          originSourceId: item.origin_source_id,
+          lifecycleVersion: item.lifecycle_version,
+          activityVersion: item.activity_version,
+          autoArchiveExempt: item.auto_archive_exempt,
         })),
         totalCount: response.total_count,
       } as T;

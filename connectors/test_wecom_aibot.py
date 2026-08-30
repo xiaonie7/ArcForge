@@ -500,6 +500,158 @@ class DedupeTests(unittest.TestCase):
 
 
 class PersistentStateStoreTests(unittest.TestCase):
+    @staticmethod
+    def _binding_request(
+        key,
+        *,
+        operation_id,
+        action,
+        session_id,
+        generation,
+        installation_id="installation",
+    ):
+        return SimpleNamespace(
+            operation_id=operation_id,
+            action=action,
+            installation_id=installation_id,
+            scope_key=key.scope_key(),
+            expected_session_id=session_id,
+            expected_generation=generation,
+        )
+
+    def test_binding_close_is_idempotent_and_next_message_opens_one_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertEqual(backend.get_session(key, lambda: "session-1"), "session-1")
+            self.assertEqual(backend.session_generation(key), 1)
+
+            query = self._binding_request(
+                key,
+                operation_id="query-1",
+                action="query",
+                session_id="session-1",
+                generation=1,
+            )
+            self.assertEqual(backend.binding_operation(query)["status"], "current")
+
+            close = self._binding_request(
+                key,
+                operation_id="close-1",
+                action="close",
+                session_id="session-1",
+                generation=1,
+            )
+            first = backend.binding_operation(close)
+            self.assertEqual((first["status"], first["generation"]), ("closed", 1))
+            self.assertEqual(backend.binding_operation(close), first)
+            self.assertEqual(backend.current_bindings(), [])
+
+            with self.assertRaises(ValueError):
+                backend.binding_operation(
+                    self._binding_request(
+                        key,
+                        operation_id="close-1",
+                        action="query",
+                        session_id="session-1",
+                        generation=1,
+                    )
+                )
+
+            self.assertEqual(backend.get_session(key, lambda: "session-2"), "session-2")
+            self.assertEqual(backend.session_generation(key), 2)
+            stale = backend.binding_operation(
+                self._binding_request(
+                    key,
+                    operation_id="query-2",
+                    action="query",
+                    session_id="session-1",
+                    generation=1,
+                )
+            )
+            self.assertEqual((stale["status"], stale["session_id"]), ("not_current", "session-2"))
+            backend.close()
+
+    def test_binding_old_generation_is_not_current_when_session_id_is_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            self.assertEqual(backend.get_session(key, lambda: "reused-session"), "reused-session")
+            with backend._lock, backend._db:
+                backend._db.execute(
+                    "UPDATE channel_sessions SET generation=2,closed_at_ms=NULL "
+                    "WHERE installation_id=? AND session_id=?",
+                    ("installation", "reused-session"),
+                )
+
+            stale = backend.binding_operation(
+                self._binding_request(
+                    key,
+                    operation_id="query-reused-session-generation-1",
+                    action="query",
+                    session_id="reused-session",
+                    generation=1,
+                )
+            )
+            self.assertEqual(
+                (stale["status"], stale["session_id"], stale["generation"]),
+                ("not_current", "reused-session", 2),
+            )
+            backend.close()
+
+    def test_inbox_binding_stays_on_closed_session_during_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SQLiteStateStore(
+                os.path.join(directory, "wecom-state.sqlite3"),
+                installation_id="installation",
+            )
+            key = SessionStore.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            session_id = backend.get_session(key, lambda: "session-1")
+            claimed, _, claim_token = backend.claim_inbox(
+                key, "message-1", ttl_seconds=60, max_entries=100
+            )
+            self.assertTrue(claimed)
+            self.assertIsNotNone(claim_token)
+            self.assertEqual(
+                backend.inbox_session(
+                    key,
+                    "message-1",
+                    claim_token=claim_token,
+                    session_id=session_id,
+                    generation=1,
+                ),
+                ("session-1", 1),
+            )
+            backend.binding_operation(
+                self._binding_request(
+                    key,
+                    operation_id="close-1",
+                    action="close",
+                    session_id="session-1",
+                    generation=1,
+                )
+            )
+            self.assertEqual(backend.get_session(key, lambda: "session-2"), "session-2")
+            self.assertEqual(
+                backend.inbox_session(
+                    key, "message-1", claim_token=claim_token
+                ),
+                ("session-1", 1),
+            )
+            backend.close()
+
     def test_schema_uses_wal_and_does_not_key_inbox_by_session(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "wecom-state.sqlite3")

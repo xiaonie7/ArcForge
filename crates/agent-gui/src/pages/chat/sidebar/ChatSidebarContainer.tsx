@@ -59,6 +59,7 @@ type ChatSidebarContainerProps = {
   onSelectConversation: (id: string) => void;
   // Invoked after the store confirmed a deletion; ChatPage cleans artifacts
   // and replaces the current conversation when needed.
+  onConversationArchived: (id: string) => void;
   onConversationDeleted: (id: string) => void;
   canShareConversations: boolean;
   sharedConversationCount: number;
@@ -80,7 +81,7 @@ function selectMutationErrors(snapshot: SidebarSnapshot) {
 }
 
 export function ChatSidebarContainer(props: ChatSidebarContainerProps) {
-  const { store, projects, onConversationDeleted } = props;
+  const { store, projects, onConversationArchived, onConversationDeleted } = props;
   const { t } = useLocale();
 
   const items = useSidebarSelector(store, selectConversations);
@@ -154,6 +155,18 @@ export function ChatSidebarContainer(props: ChatSidebarContainerProps) {
       });
     },
     [onConversationDeleted, store],
+  );
+
+  const handleArchiveConversation = useCallback(
+    (id: string) => {
+      store.clearMutationError(id);
+      void store.archive(id).then((archived) => {
+        if (archived) {
+          onConversationArchived(id);
+        }
+      });
+    },
+    [onConversationArchived, store],
   );
 
   const handleLoadMore = useCallback(() => {
@@ -233,6 +246,7 @@ export function ChatSidebarContainer(props: ChatSidebarContainerProps) {
       sharedConversationCount={props.sharedConversationCount}
       onShareConversation={props.onShareConversation}
       onOpenSharedConversations={props.onOpenSharedConversations}
+      onArchiveConversation={handleArchiveConversation}
       onDeleteConversation={handleDeleteConversation}
       onLoadMore={handleLoadMore}
       onCloseSidebar={props.onCloseSidebar}

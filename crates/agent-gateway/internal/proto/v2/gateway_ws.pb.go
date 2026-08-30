@@ -98,8 +98,11 @@ type ClientHello struct {
 	ChannelTenantId string `protobuf:"bytes,8,opt,name=channel_tenant_id,json=channelTenantId,proto3" json:"channel_tenant_id,omitempty"`
 	ChannelBotId    string `protobuf:"bytes,9,opt,name=channel_bot_id,json=channelBotId,proto3" json:"channel_bot_id,omitempty"`
 	ConnectorId     string `protobuf:"bytes,10,opt,name=connector_id,json=connectorId,proto3" json:"connector_id,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Zero means legacy: no binding lifecycle support. Version one implements
+	// durable close/query and lazy session creation over this authenticated link.
+	ChannelLifecycleVersion uint32 `protobuf:"varint,11,opt,name=channel_lifecycle_version,json=channelLifecycleVersion,proto3" json:"channel_lifecycle_version,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *ClientHello) Reset() {
@@ -200,6 +203,13 @@ func (x *ClientHello) GetConnectorId() string {
 		return x.ConnectorId
 	}
 	return ""
+}
+
+func (x *ClientHello) GetChannelLifecycleVersion() uint32 {
+	if x != nil {
+		return x.ChannelLifecycleVersion
+	}
+	return 0
 }
 
 // ServerHello 是服务端对 ClientHello 的应答；ok=false 时随即关闭连接。
@@ -1326,9 +1336,11 @@ type ChannelInboundMessage struct {
 	// Connector-downloaded WeCom attachments. The gateway validates bounded
 	// inline bytes, then stages them through UploadReadableFiles before the chat
 	// command is accepted by the desktop runtime.
-	Files         []*ChannelInboundFile `protobuf:"bytes,9,rep,name=files,proto3" json:"files,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Files                    []*ChannelInboundFile `protobuf:"bytes,9,rep,name=files,proto3" json:"files,omitempty"`
+	ChannelScopeKey          string                `protobuf:"bytes,10,opt,name=channel_scope_key,json=channelScopeKey,proto3" json:"channel_scope_key,omitempty"`
+	ChannelSessionGeneration uint64                `protobuf:"varint,11,opt,name=channel_session_generation,json=channelSessionGeneration,proto3" json:"channel_session_generation,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *ChannelInboundMessage) Reset() {
@@ -1422,6 +1434,20 @@ func (x *ChannelInboundMessage) GetFiles() []*ChannelInboundFile {
 		return x.Files
 	}
 	return nil
+}
+
+func (x *ChannelInboundMessage) GetChannelScopeKey() string {
+	if x != nil {
+		return x.ChannelScopeKey
+	}
+	return ""
+}
+
+func (x *ChannelInboundMessage) GetChannelSessionGeneration() uint64 {
+	if x != nil {
+		return x.ChannelSessionGeneration
+	}
+	return 0
 }
 
 type ChannelAccepted struct {
@@ -2222,6 +2248,8 @@ type ChannelClientFrame struct {
 	//	*ChannelClientFrame_Inbound
 	//	*ChannelClientFrame_Pong
 	//	*ChannelClientFrame_InputAnswer
+	//	*ChannelClientFrame_BindingResponse
+	//	*ChannelClientFrame_BindingSnapshot
 	Payload       isChannelClientFrame_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2307,6 +2335,24 @@ func (x *ChannelClientFrame) GetInputAnswer() *ChannelInputAnswer {
 	return nil
 }
 
+func (x *ChannelClientFrame) GetBindingResponse() *v1.ChannelBindingResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelClientFrame_BindingResponse); ok {
+			return x.BindingResponse
+		}
+	}
+	return nil
+}
+
+func (x *ChannelClientFrame) GetBindingSnapshot() *ChannelSessionSnapshot {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelClientFrame_BindingSnapshot); ok {
+			return x.BindingSnapshot
+		}
+	}
+	return nil
+}
+
 type isChannelClientFrame_Payload interface {
 	isChannelClientFrame_Payload()
 }
@@ -2327,6 +2373,14 @@ type ChannelClientFrame_InputAnswer struct {
 	InputAnswer *ChannelInputAnswer `protobuf:"bytes,5,opt,name=input_answer,json=inputAnswer,proto3,oneof"`
 }
 
+type ChannelClientFrame_BindingResponse struct {
+	BindingResponse *v1.ChannelBindingResponse `protobuf:"bytes,6,opt,name=binding_response,json=bindingResponse,proto3,oneof"`
+}
+
+type ChannelClientFrame_BindingSnapshot struct {
+	BindingSnapshot *ChannelSessionSnapshot `protobuf:"bytes,7,opt,name=binding_snapshot,json=bindingSnapshot,proto3,oneof"`
+}
+
 func (*ChannelClientFrame_Hello) isChannelClientFrame_Payload() {}
 
 func (*ChannelClientFrame_Inbound) isChannelClientFrame_Payload() {}
@@ -2334,6 +2388,10 @@ func (*ChannelClientFrame_Inbound) isChannelClientFrame_Payload() {}
 func (*ChannelClientFrame_Pong) isChannelClientFrame_Payload() {}
 
 func (*ChannelClientFrame_InputAnswer) isChannelClientFrame_Payload() {}
+
+func (*ChannelClientFrame_BindingResponse) isChannelClientFrame_Payload() {}
+
+func (*ChannelClientFrame_BindingSnapshot) isChannelClientFrame_Payload() {}
 
 type ChannelServerFrame struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
@@ -2350,6 +2408,7 @@ type ChannelServerFrame struct {
 	//	*ChannelServerFrame_InputRequest
 	//	*ChannelServerFrame_InputAnswerResult
 	//	*ChannelServerFrame_InputResolved
+	//	*ChannelServerFrame_BindingRequest
 	Payload       isChannelServerFrame_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2489,6 +2548,15 @@ func (x *ChannelServerFrame) GetInputResolved() *ChannelInputResolved {
 	return nil
 }
 
+func (x *ChannelServerFrame) GetBindingRequest() *v1.ChannelBindingRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*ChannelServerFrame_BindingRequest); ok {
+			return x.BindingRequest
+		}
+	}
+	return nil
+}
+
 type isChannelServerFrame_Payload interface {
 	isChannelServerFrame_Payload()
 }
@@ -2533,6 +2601,10 @@ type ChannelServerFrame_InputResolved struct {
 	InputResolved *ChannelInputResolved `protobuf:"bytes,11,opt,name=input_resolved,json=inputResolved,proto3,oneof"`
 }
 
+type ChannelServerFrame_BindingRequest struct {
+	BindingRequest *v1.ChannelBindingRequest `protobuf:"bytes,12,opt,name=binding_request,json=bindingRequest,proto3,oneof"`
+}
+
 func (*ChannelServerFrame_Hello) isChannelServerFrame_Payload() {}
 
 func (*ChannelServerFrame_Accepted) isChannelServerFrame_Payload() {}
@@ -2552,6 +2624,8 @@ func (*ChannelServerFrame_InputRequest) isChannelServerFrame_Payload() {}
 func (*ChannelServerFrame_InputAnswerResult) isChannelServerFrame_Payload() {}
 
 func (*ChannelServerFrame_InputResolved) isChannelServerFrame_Payload() {}
+
+func (*ChannelServerFrame_BindingRequest) isChannelServerFrame_Payload() {}
 
 // TerminalClientFrame 为客户端（浏览器或桌面端）→ 网关方向的帧。
 type TerminalClientFrame struct {
@@ -3939,11 +4013,57 @@ func (x *WorkspaceUnsubscribeRequest) GetWorkdir() string {
 	return ""
 }
 
+// A bounded batch of existing routing identities, without conversation IDs.
+// The authenticated Gateway derives IDs using the unchanged provider adapter.
+type ChannelSessionSnapshot struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Bindings      []*ChannelInboundMessage `protobuf:"bytes,1,rep,name=bindings,proto3" json:"bindings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelSessionSnapshot) Reset() {
+	*x = ChannelSessionSnapshot{}
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelSessionSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelSessionSnapshot) ProtoMessage() {}
+
+func (x *ChannelSessionSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v2_gateway_ws_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelSessionSnapshot.ProtoReflect.Descriptor instead.
+func (*ChannelSessionSnapshot) Descriptor() ([]byte, []int) {
+	return file_proto_v2_gateway_ws_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *ChannelSessionSnapshot) GetBindings() []*ChannelInboundMessage {
+	if x != nil {
+		return x.Bindings
+	}
+	return nil
+}
+
 var File_proto_v2_gateway_ws_proto protoreflect.FileDescriptor
 
 const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\n" +
-	"\x19proto/v2/gateway_ws.proto\x12\x14liveagent.gateway.v2\x1a\x16proto/v1/gateway.proto\"\x81\x03\n" +
+	"\x19proto/v2/gateway_ws.proto\x12\x14liveagent.gateway.v2\x1a\x16proto/v1/gateway.proto\"\xbd\x03\n" +
 	"\vClientHello\x12)\n" +
 	"\x10protocol_version\x18\x01 \x01(\rR\x0fprotocolVersion\x124\n" +
 	"\x04role\x18\x02 \x01(\x0e2 .liveagent.gateway.v2.ClientRoleR\x04role\x12\x14\n" +
@@ -3956,7 +4076,8 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x11channel_tenant_id\x18\b \x01(\tR\x0fchannelTenantId\x12$\n" +
 	"\x0echannel_bot_id\x18\t \x01(\tR\fchannelBotId\x12!\n" +
 	"\fconnector_id\x18\n" +
-	" \x01(\tR\vconnectorId\"\xdd\x01\n" +
+	" \x01(\tR\vconnectorId\x12:\n" +
+	"\x19channel_lifecycle_version\x18\v \x01(\rR\x17channelLifecycleVersion\"\xdd\x01\n" +
 	"\vServerHello\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1d\n" +
@@ -4030,7 +4151,7 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x12ChannelInboundFile\x12\x1b\n" +
 	"\tfile_name\x18\x01 \x01(\tR\bfileName\x12\x1b\n" +
 	"\tmime_type\x18\x02 \x01(\tR\bmimeType\x12\x18\n" +
-	"\acontent\x18\x03 \x01(\fR\acontent\"\xe1\x02\n" +
+	"\acontent\x18\x03 \x01(\fR\acontent\"\xcb\x03\n" +
 	"\x15ChannelInboundMessage\x12.\n" +
 	"\x13external_message_id\x18\x01 \x01(\tR\x11externalMessageId\x12(\n" +
 	"\x10external_user_id\x18\x02 \x01(\tR\x0eexternalUserId\x12\x17\n" +
@@ -4040,7 +4161,10 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\ttimestamp\x18\x06 \x01(\x03R\ttimestamp\x12\x18\n" +
 	"\acommand\x18\a \x01(\tR\acommand\x12,\n" +
 	"\x12channel_session_id\x18\b \x01(\tR\x10channelSessionId\x12>\n" +
-	"\x05files\x18\t \x03(\v2(.liveagent.gateway.v2.ChannelInboundFileR\x05files\"\x9b\x01\n" +
+	"\x05files\x18\t \x03(\v2(.liveagent.gateway.v2.ChannelInboundFileR\x05files\x12*\n" +
+	"\x11channel_scope_key\x18\n" +
+	" \x01(\tR\x0fchannelScopeKey\x12<\n" +
+	"\x1achannel_session_generation\x18\v \x01(\x04R\x18channelSessionGeneration\"\x9b\x01\n" +
 	"\x0fChannelAccepted\x12.\n" +
 	"\x13external_message_id\x18\x01 \x01(\tR\x11externalMessageId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12'\n" +
@@ -4107,15 +4231,17 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\n" +
 	"selections\x18\x03 \x03(\v21.liveagent.gateway.v2.ChannelInputAnswerSelectionR\n" +
 	"selections\x12\x18\n" +
-	"\amessage\x18\x04 \x01(\tR\amessage\"\xc8\x02\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\xfe\x03\n" +
 	"\x12ChannelClientFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x129\n" +
 	"\x05hello\x18\x02 \x01(\v2!.liveagent.gateway.v2.ClientHelloH\x00R\x05hello\x12G\n" +
 	"\ainbound\x18\x03 \x01(\v2+.liveagent.gateway.v2.ChannelInboundMessageH\x00R\ainbound\x125\n" +
 	"\x04pong\x18\x04 \x01(\v2\x1f.liveagent.gateway.v2.PongFrameH\x00R\x04pong\x12M\n" +
-	"\finput_answer\x18\x05 \x01(\v2(.liveagent.gateway.v2.ChannelInputAnswerH\x00R\vinputAnswerB\t\n" +
-	"\apayload\"\xf7\x05\n" +
+	"\finput_answer\x18\x05 \x01(\v2(.liveagent.gateway.v2.ChannelInputAnswerH\x00R\vinputAnswer\x12Y\n" +
+	"\x10binding_response\x18\x06 \x01(\v2,.liveagent.gateway.v1.ChannelBindingResponseH\x00R\x0fbindingResponse\x12Y\n" +
+	"\x10binding_snapshot\x18\a \x01(\v2,.liveagent.gateway.v2.ChannelSessionSnapshotH\x00R\x0fbindingSnapshotB\t\n" +
+	"\apayload\"\xcf\x06\n" +
 	"\x12ChannelServerFrame\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x129\n" +
@@ -4130,7 +4256,8 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\rinput_request\x18\t \x01(\v2).liveagent.gateway.v2.ChannelInputRequestH\x00R\finputRequest\x12`\n" +
 	"\x13input_answer_result\x18\n" +
 	" \x01(\v2..liveagent.gateway.v2.ChannelInputAnswerResultH\x00R\x11inputAnswerResult\x12S\n" +
-	"\x0einput_resolved\x18\v \x01(\v2*.liveagent.gateway.v2.ChannelInputResolvedH\x00R\rinputResolvedB\t\n" +
+	"\x0einput_resolved\x18\v \x01(\v2*.liveagent.gateway.v2.ChannelInputResolvedH\x00R\rinputResolved\x12V\n" +
+	"\x0fbinding_request\x18\f \x01(\v2+.liveagent.gateway.v1.ChannelBindingRequestH\x00R\x0ebindingRequestB\t\n" +
 	"\apayload\"\x9e\x01\n" +
 	"\x13TerminalClientFrame\x129\n" +
 	"\x05hello\x18\x01 \x01(\v2!.liveagent.gateway.v2.ClientHelloH\x00R\x05hello\x12A\n" +
@@ -4235,7 +4362,9 @@ const file_proto_v2_gateway_ws_proto_rawDesc = "" +
 	"\x19WorkspaceSubscribeRequest\x12\x18\n" +
 	"\aworkdir\x18\x01 \x01(\tR\aworkdir\"7\n" +
 	"\x1bWorkspaceUnsubscribeRequest\x12\x18\n" +
-	"\aworkdir\x18\x01 \x01(\tR\aworkdir*r\n" +
+	"\aworkdir\x18\x01 \x01(\tR\aworkdir\"a\n" +
+	"\x16ChannelSessionSnapshot\x12G\n" +
+	"\bbindings\x18\x01 \x03(\v2+.liveagent.gateway.v2.ChannelInboundMessageR\bbindings*r\n" +
 	"\n" +
 	"ClientRole\x12\x1b\n" +
 	"\x17CLIENT_ROLE_UNSPECIFIED\x10\x00\x12\x17\n" +
@@ -4256,7 +4385,7 @@ func file_proto_v2_gateway_ws_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_v2_gateway_ws_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_proto_v2_gateway_ws_proto_msgTypes = make([]protoimpl.MessageInfo, 44)
+var file_proto_v2_gateway_ws_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_proto_v2_gateway_ws_proto_goTypes = []any{
 	(ClientRole)(0),                     // 0: liveagent.gateway.v2.ClientRole
 	(*ClientHello)(nil),                 // 1: liveagent.gateway.v2.ClientHello
@@ -4303,26 +4432,29 @@ var file_proto_v2_gateway_ws_proto_goTypes = []any{
 	(*ChatActivityEvent)(nil),           // 42: liveagent.gateway.v2.ChatActivityEvent
 	(*WorkspaceSubscribeRequest)(nil),   // 43: liveagent.gateway.v2.WorkspaceSubscribeRequest
 	(*WorkspaceUnsubscribeRequest)(nil), // 44: liveagent.gateway.v2.WorkspaceUnsubscribeRequest
-	(*v1.GatewayEnvelope)(nil),          // 45: liveagent.gateway.v1.GatewayEnvelope
-	(*v1.ChatCommandRequest)(nil),       // 46: liveagent.gateway.v1.ChatCommandRequest
-	(*v1.AgentEnvelope)(nil),            // 47: liveagent.gateway.v1.AgentEnvelope
-	(*v1.ErrorResponse)(nil),            // 48: liveagent.gateway.v1.ErrorResponse
-	(*v1.HistorySyncEvent)(nil),         // 49: liveagent.gateway.v1.HistorySyncEvent
-	(*v1.SettingsSyncEvent)(nil),        // 50: liveagent.gateway.v1.SettingsSyncEvent
-	(*v1.TerminalEvent)(nil),            // 51: liveagent.gateway.v1.TerminalEvent
-	(*v1.SftpEvent)(nil),                // 52: liveagent.gateway.v1.SftpEvent
-	(*v1.ChatQueueEvent)(nil),           // 53: liveagent.gateway.v1.ChatQueueEvent
-	(*v1.TunnelStateSnapshot)(nil),      // 54: liveagent.gateway.v1.TunnelStateSnapshot
-	(*v1.ManagedProcessSnapshot)(nil),   // 55: liveagent.gateway.v1.ManagedProcessSnapshot
-	(*v1.WorkspaceActivityEvent)(nil),   // 56: liveagent.gateway.v1.WorkspaceActivityEvent
-	(*v1.TerminalStreamFrame)(nil),      // 57: liveagent.gateway.v1.TerminalStreamFrame
+	(*ChannelSessionSnapshot)(nil),      // 45: liveagent.gateway.v2.ChannelSessionSnapshot
+	(*v1.GatewayEnvelope)(nil),          // 46: liveagent.gateway.v1.GatewayEnvelope
+	(*v1.ChatCommandRequest)(nil),       // 47: liveagent.gateway.v1.ChatCommandRequest
+	(*v1.AgentEnvelope)(nil),            // 48: liveagent.gateway.v1.AgentEnvelope
+	(*v1.ErrorResponse)(nil),            // 49: liveagent.gateway.v1.ErrorResponse
+	(*v1.HistorySyncEvent)(nil),         // 50: liveagent.gateway.v1.HistorySyncEvent
+	(*v1.SettingsSyncEvent)(nil),        // 51: liveagent.gateway.v1.SettingsSyncEvent
+	(*v1.TerminalEvent)(nil),            // 52: liveagent.gateway.v1.TerminalEvent
+	(*v1.SftpEvent)(nil),                // 53: liveagent.gateway.v1.SftpEvent
+	(*v1.ChatQueueEvent)(nil),           // 54: liveagent.gateway.v1.ChatQueueEvent
+	(*v1.TunnelStateSnapshot)(nil),      // 55: liveagent.gateway.v1.TunnelStateSnapshot
+	(*v1.ManagedProcessSnapshot)(nil),   // 56: liveagent.gateway.v1.ManagedProcessSnapshot
+	(*v1.WorkspaceActivityEvent)(nil),   // 57: liveagent.gateway.v1.WorkspaceActivityEvent
+	(*v1.ChannelBindingResponse)(nil),   // 58: liveagent.gateway.v1.ChannelBindingResponse
+	(*v1.ChannelBindingRequest)(nil),    // 59: liveagent.gateway.v1.ChannelBindingRequest
+	(*v1.TerminalStreamFrame)(nil),      // 60: liveagent.gateway.v1.TerminalStreamFrame
 }
 var file_proto_v2_gateway_ws_proto_depIdxs = []int32{
 	0,  // 0: liveagent.gateway.v2.ClientHello.role:type_name -> liveagent.gateway.v2.ClientRole
 	1,  // 1: liveagent.gateway.v2.WebClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
-	45, // 2: liveagent.gateway.v2.WebClientFrame.agent_request:type_name -> liveagent.gateway.v1.GatewayEnvelope
+	46, // 2: liveagent.gateway.v2.WebClientFrame.agent_request:type_name -> liveagent.gateway.v1.GatewayEnvelope
 	27, // 3: liveagent.gateway.v2.WebClientFrame.status_get:type_name -> liveagent.gateway.v2.StatusGetRequest
-	46, // 4: liveagent.gateway.v2.WebClientFrame.chat_command:type_name -> liveagent.gateway.v1.ChatCommandRequest
+	47, // 4: liveagent.gateway.v2.WebClientFrame.chat_command:type_name -> liveagent.gateway.v1.ChatCommandRequest
 	29, // 5: liveagent.gateway.v2.WebClientFrame.chat_prepare:type_name -> liveagent.gateway.v2.ChatPrepareRequest
 	30, // 6: liveagent.gateway.v2.WebClientFrame.chat_subscribe:type_name -> liveagent.gateway.v2.ChatSubscribeRequest
 	34, // 7: liveagent.gateway.v2.WebClientFrame.chat_unsubscribe:type_name -> liveagent.gateway.v2.ChatUnsubscribeRequest
@@ -4331,8 +4463,8 @@ var file_proto_v2_gateway_ws_proto_depIdxs = []int32{
 	44, // 10: liveagent.gateway.v2.WebClientFrame.workspace_unsubscribe:type_name -> liveagent.gateway.v2.WorkspaceUnsubscribeRequest
 	4,  // 11: liveagent.gateway.v2.WebClientFrame.pong:type_name -> liveagent.gateway.v2.PongFrame
 	2,  // 12: liveagent.gateway.v2.WebServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	47, // 13: liveagent.gateway.v2.WebServerFrame.agent_response:type_name -> liveagent.gateway.v1.AgentEnvelope
-	48, // 14: liveagent.gateway.v2.WebServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
+	48, // 13: liveagent.gateway.v2.WebServerFrame.agent_response:type_name -> liveagent.gateway.v1.AgentEnvelope
+	49, // 14: liveagent.gateway.v2.WebServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
 	3,  // 15: liveagent.gateway.v2.WebServerFrame.ping:type_name -> liveagent.gateway.v2.PingFrame
 	28, // 16: liveagent.gateway.v2.WebServerFrame.status:type_name -> liveagent.gateway.v2.StatusEvent
 	33, // 17: liveagent.gateway.v2.WebServerFrame.chat_subscribed:type_name -> liveagent.gateway.v2.ChatSubscribeResult
@@ -4344,18 +4476,18 @@ var file_proto_v2_gateway_ws_proto_depIdxs = []int32{
 	42, // 23: liveagent.gateway.v2.WebServerFrame.chat_activity:type_name -> liveagent.gateway.v2.ChatActivityEvent
 	5,  // 24: liveagent.gateway.v2.WebServerFrame.ack:type_name -> liveagent.gateway.v2.AckResult
 	41, // 25: liveagent.gateway.v2.WebServerFrame.chat_cancelled:type_name -> liveagent.gateway.v2.ChatCancelResult
-	49, // 26: liveagent.gateway.v2.WebServerFrame.history_event:type_name -> liveagent.gateway.v1.HistorySyncEvent
-	50, // 27: liveagent.gateway.v2.WebServerFrame.settings_event:type_name -> liveagent.gateway.v1.SettingsSyncEvent
-	51, // 28: liveagent.gateway.v2.WebServerFrame.terminal_event:type_name -> liveagent.gateway.v1.TerminalEvent
-	52, // 29: liveagent.gateway.v2.WebServerFrame.sftp_event:type_name -> liveagent.gateway.v1.SftpEvent
-	53, // 30: liveagent.gateway.v2.WebServerFrame.chat_queue_event:type_name -> liveagent.gateway.v1.ChatQueueEvent
-	54, // 31: liveagent.gateway.v2.WebServerFrame.tunnel_state:type_name -> liveagent.gateway.v1.TunnelStateSnapshot
-	55, // 32: liveagent.gateway.v2.WebServerFrame.process_state:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
-	56, // 33: liveagent.gateway.v2.WebServerFrame.workspace_activity:type_name -> liveagent.gateway.v1.WorkspaceActivityEvent
+	50, // 26: liveagent.gateway.v2.WebServerFrame.history_event:type_name -> liveagent.gateway.v1.HistorySyncEvent
+	51, // 27: liveagent.gateway.v2.WebServerFrame.settings_event:type_name -> liveagent.gateway.v1.SettingsSyncEvent
+	52, // 28: liveagent.gateway.v2.WebServerFrame.terminal_event:type_name -> liveagent.gateway.v1.TerminalEvent
+	53, // 29: liveagent.gateway.v2.WebServerFrame.sftp_event:type_name -> liveagent.gateway.v1.SftpEvent
+	54, // 30: liveagent.gateway.v2.WebServerFrame.chat_queue_event:type_name -> liveagent.gateway.v1.ChatQueueEvent
+	55, // 31: liveagent.gateway.v2.WebServerFrame.tunnel_state:type_name -> liveagent.gateway.v1.TunnelStateSnapshot
+	56, // 32: liveagent.gateway.v2.WebServerFrame.process_state:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
+	57, // 33: liveagent.gateway.v2.WebServerFrame.workspace_activity:type_name -> liveagent.gateway.v1.WorkspaceActivityEvent
 	1,  // 34: liveagent.gateway.v2.AgentClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
-	47, // 35: liveagent.gateway.v2.AgentClientFrame.envelope:type_name -> liveagent.gateway.v1.AgentEnvelope
+	48, // 35: liveagent.gateway.v2.AgentClientFrame.envelope:type_name -> liveagent.gateway.v1.AgentEnvelope
 	2,  // 36: liveagent.gateway.v2.AgentServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	45, // 37: liveagent.gateway.v2.AgentServerFrame.envelope:type_name -> liveagent.gateway.v1.GatewayEnvelope
+	46, // 37: liveagent.gateway.v2.AgentServerFrame.envelope:type_name -> liveagent.gateway.v1.GatewayEnvelope
 	10, // 38: liveagent.gateway.v2.ChannelInboundMessage.files:type_name -> liveagent.gateway.v2.ChannelInboundFile
 	16, // 39: liveagent.gateway.v2.ChannelInputQuestion.options:type_name -> liveagent.gateway.v2.ChannelInputOption
 	17, // 40: liveagent.gateway.v2.ChannelInputRequest.questions:type_name -> liveagent.gateway.v2.ChannelInputQuestion
@@ -4365,28 +4497,32 @@ var file_proto_v2_gateway_ws_proto_depIdxs = []int32{
 	11, // 44: liveagent.gateway.v2.ChannelClientFrame.inbound:type_name -> liveagent.gateway.v2.ChannelInboundMessage
 	4,  // 45: liveagent.gateway.v2.ChannelClientFrame.pong:type_name -> liveagent.gateway.v2.PongFrame
 	20, // 46: liveagent.gateway.v2.ChannelClientFrame.input_answer:type_name -> liveagent.gateway.v2.ChannelInputAnswer
-	2,  // 47: liveagent.gateway.v2.ChannelServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	12, // 48: liveagent.gateway.v2.ChannelServerFrame.accepted:type_name -> liveagent.gateway.v2.ChannelAccepted
-	13, // 49: liveagent.gateway.v2.ChannelServerFrame.delta:type_name -> liveagent.gateway.v2.ChannelDelta
-	15, // 50: liveagent.gateway.v2.ChannelServerFrame.final:type_name -> liveagent.gateway.v2.ChannelFinal
-	48, // 51: liveagent.gateway.v2.ChannelServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
-	3,  // 52: liveagent.gateway.v2.ChannelServerFrame.ping:type_name -> liveagent.gateway.v2.PingFrame
-	14, // 53: liveagent.gateway.v2.ChannelServerFrame.file:type_name -> liveagent.gateway.v2.ChannelFile
-	18, // 54: liveagent.gateway.v2.ChannelServerFrame.input_request:type_name -> liveagent.gateway.v2.ChannelInputRequest
-	21, // 55: liveagent.gateway.v2.ChannelServerFrame.input_answer_result:type_name -> liveagent.gateway.v2.ChannelInputAnswerResult
-	22, // 56: liveagent.gateway.v2.ChannelServerFrame.input_resolved:type_name -> liveagent.gateway.v2.ChannelInputResolved
-	1,  // 57: liveagent.gateway.v2.TerminalClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
-	57, // 58: liveagent.gateway.v2.TerminalClientFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
-	2,  // 59: liveagent.gateway.v2.TerminalServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
-	57, // 60: liveagent.gateway.v2.TerminalServerFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
-	31, // 61: liveagent.gateway.v2.ChatSubscribeResult.activity:type_name -> liveagent.gateway.v2.ChatRunActivity
-	32, // 62: liveagent.gateway.v2.ChatSubscribeResult.snapshot:type_name -> liveagent.gateway.v2.ChatRunSnapshot
-	31, // 63: liveagent.gateway.v2.ChatActivitiesResult.running_conversations:type_name -> liveagent.gateway.v2.ChatRunActivity
-	64, // [64:64] is the sub-list for method output_type
-	64, // [64:64] is the sub-list for method input_type
-	64, // [64:64] is the sub-list for extension type_name
-	64, // [64:64] is the sub-list for extension extendee
-	0,  // [0:64] is the sub-list for field type_name
+	58, // 47: liveagent.gateway.v2.ChannelClientFrame.binding_response:type_name -> liveagent.gateway.v1.ChannelBindingResponse
+	45, // 48: liveagent.gateway.v2.ChannelClientFrame.binding_snapshot:type_name -> liveagent.gateway.v2.ChannelSessionSnapshot
+	2,  // 49: liveagent.gateway.v2.ChannelServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
+	12, // 50: liveagent.gateway.v2.ChannelServerFrame.accepted:type_name -> liveagent.gateway.v2.ChannelAccepted
+	13, // 51: liveagent.gateway.v2.ChannelServerFrame.delta:type_name -> liveagent.gateway.v2.ChannelDelta
+	15, // 52: liveagent.gateway.v2.ChannelServerFrame.final:type_name -> liveagent.gateway.v2.ChannelFinal
+	49, // 53: liveagent.gateway.v2.ChannelServerFrame.local_error:type_name -> liveagent.gateway.v1.ErrorResponse
+	3,  // 54: liveagent.gateway.v2.ChannelServerFrame.ping:type_name -> liveagent.gateway.v2.PingFrame
+	14, // 55: liveagent.gateway.v2.ChannelServerFrame.file:type_name -> liveagent.gateway.v2.ChannelFile
+	18, // 56: liveagent.gateway.v2.ChannelServerFrame.input_request:type_name -> liveagent.gateway.v2.ChannelInputRequest
+	21, // 57: liveagent.gateway.v2.ChannelServerFrame.input_answer_result:type_name -> liveagent.gateway.v2.ChannelInputAnswerResult
+	22, // 58: liveagent.gateway.v2.ChannelServerFrame.input_resolved:type_name -> liveagent.gateway.v2.ChannelInputResolved
+	59, // 59: liveagent.gateway.v2.ChannelServerFrame.binding_request:type_name -> liveagent.gateway.v1.ChannelBindingRequest
+	1,  // 60: liveagent.gateway.v2.TerminalClientFrame.hello:type_name -> liveagent.gateway.v2.ClientHello
+	60, // 61: liveagent.gateway.v2.TerminalClientFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
+	2,  // 62: liveagent.gateway.v2.TerminalServerFrame.hello:type_name -> liveagent.gateway.v2.ServerHello
+	60, // 63: liveagent.gateway.v2.TerminalServerFrame.frame:type_name -> liveagent.gateway.v1.TerminalStreamFrame
+	31, // 64: liveagent.gateway.v2.ChatSubscribeResult.activity:type_name -> liveagent.gateway.v2.ChatRunActivity
+	32, // 65: liveagent.gateway.v2.ChatSubscribeResult.snapshot:type_name -> liveagent.gateway.v2.ChatRunSnapshot
+	31, // 66: liveagent.gateway.v2.ChatActivitiesResult.running_conversations:type_name -> liveagent.gateway.v2.ChatRunActivity
+	11, // 67: liveagent.gateway.v2.ChannelSessionSnapshot.bindings:type_name -> liveagent.gateway.v2.ChannelInboundMessage
+	68, // [68:68] is the sub-list for method output_type
+	68, // [68:68] is the sub-list for method input_type
+	68, // [68:68] is the sub-list for extension type_name
+	68, // [68:68] is the sub-list for extension extendee
+	0,  // [0:68] is the sub-list for field type_name
 }
 
 func init() { file_proto_v2_gateway_ws_proto_init() }
@@ -4444,6 +4580,8 @@ func file_proto_v2_gateway_ws_proto_init() {
 		(*ChannelClientFrame_Inbound)(nil),
 		(*ChannelClientFrame_Pong)(nil),
 		(*ChannelClientFrame_InputAnswer)(nil),
+		(*ChannelClientFrame_BindingResponse)(nil),
+		(*ChannelClientFrame_BindingSnapshot)(nil),
 	}
 	file_proto_v2_gateway_ws_proto_msgTypes[23].OneofWrappers = []any{
 		(*ChannelServerFrame_Hello)(nil),
@@ -4456,6 +4594,7 @@ func file_proto_v2_gateway_ws_proto_init() {
 		(*ChannelServerFrame_InputRequest)(nil),
 		(*ChannelServerFrame_InputAnswerResult)(nil),
 		(*ChannelServerFrame_InputResolved)(nil),
+		(*ChannelServerFrame_BindingRequest)(nil),
 	}
 	file_proto_v2_gateway_ws_proto_msgTypes[24].OneofWrappers = []any{
 		(*TerminalClientFrame_Hello)(nil),
@@ -4471,7 +4610,7 @@ func file_proto_v2_gateway_ws_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_v2_gateway_ws_proto_rawDesc), len(file_proto_v2_gateway_ws_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   44,
+			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

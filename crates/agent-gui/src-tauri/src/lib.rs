@@ -49,6 +49,18 @@ macro_rules! app_invoke_handler {
             commands::chat_history::chat_history_share_get,
             commands::chat_history::chat_history_share_set,
             commands::chat_history::chat_history_delete,
+            commands::chat_history::chat_history_query,
+            commands::chat_history::chat_history_archive_facets,
+            commands::chat_history::chat_history_archive_snapshot,
+            commands::chat_history::chat_history_delete_archived,
+            commands::chat_history::chat_history_unarchive,
+            commands::chat_history::chat_history_archive_policy_get,
+            commands::chat_history::chat_history_archive_policy_set,
+            commands::conversation_archive::chat_history_archive,
+            commands::conversation_archive::conversation_lifecycle_metadata,
+            commands::conversation_archive::conversation_lifecycle_admit,
+            commands::conversation_archive::conversation_lifecycle_release,
+            commands::conversation_archive::conversation_lifecycle_editing,
             // Subagent store
             commands::subagent_store::subagent_identity_upsert,
             commands::subagent_store::subagent_identity_list,
@@ -270,6 +282,8 @@ macro_rules! app_invoke_handler {
             commands::system::system_end_power_activity,
             commands::custom_tools::system_http_get_test,
             commands::gateway::gateway_connect,
+            commands::gateway::gateway_channel_binding_register,
+            commands::gateway::gateway_channel_binding_request,
             commands::gateway::gateway_disconnect,
             commands::gateway::gateway_status,
             commands::gateway::gateway_nudge_connection,
@@ -584,6 +598,7 @@ pub fn run() {
                     scheduler: Arc::downgrade(&automation_scheduler),
                 });
                 app.manage(Arc::clone(&gateway_controller));
+                services::conversation_archive::start_scheduler(app.handle().clone());
                 if let Err(error) = gateway_controller.start() {
                     eprintln!("failed to start remote gateway controller: {error}");
                 }

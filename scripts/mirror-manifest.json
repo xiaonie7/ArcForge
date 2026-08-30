@@ -62,6 +62,10 @@
     "lib/sidebar/selectors.ts",
     "lib/sidebar/useSidebarSelector.ts",
     "lib/sidebar/openController.ts",
+    "lib/conversationArchive/types.ts",
+    "lib/conversationArchive/model.ts",
+    "lib/conversationArchive/api.ts",
+    "lib/conversationArchive/admission.ts",
     "lib/workspaceProjects.ts",
     "lib/subagents/protocol.ts",
     "lib/memory/schema.ts",
@@ -92,6 +96,9 @@
     "lib/mcpRegistry/index.ts",
     "lib/shared/id.ts",
     "pages/settings/SystemToolsSection.tsx",
+    "pages/settings/archiveControls.tsx",
+    "pages/settings/ArchivedChatsSection.tsx",
+    "pages/settings/AutoArchiveSection.tsx",
     "pages/mcp-hub/McpHubPage.tsx",
     "pages/mcp-hub/McpImportView.tsx"
   ]

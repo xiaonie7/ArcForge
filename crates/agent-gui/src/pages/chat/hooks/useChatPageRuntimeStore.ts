@@ -94,6 +94,8 @@ export function useChatPageRuntimeStore(params: UseChatPageRuntimeStoreParams) {
         hookWarning,
         sessionId: currentConversationSessionId,
         createdAt: currentConversationCreatedAt,
+        archivedAt:
+          conversationRuntimeCacheRef.current.get(currentConversationIdRef.current)?.archivedAt,
         workdir: conversationRuntimeCacheRef.current.get(currentConversationIdRef.current)?.workdir,
         selectedModel: currentConversationSelectedModel,
       }),
@@ -236,6 +238,7 @@ export function useChatPageRuntimeStore(params: UseChatPageRuntimeStoreParams) {
         hookWarning,
         sessionId: currentConversationSessionId,
         createdAt: currentConversationCreatedAt,
+        archivedAt: conversationRuntimeCacheRef.current.get(currentConversationId)?.archivedAt,
         workdir: conversationRuntimeCacheRef.current.get(currentConversationId)?.workdir,
         selectedModel: currentConversationSelectedModel,
       }),

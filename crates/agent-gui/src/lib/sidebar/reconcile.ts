@@ -92,6 +92,15 @@ function sameSidebarConversation(left: SidebarConversation, right: SidebarConver
     left.isPinned === right.isPinned &&
     left.pinnedAt === right.pinnedAt &&
     left.isShared === right.isShared &&
+    left.archivedAt === right.archivedAt &&
+    left.archiveReason === right.archiveReason &&
+    left.unarchivedAt === right.unarchivedAt &&
+    left.lifecycleVersion === right.lifecycleVersion &&
+    left.lastUserMessageAt === right.lastUserMessageAt &&
+    left.lastTurnFinishedAt === right.lastTurnFinishedAt &&
+    left.activityVersion === right.activityVersion &&
+    left.autoArchiveExempt === right.autoArchiveExempt &&
+    left.originSourceId === right.originSourceId &&
     left.selectedModelJson === right.selectedModelJson &&
     left.isPending === right.isPending
   );
@@ -105,6 +114,12 @@ export function mergeSidebarConversation(
   if (!existing) {
     return next;
   }
+
+  // Lifecycle ordering is independent of updatedAt: autosaves/renames can
+  // arrive late and must never unarchive a conversation. Missing fields from
+  // legacy clients cannot overwrite lifecycle data already observed.
+  const acceptsLifecycle = (next.lifecycleVersion ?? -1) >= (existing.lifecycleVersion ?? -1);
+  const acceptsActivity = (next.activityVersion ?? -1) >= (existing.activityVersion ?? -1);
 
   const merged: SidebarConversation = {
     ...existing,
@@ -122,6 +137,15 @@ export function mergeSidebarConversation(
     isPinned: next.isPinned ?? existing.isPinned,
     pinnedAt: "pinnedAt" in next ? next.pinnedAt : existing.pinnedAt,
     isShared: next.isShared ?? existing.isShared,
+    archivedAt: acceptsLifecycle && next.archivedAt !== undefined ? next.archivedAt : existing.archivedAt,
+    archiveReason: acceptsLifecycle && next.archiveReason !== undefined ? next.archiveReason : existing.archiveReason,
+    unarchivedAt: acceptsLifecycle && next.unarchivedAt !== undefined ? next.unarchivedAt : existing.unarchivedAt,
+    lifecycleVersion: acceptsLifecycle ? next.lifecycleVersion ?? existing.lifecycleVersion : existing.lifecycleVersion,
+    autoArchiveExempt: acceptsLifecycle ? next.autoArchiveExempt ?? existing.autoArchiveExempt : existing.autoArchiveExempt,
+    lastUserMessageAt: acceptsActivity && next.lastUserMessageAt !== undefined ? next.lastUserMessageAt : existing.lastUserMessageAt,
+    lastTurnFinishedAt: acceptsActivity && next.lastTurnFinishedAt !== undefined ? next.lastTurnFinishedAt : existing.lastTurnFinishedAt,
+    activityVersion: acceptsActivity ? next.activityVersion ?? existing.activityVersion : existing.activityVersion,
+    originSourceId: existing.originSourceId ?? next.originSourceId,
     selectedModelJson: mergeOptionalText(next.selectedModelJson, existing.selectedModelJson),
     isPending: next.isPending === true ? true : undefined,
   };

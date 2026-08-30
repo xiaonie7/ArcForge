@@ -28,6 +28,7 @@ import {
 } from "../../../lib/chat/conversation/run";
 import { createTurnCancellation } from "../../../lib/chat/conversation/turnCancellation";
 import type { ChatHistorySummary } from "../../../lib/chat/history/chatHistory";
+import { withConversationAdmission } from "../../../lib/conversationArchive/admission";
 import type { MemoryExtractionStatusKey } from "../../../lib/chat/memory/extractionEngine";
 import {
   createUserMessageWithUploads,
@@ -265,7 +266,8 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     [setSettings],
   );
 
-  async function send(overrides?: {
+  async function sendAdmitted(overrides?: {
+    lifecycleToken?: string;
     textOverride?: string;
     composerDraftOverride?: MentionComposerDraft;
     uploadedFilesOverride?: PendingUploadedFile[];
@@ -600,7 +602,6 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
         setConversationAbortController(conversationId, null);
         setConversationSendingState(conversationId, false);
         pruneIdleConversationCaches([conversationId]);
-        requestQueuedChatTurnProcessing(conversationId);
       }
     }
     const memorySummaryModelSelection = resolveMemorySummaryModelSelection(settings);
@@ -943,7 +944,6 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       }
       channelDeadline?.clear();
       pruneIdleConversationCaches([conversationId]);
-      requestQueuedChatTurnProcessing(conversationId);
       return message;
     };
     if (mirrorsLocalRunToGateway) {
@@ -1541,9 +1541,30 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       clearAbortSnapshot(transcriptStore);
       markConversationRunStopped(gatewayRuntimeFinalState);
       pruneIdleConversationCaches([conversationId]);
-      requestQueuedChatTurnProcessing(conversationId);
     }
     return true;
+  }
+
+  async function send(overrides?: Parameters<typeof sendAdmitted>[0]) {
+    const conversationId = overrides?.conversationIdOverride?.trim() || currentConversationIdRef.current;
+    if (!conversationId) return false;
+    const request = overrides?.gatewayBridgeRequestOverride;
+    try {
+      const accepted = await withConversationAdmission({
+        conversationId,
+        token: overrides?.lifecycleToken ?? `turn:${globalThis.crypto.randomUUID()}`,
+        queued: Boolean(overrides?.lifecycleToken),
+        originSourceId: request?.principal?.channel ?? (request ? "web" : "desktop"),
+      }, () => sendAdmitted(overrides));
+      // The persistent running admission has settled before the next turn is
+      // allowed to drain. Queue retries retain their original admission.
+      if (accepted) requestQueuedChatTurnProcessing(conversationId);
+      return accepted;
+    } catch (error) {
+      if (request) throw error;
+      setErrorMessage(asErrorMessage(error, "无法向此会话发送消息，请先取消归档或重试。"));
+      return false;
+    }
   }
 
   return { send };

@@ -21,6 +21,78 @@ impl GatewayController {
         let request_id = envelope.request_id.clone();
 
         match envelope.payload {
+            Some(proto::gateway_envelope::Payload::ChannelBindingsSnapshot(snapshot)) => {
+                let archived_bindings = tauri::async_runtime::spawn_blocking(move || {
+                    let mut archived_bindings = Vec::new();
+                    for binding in snapshot.bindings {
+                        let binding = ChannelConversationBinding {
+                            conversation_id: binding.conversation_id,
+                            installation_id: binding.installation_id,
+                            scope_key: binding.scope_key,
+                            session_id: binding.session_id,
+                            generation: binding.generation,
+                            lifecycle_version: binding.lifecycle_version,
+                        };
+                        record_channel_binding(binding.clone())?;
+                        if crate::services::conversation_lifecycle::metadata(
+                            &binding.conversation_id,
+                        )?
+                        .is_some_and(|metadata| metadata.archived_at.is_some())
+                        {
+                            archived_bindings.push(binding);
+                        }
+                    }
+                    Ok::<_, String>(archived_bindings)
+                })
+                .await
+                .map_err(|e| e.to_string())??;
+                // A connector can reconnect and publish an old route just as
+                // history is being archived. Repair every late snapshot row;
+                // the chat admission path performs the same repair if an
+                // inbound message wins this transport race.
+                for binding in archived_bindings {
+                    if let Err(error) = self
+                        .close_archive_rejected_binding(&request_id, &binding)
+                        .await
+                    {
+                        eprintln!("failed to close late archived channel binding: {error}");
+                    }
+                }
+                Ok(())
+            }
+            Some(proto::gateway_envelope::Payload::ChannelBindingResp(response)) => {
+                self.receive_channel_binding_response(&request_id, response);
+                Ok(())
+            }
+            Some(proto::gateway_envelope::Payload::HistoryArchive(request)) => {
+                let controller = Arc::clone(self);
+                let app = self.app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    match crate::services::conversation_archive::handle_gateway_request(
+                        &app, request,
+                    )
+                    .await
+                    {
+                        Ok(response) => {
+                            let _ = controller
+                                .send_agent_envelope(proto::AgentEnvelope {
+                                    request_id,
+                                    timestamp: now_unix_seconds(),
+                                    payload: Some(
+                                        proto::agent_envelope::Payload::HistoryArchiveResp(
+                                            response,
+                                        ),
+                                    ),
+                                })
+                                .await;
+                        }
+                        Err(error) => {
+                            let _ = controller.send_error_response(request_id, 400, error).await;
+                        }
+                    }
+                });
+                Ok(())
+            }
             Some(proto::gateway_envelope::Payload::Ping(ping)) => {
                 let pong = proto::AgentEnvelope {
                     request_id: request_id.clone(),

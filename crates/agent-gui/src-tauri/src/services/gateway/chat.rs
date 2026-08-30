@@ -131,7 +131,27 @@ impl GatewayController {
         &self,
         event_payload: GatewayChatRequestEvent,
     ) -> Result<(), String> {
-        let enqueue_outcome = self.enqueue_remote_chat_request(event_payload)?;
+        let binding = binding_from_trusted_chat(&event_payload)?;
+        if let Some(binding) = binding.clone() {
+            tauri::async_runtime::spawn_blocking(move || record_channel_binding(binding))
+                .await
+                .map_err(|error| error.to_string())??;
+        }
+        let request_id = event_payload.request_id.clone();
+        let enqueue_outcome = match self.enqueue_remote_chat_request(event_payload) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if let Some(binding) = binding
+                    .as_ref()
+                    .filter(|_| is_archive_gate_rejection(&error))
+                {
+                    self.close_archive_rejected_binding(&request_id, binding)
+                        .await
+                        .map_err(|close_error| format!("{error}; {close_error}"))?;
+                }
+                return Err(error);
+            }
+        };
         if let Err(error) = self
             .send_gateway_chat_control_event(
                 enqueue_outcome.request_id.clone(),
@@ -230,6 +250,9 @@ impl GatewayController {
                 auth_time: origin.authenticated_at,
                 request_id: origin.gateway_request_id,
                 channel_session_id: origin.channel_session_id,
+                channel_scope_key: origin.channel_scope_key,
+                channel_session_generation: origin.channel_session_generation,
+                channel_lifecycle_version: origin.channel_lifecycle_version,
                 channel_command: origin.channel_command,
             }),
         }

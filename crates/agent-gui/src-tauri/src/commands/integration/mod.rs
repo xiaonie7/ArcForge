@@ -1,4 +1,5 @@
 pub mod channel_control;
+pub mod conversation_archive;
 pub mod database;
 pub mod gateway;
 pub mod mcp;

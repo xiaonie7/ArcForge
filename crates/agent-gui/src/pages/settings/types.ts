@@ -5,6 +5,7 @@ export type SetSettingsFn = (updater: (prev: AppSettings) => AppSettings) => voi
 
 export type SectionId =
   | "system"
+  | "archived"
   | "shortcuts"
   | "systemTools"
   | "providers"
@@ -23,6 +24,7 @@ export type SettingsPageProps = {
   setSettings: SetSettingsFn;
   saveState: SettingsSaveState;
   onBack: () => void;
+  onOpenConversation?: (conversationId: string) => void;
   initialSection?: SectionId;
   hiddenSections?: SectionId[];
 };

@@ -14,6 +14,8 @@
 //   remove conversations deleted elsewhere instead of resurrecting them.
 
 import { workspaceProjectPathKey } from "../settings";
+import { createUuid } from "../shared/id";
+import type { ArchiveMutation } from "../conversationArchive/types";
 import type { SidebarBackend } from "./backend";
 import {
   applySidebarBackendEvent,
@@ -63,6 +65,7 @@ export type SidebarWorkdirsRefreshReason =
   | "initial"
   | "reconnect"
   | "delete"
+  | "archive"
   | "new-workdir"
   | "fallback";
 
@@ -77,6 +80,7 @@ export type SidebarStore = {
   refreshWorkdirs(reason: SidebarWorkdirsRefreshReason): Promise<void>;
   rename(id: string, title: string): Promise<boolean>;
   setPinned(id: string, isPinned: boolean): Promise<boolean>;
+  archive(id: string): Promise<boolean>;
   remove(id: string): Promise<boolean>;
   clearMutationError(id: string): void;
   upsertLocal(conversation: SidebarConversation): void;
@@ -124,6 +128,7 @@ export function createSidebarStore(
   let byId = new Map<string, SidebarConversation>();
   let running = new Map<string, { workdir: string | null; updatedAt: number }>();
   const positionLocks = new Map<string, number>();
+  const archiveRequests = new Map<string, ArchiveMutation>();
   let snapshot: SidebarSnapshot = {
     revision: 0,
     scopeKey: sidebarScopeKey(scope),
@@ -275,6 +280,9 @@ export function createSidebarStore(
         });
         byId = new Map(byId);
         byId.set(merged.id, merged);
+        if (merged.archivedAt !== incoming.archivedAt || merged.archivedAt) {
+          scheduleWorkdirsDebounce();
+        }
         const workdirActivity = bumpWorkdirActivity(
           snapshot.workdirActivity,
           merged.cwd,
@@ -287,7 +295,7 @@ export function createSidebarStore(
         const inScope = conversationMatchesScope(merged, scope);
         const wasListed = snapshot.conversations.some((item) => item.id === merged.id);
         const next = inScope
-          ? applySidebarBackendEvent(snapshot.conversations, event, {
+          ? applySidebarBackendEvent(snapshot.conversations, { ...event, conversation: merged }, {
               preserveUpdatedAtConversationIds: preserveUpdatedAtIds,
             })
           : wasListed
@@ -301,6 +309,7 @@ export function createSidebarStore(
         return;
       }
       case "delete": {
+        archiveRequests.delete(event.conversationId);
         if (byId.has(event.conversationId)) {
           byId = new Map(byId);
           byId.delete(event.conversationId);
@@ -411,7 +420,10 @@ export function createSidebarStore(
       if (seq !== requestSeq || generation !== listGeneration || startCount === 0) {
         return;
       }
-      const authoritativeItems = filterConversationsForScope(page.items, requestScope);
+      const authoritativeItems = filterConversationsForScope(
+        page.items.map((item) => mergeSidebarConversation(byId.get(item.id), item)),
+        requestScope,
+      );
       const reconciled = reconcileSidebarConversations(snapshot.conversations, authoritativeItems, {
         retainConversationIds: retainedConversationIds(),
         preserveUpdatedAtConversationIds: activePositionLockIds(),
@@ -559,10 +571,11 @@ export function createSidebarStore(
       const nextErrors = new Map(snapshot.mutationErrors);
       nextErrors.set(id, failureCode);
       byId = new Map(byId);
-      byId.set(id, previous);
+      const rollback = mergeSidebarConversation(byId.get(id), previous);
+      byId.set(id, rollback);
       const rest = snapshot.conversations.filter((item) => item.id !== id);
-      const next = conversationMatchesScope(previous, scope)
-        ? sortSidebarConversations([previous, ...rest])
+      const next = conversationMatchesScope(rollback, scope)
+        ? sortSidebarConversations([rollback, ...rest])
         : rest;
       commitScopedList(next, { mutations: nextMutations, mutationErrors: nextErrors });
       return false;
@@ -597,7 +610,10 @@ export function createSidebarStore(
         return;
       }
       let next = snapshot.conversations;
-      for (const item of filterConversationsForScope(page.items, requestScope)) {
+      for (const item of filterConversationsForScope(
+        page.items.map((item) => mergeSidebarConversation(byId.get(item.id), item)),
+        requestScope,
+      )) {
         next = reconcileMergePageItem(next, item);
       }
       byId = new Map(byId);
@@ -767,6 +783,36 @@ export function createSidebarStore(
         }),
         execute: () => backend.setConversationPinned(id, isPinned),
       }),
+
+    archive: async (id) => {
+      const current = byId.get(id);
+      if (!current || current.isPending || current.archivedAt) return false;
+      const version = current.lifecycleVersion ?? 0;
+      let input = archiveRequests.get(id);
+      if (!input || input.expectedLifecycleVersion !== version) {
+        input = { id, expectedLifecycleVersion: version, operationId: createUuid() };
+        archiveRequests.set(id, input);
+      }
+      const request = input;
+      const archived = await runMutation({
+        id,
+        kind: "archive",
+        failureCode: "archiveFailed",
+        blockedCode: "archiveBlockedRunning",
+        // Keep the row until the backend has actually closed every binding.
+        optimistic: (item) => item,
+        execute: async () => {
+          const confirmed = await backend.archiveConversation(request);
+          if (!confirmed.archivedAt) throw new Error("Conversation archive did not complete");
+          return confirmed;
+        },
+      });
+      if (archived) {
+        archiveRequests.delete(id);
+        void refreshWorkdirs("archive");
+      }
+      return archived;
+    },
 
     remove: async (id) => {
       const removed = await runMutation({

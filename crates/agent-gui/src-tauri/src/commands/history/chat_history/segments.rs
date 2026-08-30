@@ -298,6 +298,31 @@ fn upsert_chat_history_header(
     conn: &Connection,
     input: &ChatHistoryConversationInput,
 ) -> Result<(), String> {
+    let conversation_id = input.id.trim();
+    let is_deleted = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM conversationHistoryTombstone WHERE conversation_id = ?1
+            )",
+            [conversation_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|e| format!("检查历史对话删除标记失败：{e}"))?;
+    if is_deleted {
+        return Err("conversation_deleted".to_string());
+    }
+    let archived_at: Option<Option<i64>> = conn
+        .query_row(
+            "SELECT archived_at FROM chatHistory WHERE id = ?1",
+            [conversation_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("检查历史对话归档状态失败：{e}"))?;
+    if archived_at.flatten().is_some() {
+        return Err("conversation_archived: 已归档会话为只读，请先取消归档".to_string());
+    }
+
     let created_at = input.created_at.unwrap_or_else(now_ms);
     let updated_at = if input.updated_at > 0 {
         input.updated_at
@@ -323,7 +348,8 @@ fn upsert_chat_history_header(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    conn.execute(
+    let affected = conn
+        .execute(
         "
         INSERT INTO chatHistory (
             id,
@@ -338,23 +364,26 @@ fn upsert_chat_history_header(
             total_segment_count,
             total_message_count,
             created_at,
-            updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            updated_at,
+            cwd_key
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ON CONFLICT(id) DO UPDATE SET
             title = excluded.title,
             provider_id = excluded.provider_id,
             model = excluded.model,
             session_id = excluded.session_id,
             cwd = excluded.cwd,
+            cwd_key = excluded.cwd_key,
             selected_model_json = COALESCE(excluded.selected_model_json, chatHistory.selected_model_json),
             context_meta_json = excluded.context_meta_json,
             active_segment_index = excluded.active_segment_index,
             total_segment_count = excluded.total_segment_count,
             total_message_count = excluded.total_message_count,
             updated_at = excluded.updated_at
+        WHERE chatHistory.archived_at IS NULL
         ",
         params![
-            input.id.trim(),
+            conversation_id,
             input.title.trim(),
             input.provider_id.trim(),
             input.model.trim(),
@@ -366,10 +395,20 @@ fn upsert_chat_history_header(
             input.total_segment_count,
             input.total_message_count,
             created_at,
-            updated_at
+            updated_at,
+            crate::runtime::project_path::project_path_key(cwd.as_deref().unwrap_or_default())
         ],
     )
-    .map_err(|e| format!("写入聊天历史主表失败：{e}"))?;
+        .map_err(|e| format!("写入聊天历史主表失败：{e}"))?;
+    if affected == 0 {
+        ensure_chat_history_mutable(conn, conversation_id)?;
+        return Err("写入聊天历史主表失败：会话未发生更新".to_string());
+    }
+
+    // Lifecycle fields are never accepted from a content save. A run can be
+    // admitted before its first header is persisted; attach its trusted facts
+    // now without resetting archive state or restore grace.
+    crate::services::conversation_lifecycle::sync_activity_to_history(conn, conversation_id)?;
 
     Ok(())
 }
@@ -383,6 +422,7 @@ fn set_chat_history_model_sync(
     if chat_id.is_empty() {
         return Err("历史对话 id 不能为空".to_string());
     }
+    ensure_chat_history_mutable(conn, chat_id)?;
 
     let payload = selected_model_json.trim();
     let parsed: serde_json::Value =
@@ -402,14 +442,14 @@ fn set_chat_history_model_sync(
             "
             UPDATE chatHistory
             SET selected_model_json = ?1
-            WHERE id = ?2
+            WHERE id = ?2 AND archived_at IS NULL
             ",
             params![payload, chat_id],
         )
         .map_err(|e| format!("更新历史对话模型选择失败：{e}"))?;
 
     if affected == 0 {
-        return Err("未找到对应的历史对话".to_string());
+        ensure_chat_history_mutable(conn, chat_id)?;
     }
 
     get_summary_by_id(conn, chat_id)
@@ -424,6 +464,7 @@ fn set_chat_history_pinned_sync(
     if chat_id.is_empty() {
         return Err("历史对话 id 不能为空".to_string());
     }
+    ensure_chat_history_mutable(conn, chat_id)?;
 
     let pinned_at = is_pinned.then(now_ms);
     let affected = conn
@@ -431,14 +472,14 @@ fn set_chat_history_pinned_sync(
             "
             UPDATE chatHistory
             SET is_pinned = ?1, pinned_at = ?2
-            WHERE id = ?3
+            WHERE id = ?3 AND archived_at IS NULL
             ",
             params![if is_pinned { 1 } else { 0 }, pinned_at, chat_id],
         )
         .map_err(|e| format!("更新历史对话置顶状态失败：{e}"))?;
 
     if affected == 0 {
-        return Err("未找到对应的历史对话".to_string());
+        ensure_chat_history_mutable(conn, chat_id)?;
     }
 
     get_summary_by_id(conn, chat_id)
@@ -456,20 +497,21 @@ fn rename_chat_history_sync(
     if next_title.is_empty() {
         return Err("历史对话标题不能为空".to_string());
     }
+    ensure_chat_history_mutable(conn, chat_id)?;
 
     let affected = conn
         .execute(
             "
             UPDATE chatHistory
             SET title = ?1, updated_at = ?2
-            WHERE id = ?3
+            WHERE id = ?3 AND archived_at IS NULL
             ",
             params![next_title, now_ms(), chat_id],
         )
         .map_err(|e| format!("更新历史对话标题失败：{e}"))?;
 
     if affected == 0 {
-        return Err("未找到对应的历史对话".to_string());
+        ensure_chat_history_mutable(conn, chat_id)?;
     }
 
     reindex_chat_history_conversation_fts(conn, chat_id)?;
@@ -519,6 +561,9 @@ fn upsert_single_segment(
         ],
     )
     .map_err(|e| format!("写入历史分段失败：{e}"))?;
+    crate::services::conversation_lifecycle::record_persisted_user_messages(
+        conn, conversation_id, segment.messages_json.trim(),
+    )?;
     let conversation = load_chat_history_fts_conversation_info(conn, conversation_id)?;
     index_chat_history_segment_fts(conn, &conversation, segment)?;
 
@@ -559,6 +604,9 @@ fn insert_single_segment(
         ],
     )
     .map_err(|e| format!("追加历史分段失败：{e}"))?;
+    crate::services::conversation_lifecycle::record_persisted_user_messages(
+        conn, conversation_id, segment.messages_json.trim(),
+    )?;
     let conversation = load_chat_history_fts_conversation_info(conn, conversation_id)?;
     index_chat_history_segment_fts(conn, &conversation, segment)?;
 
@@ -579,6 +627,9 @@ fn sync_segments(
     let conversation = load_chat_history_fts_conversation_info(conn, conversation_id)?;
 
     for segment in segments {
+        crate::services::conversation_lifecycle::record_persisted_user_messages(
+            conn, conversation_id, segment.messages_json.trim(),
+        )?;
         let existing_matches = existing_by_index
             .get(&segment.segment_index)
             .map(|record| segment_record_matches_input(record, segment))

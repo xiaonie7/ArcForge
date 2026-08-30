@@ -113,7 +113,7 @@ export type TranscriptListProps = {
   // 当前处于哪条用户消息行」变化时的上报回调。
   navRef?: MutableRefObject<TranscriptNavHandle | null>;
   onAnchorUserRowChange?: (rowKey: string | null) => void;
-  onResendFromEdit: (
+  onResendFromEdit?: (
     messageRef: HistoryMessageRef,
     text: string,
     attachments: PendingUploadedFile[],

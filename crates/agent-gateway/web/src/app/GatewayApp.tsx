@@ -15,7 +15,7 @@ import type {
 } from "@/components/chat/MentionComposer";
 import { type NotifyItem, NotifyToast } from "@/components/chat/NotifyToast";
 import { SharedHistoryManagerModal } from "@/components/chat/SharedHistoryManagerModal";
-import { ChevronDown, PanelRightClose, PanelRightOpen, Terminal } from "@/components/icons";
+import { Archive, ChevronDown, PanelRightClose, PanelRightOpen, Terminal } from "@/components/icons";
 import type {
   GitCommitContextPayload,
   GitFileContextPayload,
@@ -100,6 +100,7 @@ import {
   workspaceProjectPathKey,
 } from "@/lib/settings";
 import { createUuid } from "@/lib/shared/id";
+import { setConversationEditing } from "@/lib/conversationArchive/admission";
 import { mergeAlwaysEnabledSkillNames } from "@/lib/skills";
 import { terminalSessionBelongsToProject } from "@/lib/terminal/sessionStore";
 import type { TerminalSession } from "@/lib/terminal/types";
@@ -343,6 +344,8 @@ export default function GatewayApp() {
     [transcriptFollow],
   );
   const composerRef = useRef<MentionComposerHandle | null>(null);
+  const [composerHasDraft, setComposerHasDraft] = useState(false);
+  const editingConversationRef = useRef("");
   const composerDraftCacheRef = useRef<Map<string, MentionComposerDraft>>(new Map());
   const composerDraftOwnerRef = useRef("");
   const conversationIdRef = useRef(conversationId);
@@ -351,7 +354,11 @@ export default function GatewayApp() {
   const queuedChatTurnsRef = useRef<ChatQueueItemSummary[]>([]);
   const chatQueueConversationIdRef = useRef("");
   const chatQueueRevisionRef = useRef(0);
-  const queuedChatEditSessionRef = useRef<{ itemId: string; revision: number } | null>(null);
+  const queuedChatEditSessionRef = useRef<{
+    conversationId: string;
+    itemId: string;
+    revision: number;
+  } | null>(null);
   const selectedHistoryRef = useRef(selectedHistory);
   const sharedHistoryItemsRef = useRef<ChatHistorySummary[]>([]);
   const sharedHistoryListRequestRef = useRef<{
@@ -1595,6 +1602,43 @@ export default function GatewayApp() {
   // race-free: the next run's events simply flow in).
   const displayedConversationId = resolveVisibleConversationId(selectedHistoryId, conversationId);
 
+  useEffect(() => {
+    if (!api) return;
+    const timer = window.setInterval(() => {
+      const session = queuedChatEditSessionRef.current;
+      if (!session) return;
+      void api
+        .chatQueueEditHeartbeat(session.conversationId, session.itemId)
+        .then((response) => {
+          if (response.accepted || queuedChatEditSessionRef.current !== session) return;
+          queuedChatEditSessionRef.current = null;
+          reportChatQueueActionError(
+            session.conversationId,
+            response.message || "queued edit session expired",
+            "queued edit session expired",
+          );
+        })
+        .catch((error) => {
+          // A transient disconnect must not discard the draft. The desktop
+          // lease watchdog restores the original queue item if heartbeats do
+          // not resume before expiry.
+          reportChatQueueActionError(session.conversationId, error, "queued edit heartbeat failed");
+        });
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [api]);
+
+  useEffect(() => {
+    const session = queuedChatEditSessionRef.current;
+    if (!api || !session || session.conversationId === displayedConversationId) return;
+    queuedChatEditSessionRef.current = null;
+    void api
+      .chatQueueEditCancel(session.conversationId, session.itemId)
+      .catch((error) =>
+        reportChatQueueActionError(session.conversationId, error, "queued edit cancel failed"),
+      );
+  }, [api, displayedConversationId]);
+
   // 会话生效模型：本地 override > sidebar 行携带的持久化选择 > 全局默认。
   const selectionForConversation = useCallback(
     (targetConversationId: string) =>
@@ -2322,6 +2366,7 @@ export default function GatewayApp() {
         const draft = JSON.parse(response.item.draftJson) as MentionComposerDraft;
         const uploadedFiles = JSON.parse(response.item.uploadedFilesJson) as PendingUploadedFile[];
         queuedChatEditSessionRef.current = {
+          conversationId: conversationIdValue,
           itemId: response.item.id,
           revision: response.snapshot?.revision ?? chatQueueRevisionRef.current,
         };
@@ -3305,6 +3350,9 @@ export default function GatewayApp() {
   );
 
   const handleComposerBusyChange = useCallback((_isBusy: boolean) => {}, []);
+  const handleComposerDraftContentChange = useCallback((hasContent: boolean) => {
+    setComposerHasDraft(hasContent);
+  }, []);
 
   function openSettings(section: SectionId = "system") {
     if (isMobileSidebarLayout()) {
@@ -3318,6 +3366,13 @@ export default function GatewayApp() {
 
   function closeSettings() {
     setOverlay("leaving");
+  }
+
+  function openArchivedConversation(conversationId: string) {
+    const id = conversationId.trim();
+    if (!id) return;
+    handleSidebarSelectConversation(id);
+    closeSettings();
   }
 
   function handleSettingsTransitionEnd() {
@@ -3864,8 +3919,44 @@ export default function GatewayApp() {
     if (!displayedId || isLocalDraftConversationId(displayedId)) {
       return null;
     }
-    return sidebarConversationsById.get(displayedId) ?? null;
-  }, [displayedConversationId, sidebarConversationsById]);
+    const activeSummary = sidebarConversationsById.get(displayedId);
+    if (activeSummary) return activeSummary;
+    if (
+      selectedHistory?.conversation_id === displayedId &&
+      selectedHistory.conversation
+    ) {
+      return normalizeGatewayConversationSummary(selectedHistory.conversation);
+    }
+    return null;
+  }, [displayedConversationId, selectedHistory, sidebarConversationsById]);
+  const isDisplayedConversationArchived = Boolean(displayedConversationSummary?.archivedAt);
+  useEffect(() => {
+    const targetConversationId =
+      composerHasDraft && !isDisplayedConversationArchived ? displayedConversationId.trim() : "";
+    const previousConversationId = editingConversationRef.current;
+    if (previousConversationId === targetConversationId) return;
+    editingConversationRef.current = targetConversationId;
+    if (previousConversationId) {
+      void setConversationEditing(previousConversationId, false).catch((error) => {
+        console.warn("Failed to release conversation editing admission", error);
+      });
+    }
+    if (targetConversationId) {
+      void setConversationEditing(targetConversationId, true).catch((error) => {
+        console.warn("Failed to acquire conversation editing admission", error);
+      });
+    }
+  }, [composerHasDraft, displayedConversationId, isDisplayedConversationArchived]);
+  useEffect(
+    () => () => {
+      const conversationId = editingConversationRef.current;
+      editingConversationRef.current = "";
+      if (conversationId) {
+        void setConversationEditing(conversationId, false).catch(() => undefined);
+      }
+    },
+    [],
+  );
   const activeProjectBrowserTitle = isAgentMode ? (activeWorkspaceProject?.name.trim() ?? "") : "";
   const displayedConversationTitle = useMemo(
     () =>
@@ -3950,11 +4041,16 @@ export default function GatewayApp() {
     agentOnline: status?.online,
   });
   const composerInputDisabled =
-    !status?.online || historyDetailLoading || composerCompactionBlocked;
+    !status?.online ||
+    historyDetailLoading ||
+    composerCompactionBlocked ||
+    isDisplayedConversationArchived;
   const composerPlaceholder = composerCompactionBlocked
     ? translate("chat.compactingContextWait", settings.locale)
     : historyDetailLoading
       ? "正在加载会话历史，请稍候..."
+      : isDisplayedConversationArchived
+        ? translate("archive.readOnlyPlaceholder", settings.locale)
       : enabledComposerSkills.length > 0
         ? translate("chat.inputHintWithSkills", settings.locale)
         : translate("chat.inputHint", settings.locale);
@@ -4341,9 +4437,16 @@ export default function GatewayApp() {
                             workspaceRoot={displayedConversationWorkdir}
                             gitClient={gitClient}
                             onLoadUploadedImagePreview={handleLoadUploadedImagePreview}
-                            onResendFromEdit={handleResendFromEdit}
-                            onBranchConversation={handleBranchConversation}
+                            onResendFromEdit={
+                              isDisplayedConversationArchived ? undefined : handleResendFromEdit
+                            }
+                            onBranchConversation={
+                              isDisplayedConversationArchived
+                                ? undefined
+                                : handleBranchConversation
+                            }
                             branchPendingMessageId={branchPendingMessageId}
+                            readOnly={isDisplayedConversationArchived}
                           />
                         </ChangedFilesActionsProvider>
                       </ScrollArea>
@@ -4371,6 +4474,12 @@ export default function GatewayApp() {
                       >
                         <ChevronDown className="h-4 w-4" />
                       </button>
+                    ) : null}
+                    {isDisplayedConversationArchived ? (
+                      <div className="mx-auto mb-2 flex w-[min(48rem,calc(100%-2rem))] items-center justify-center gap-2 rounded-xl border border-border/60 bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                        <Archive className="h-3.5 w-3.5 shrink-0" />
+                        {translate("archive.readOnlyNotice", settings.locale)}
+                      </div>
                     ) : null}
                     <ChatComposerBar
                       composerRef={composerRef}
@@ -4483,6 +4592,7 @@ export default function GatewayApp() {
                         ).catch(() => undefined);
                       }}
                       onComposerBusyChange={handleComposerBusyChange}
+                      onDraftContentChange={handleComposerDraftContentChange}
                       onChatRuntimeControlsChange={handleChatRuntimeControlsChange}
                       onPickReadableFiles={() => fileInputRef.current?.click()}
                       onPasteFiles={handleImportReadableFiles}
@@ -4598,6 +4708,7 @@ export default function GatewayApp() {
                 setSettings={setSettings}
                 saveState={settingsSaveState}
                 onBack={closeSettings}
+                onOpenConversation={openArchivedConversation}
                 initialSection={settingsSection}
                 hiddenSections={["remote"]}
               />

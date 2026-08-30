@@ -135,6 +135,8 @@ export type ActiveGatewayBridgeRequest = {
 };
 
 export type SendChatAction = (overrides?: {
+  /** Existing durable queue admission, transferred to running in place. */
+  lifecycleToken?: string;
   textOverride?: string;
   composerDraftOverride?: MentionComposerDraft;
   uploadedFilesOverride?: PendingUploadedFile[];

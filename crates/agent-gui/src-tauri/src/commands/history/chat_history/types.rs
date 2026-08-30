@@ -14,6 +14,15 @@ pub struct ChatHistorySummary {
     pub is_pinned: bool,
     pub pinned_at: Option<i64>,
     pub is_shared: bool,
+    pub archived_at: Option<i64>,
+    pub archive_reason: Option<String>,
+    pub unarchived_at: Option<i64>,
+    pub lifecycle_version: i64,
+    pub last_user_message_at: Option<i64>,
+    pub last_turn_finished_at: Option<i64>,
+    pub activity_version: i64,
+    pub auto_archive_exempt: bool,
+    pub origin_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -23,11 +32,81 @@ pub struct ChatHistoryListResponse {
     pub total_count: i64,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ChatHistoryListFilter {
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ChatHistoryListFilter {
     pub cwd: Option<String>,
     pub cwd_empty: bool,
+    pub archive_state: Option<String>,
+    pub search: Option<String>,
+    pub source_id: Option<String>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatHistoryQueryInput {
+    pub page: i64,
+    pub page_size: i64,
+    #[serde(flatten)]
+    pub filter: ChatHistoryListFilter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedChatCandidate {
+    pub id: String,
+    pub lifecycle_version: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedChatSnapshot {
+    pub candidates: Vec<ArchivedChatCandidate>,
+    pub total_count: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteArchivedChatInput {
+    pub candidates: Vec<ArchivedChatCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteArchivedChatSkipped {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteArchivedChatResult {
+    pub deleted_ids: Vec<String>,
+    pub skipped: Vec<DeleteArchivedChatSkipped>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatHistorySourceFacet {
+    pub id: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatHistoryProjectFacet {
+    pub path: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatHistoryArchiveFacets {
+    pub sources: Vec<ChatHistorySourceFacet>,
+    pub projects: Vec<ChatHistoryProjectFacet>,
+}
+
+pub use crate::services::conversation_lifecycle::ArchiveMutationInput as ChatHistoryArchiveInput;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +157,15 @@ pub struct ChatHistoryRecord {
     pub pinned_at: Option<i64>,
     pub is_shared: bool,
     pub redact_tool_content: bool,
+    pub archived_at: Option<i64>,
+    pub archive_reason: Option<String>,
+    pub unarchived_at: Option<i64>,
+    pub lifecycle_version: i64,
+    pub last_user_message_at: Option<i64>,
+    pub last_turn_finished_at: Option<i64>,
+    pub activity_version: i64,
+    pub auto_archive_exempt: bool,
+    pub origin_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +199,15 @@ pub struct ChatHistoryActiveSegmentRecord {
     pub is_pinned: bool,
     pub pinned_at: Option<i64>,
     pub is_shared: bool,
+    pub archived_at: Option<i64>,
+    pub archive_reason: Option<String>,
+    pub unarchived_at: Option<i64>,
+    pub lifecycle_version: i64,
+    pub last_user_message_at: Option<i64>,
+    pub last_turn_finished_at: Option<i64>,
+    pub activity_version: i64,
+    pub auto_archive_exempt: bool,
+    pub origin_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

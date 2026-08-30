@@ -36,6 +36,7 @@ import {
   updateSystem,
 } from "../../lib/settings";
 import { AgentActivationSwitch } from "./shared";
+import { AutoArchiveSection } from "./AutoArchiveSection";
 import type { SettingsSectionProps } from "./types";
 
 const FONT_SCALE_OPTIONS = [0.9, 1, 1.1, 1.2] as const;
@@ -574,6 +575,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
           ))}
         </div>
       </section>
+      <AutoArchiveSection projects={settings.system.workspaceProjects} />
     </div>
   );
 }

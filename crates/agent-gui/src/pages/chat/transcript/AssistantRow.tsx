@@ -25,7 +25,7 @@ export type AssistantRowProps = {
   isCompactionRunning: boolean;
   toolStatus: string | null;
   retryAttempts?: RetryAttemptRecord[];
-  onResendFromEdit: (
+  onResendFromEdit?: (
     messageRef: HistoryMessageRef,
     text: string,
     attachments: PendingUploadedFile[],

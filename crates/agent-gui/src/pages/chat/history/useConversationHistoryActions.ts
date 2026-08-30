@@ -225,6 +225,7 @@ export function useConversationHistoryActions(params: UseConversationHistoryActi
       state: hydratedState,
       sessionId: record.sessionId ?? record.id,
       createdAt: record.createdAt,
+      archivedAt: record.archivedAt,
       workdir: record.cwd,
       selectedModel: resolveConversationSelectedModel(record.selectedModelJson),
     });
@@ -292,6 +293,7 @@ export function useConversationHistoryActions(params: UseConversationHistoryActi
         state: warmState,
         sessionId: activeRecord.sessionId ?? activeRecord.id,
         createdAt: activeRecord.createdAt,
+        archivedAt: activeRecord.archivedAt,
         workdir: activeRecord.cwd,
         selectedModel: resolveConversationSelectedModel(activeRecord.selectedModelJson),
       });

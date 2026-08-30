@@ -14,6 +14,28 @@ use crate::services::tunnel::{
 use crate::services::workspace_watch::WatchSource;
 
 #[tauri::command]
+pub async fn gateway_channel_binding_register(
+    input: crate::services::gateway::ChannelConversationBinding,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::services::gateway::record_channel_binding(input)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn gateway_channel_binding_request(
+    input: crate::services::gateway::ChannelBindingInput,
+    gateway_controller: tauri::State<'_, Arc<GatewayController>>,
+) -> Result<crate::services::gateway::ChannelBindingResult, String> {
+    gateway_controller
+        .channel_binding_request(input.into())
+        .await
+        .map(Into::into)
+}
+
+#[tauri::command]
 pub async fn gateway_connect(
     payload: Option<Value>,
     gateway_controller: tauri::State<'_, Arc<GatewayController>>,

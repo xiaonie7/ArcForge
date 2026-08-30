@@ -19,7 +19,7 @@ export type AssistantRowFooterProps = {
   timestamp?: number;
   replyText: string;
   retryTarget: RenderUserMessage | null;
-  onResendFromEdit: (
+  onResendFromEdit?: (
     messageRef: HistoryMessageRef,
     text: string,
     attachments: PendingUploadedFile[],
@@ -34,7 +34,7 @@ export function AssistantRowFooter(props: AssistantRowFooterProps) {
   const { isSending, branchPendingMessageId } = useRowInteraction();
 
   const retryMessageRef = retryTarget?.messageRef;
-  const retryDisabled = isSending || !retryMessageRef;
+  const retryDisabled = isSending || !retryMessageRef || !onResendFromEdit;
   const retryTitle = retryMessageRef ? t("chat.retry") : "旧历史缺少稳定消息标识，无法重试";
   const branchPending = branchPendingMessageId != null;
   const isRowBranchPending =
@@ -68,7 +68,7 @@ export function AssistantRowFooter(props: AssistantRowFooterProps) {
           side="top"
           onConfirm={() => {
             if (!retryTarget || !retryMessageRef) return;
-            onResendFromEdit(retryMessageRef, retryTarget.text, retryTarget.attachments);
+            onResendFromEdit?.(retryMessageRef, retryTarget.text, retryTarget.attachments);
           }}
         >
           {() => (
@@ -119,7 +119,7 @@ export type UserRowFooterProps = {
   text: string;
   timestamp: number;
   hasStableRef: boolean;
-  onStartEdit: (key: string) => void;
+  onStartEdit?: (key: string) => void;
 };
 
 export function UserRowFooter(props: UserRowFooterProps) {
@@ -128,7 +128,7 @@ export function UserRowFooter(props: UserRowFooterProps) {
   const { copied, markCopied } = useCopiedFlag();
   const { isSending } = useRowInteraction();
 
-  const editDisabled = isSending || !hasStableRef;
+  const editDisabled = isSending || !hasStableRef || !onStartEdit;
   const editTitle = hasStableRef ? t("chat.edit") : "旧历史缺少稳定消息标识，无法编辑重发";
 
   return (
@@ -152,7 +152,7 @@ export function UserRowFooter(props: UserRowFooterProps) {
           disabled={editDisabled}
           onClick={() => {
             if (!hasStableRef) return;
-            onStartEdit(itemKey);
+            onStartEdit?.(itemKey);
           }}
         >
           <Pencil className="h-3.5 w-3.5" />

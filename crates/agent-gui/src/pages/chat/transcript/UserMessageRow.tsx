@@ -19,9 +19,9 @@ export type UserMessageRowProps = {
   animateEntrance: boolean;
   workspaceRoot?: string;
   loadCommitDetails: CommitDetailsLoader;
-  onStartEdit: (key: string) => void;
+  onStartEdit?: (key: string) => void;
   onCancelEdit: () => void;
-  onResendFromEdit: (
+  onResendFromEdit?: (
     messageRef: HistoryMessageRef,
     text: string,
     attachments: PendingUploadedFile[],
@@ -48,7 +48,7 @@ export const UserMessageRow = memo(function UserMessageRow(props: UserMessageRow
     item.text,
   );
 
-  if (isEditing && effectiveMessageRef) {
+  if (isEditing && effectiveMessageRef && onResendFromEdit) {
     return (
       <EditableUserMessageBubble
         initialText={item.text}

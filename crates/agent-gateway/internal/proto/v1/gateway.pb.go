@@ -398,6 +398,9 @@ type GatewayEnvelope struct {
 	//	*GatewayEnvelope_ManagedProcessRequest
 	//	*GatewayEnvelope_HistoryBranch
 	//	*GatewayEnvelope_FsReadWorkspaceArtifact
+	//	*GatewayEnvelope_HistoryArchive
+	//	*GatewayEnvelope_ChannelBindingResp
+	//	*GatewayEnvelope_ChannelBindingsSnapshot
 	Payload       isGatewayEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -877,6 +880,33 @@ func (x *GatewayEnvelope) GetFsReadWorkspaceArtifact() *FsReadWorkspaceArtifactR
 	return nil
 }
 
+func (x *GatewayEnvelope) GetHistoryArchive() *HistoryArchiveRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*GatewayEnvelope_HistoryArchive); ok {
+			return x.HistoryArchive
+		}
+	}
+	return nil
+}
+
+func (x *GatewayEnvelope) GetChannelBindingResp() *ChannelBindingResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*GatewayEnvelope_ChannelBindingResp); ok {
+			return x.ChannelBindingResp
+		}
+	}
+	return nil
+}
+
+func (x *GatewayEnvelope) GetChannelBindingsSnapshot() *ChannelBindingsSnapshot {
+	if x != nil {
+		if x, ok := x.Payload.(*GatewayEnvelope_ChannelBindingsSnapshot); ok {
+			return x.ChannelBindingsSnapshot
+		}
+	}
+	return nil
+}
+
 type isGatewayEnvelope_Payload interface {
 	isGatewayEnvelope_Payload()
 }
@@ -1069,6 +1099,18 @@ type GatewayEnvelope_FsReadWorkspaceArtifact struct {
 	FsReadWorkspaceArtifact *FsReadWorkspaceArtifactRequest `protobuf:"bytes,93,opt,name=fs_read_workspace_artifact,json=fsReadWorkspaceArtifact,proto3,oneof"`
 }
 
+type GatewayEnvelope_HistoryArchive struct {
+	HistoryArchive *HistoryArchiveRequest `protobuf:"bytes,94,opt,name=history_archive,json=historyArchive,proto3,oneof"`
+}
+
+type GatewayEnvelope_ChannelBindingResp struct {
+	ChannelBindingResp *ChannelBindingResponse `protobuf:"bytes,95,opt,name=channel_binding_resp,json=channelBindingResp,proto3,oneof"`
+}
+
+type GatewayEnvelope_ChannelBindingsSnapshot struct {
+	ChannelBindingsSnapshot *ChannelBindingsSnapshot `protobuf:"bytes,96,opt,name=channel_bindings_snapshot,json=channelBindingsSnapshot,proto3,oneof"`
+}
+
 func (*GatewayEnvelope_ChatCommand) isGatewayEnvelope_Payload() {}
 
 func (*GatewayEnvelope_CronManage) isGatewayEnvelope_Payload() {}
@@ -1163,6 +1205,12 @@ func (*GatewayEnvelope_HistoryBranch) isGatewayEnvelope_Payload() {}
 
 func (*GatewayEnvelope_FsReadWorkspaceArtifact) isGatewayEnvelope_Payload() {}
 
+func (*GatewayEnvelope_HistoryArchive) isGatewayEnvelope_Payload() {}
+
+func (*GatewayEnvelope_ChannelBindingResp) isGatewayEnvelope_Payload() {}
+
+func (*GatewayEnvelope_ChannelBindingsSnapshot) isGatewayEnvelope_Payload() {}
+
 type AgentEnvelope struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	RequestId string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
@@ -1226,6 +1274,8 @@ type AgentEnvelope struct {
 	//	*AgentEnvelope_ManagedProcessSnapshot
 	//	*AgentEnvelope_HistoryBranchResp
 	//	*AgentEnvelope_FsReadWorkspaceArtifactResp
+	//	*AgentEnvelope_HistoryArchiveResp
+	//	*AgentEnvelope_ChannelBinding
 	//	*AgentEnvelope_Error
 	Payload       isAgentEnvelope_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
@@ -1796,6 +1846,24 @@ func (x *AgentEnvelope) GetFsReadWorkspaceArtifactResp() *FsReadWorkspaceArtifac
 	return nil
 }
 
+func (x *AgentEnvelope) GetHistoryArchiveResp() *HistoryArchiveResponse {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEnvelope_HistoryArchiveResp); ok {
+			return x.HistoryArchiveResp
+		}
+	}
+	return nil
+}
+
+func (x *AgentEnvelope) GetChannelBinding() *ChannelBindingRequest {
+	if x != nil {
+		if x, ok := x.Payload.(*AgentEnvelope_ChannelBinding); ok {
+			return x.ChannelBinding
+		}
+	}
+	return nil
+}
+
 func (x *AgentEnvelope) GetError() *ErrorResponse {
 	if x != nil {
 		if x, ok := x.Payload.(*AgentEnvelope_Error); ok {
@@ -2037,6 +2105,14 @@ type AgentEnvelope_FsReadWorkspaceArtifactResp struct {
 	FsReadWorkspaceArtifactResp *FsReadWorkspaceArtifactResponse `protobuf:"bytes,94,opt,name=fs_read_workspace_artifact_resp,json=fsReadWorkspaceArtifactResp,proto3,oneof"`
 }
 
+type AgentEnvelope_HistoryArchiveResp struct {
+	HistoryArchiveResp *HistoryArchiveResponse `protobuf:"bytes,95,opt,name=history_archive_resp,json=historyArchiveResp,proto3,oneof"`
+}
+
+type AgentEnvelope_ChannelBinding struct {
+	ChannelBinding *ChannelBindingRequest `protobuf:"bytes,96,opt,name=channel_binding,json=channelBinding,proto3,oneof"`
+}
+
 type AgentEnvelope_Error struct {
 	Error *ErrorResponse `protobuf:"bytes,99,opt,name=error,proto3,oneof"`
 }
@@ -2154,6 +2230,10 @@ func (*AgentEnvelope_ManagedProcessSnapshot) isAgentEnvelope_Payload() {}
 func (*AgentEnvelope_HistoryBranchResp) isAgentEnvelope_Payload() {}
 
 func (*AgentEnvelope_FsReadWorkspaceArtifactResp) isAgentEnvelope_Payload() {}
+
+func (*AgentEnvelope_HistoryArchiveResp) isAgentEnvelope_Payload() {}
+
+func (*AgentEnvelope_ChannelBinding) isAgentEnvelope_Payload() {}
 
 func (*AgentEnvelope_Error) isAgentEnvelope_Payload() {}
 
@@ -5759,8 +5839,12 @@ type TrustedOrigin struct {
 	// Gateway-validated channel command. This field is never populated from
 	// ordinary user message text by the desktop runtime.
 	ChannelCommand string `protobuf:"bytes,12,opt,name=channel_command,json=channelCommand,proto3" json:"channel_command,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Opaque, adapter-normalized scope; absent for legacy connectors.
+	ChannelScopeKey          string `protobuf:"bytes,13,opt,name=channel_scope_key,json=channelScopeKey,proto3" json:"channel_scope_key,omitempty"`
+	ChannelSessionGeneration uint64 `protobuf:"varint,14,opt,name=channel_session_generation,json=channelSessionGeneration,proto3" json:"channel_session_generation,omitempty"`
+	ChannelLifecycleVersion  uint32 `protobuf:"varint,15,opt,name=channel_lifecycle_version,json=channelLifecycleVersion,proto3" json:"channel_lifecycle_version,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *TrustedOrigin) Reset() {
@@ -5875,6 +5959,27 @@ func (x *TrustedOrigin) GetChannelCommand() string {
 		return x.ChannelCommand
 	}
 	return ""
+}
+
+func (x *TrustedOrigin) GetChannelScopeKey() string {
+	if x != nil {
+		return x.ChannelScopeKey
+	}
+	return ""
+}
+
+func (x *TrustedOrigin) GetChannelSessionGeneration() uint64 {
+	if x != nil {
+		return x.ChannelSessionGeneration
+	}
+	return 0
+}
+
+func (x *TrustedOrigin) GetChannelLifecycleVersion() uint32 {
+	if x != nil {
+		return x.ChannelLifecycleVersion
+	}
+	return 0
 }
 
 type ChatRequest struct {
@@ -7151,22 +7256,31 @@ func (x *HistoryListResponse) GetTotalCount() int32 {
 }
 
 type ConversationSummary struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	Id                string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Title             string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
-	CreatedAt         int64                  `protobuf:"varint,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt         int64                  `protobuf:"varint,4,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	MessageCount      int32                  `protobuf:"varint,5,opt,name=message_count,json=messageCount,proto3" json:"message_count,omitempty"`
-	ProviderId        string                 `protobuf:"bytes,6,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
-	Model             string                 `protobuf:"bytes,7,opt,name=model,proto3" json:"model,omitempty"`
-	SessionId         string                 `protobuf:"bytes,8,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
-	Cwd               string                 `protobuf:"bytes,9,opt,name=cwd,proto3" json:"cwd,omitempty"`
-	IsPinned          bool                   `protobuf:"varint,10,opt,name=is_pinned,json=isPinned,proto3" json:"is_pinned,omitempty"`
-	PinnedAt          int64                  `protobuf:"varint,11,opt,name=pinned_at,json=pinnedAt,proto3" json:"pinned_at,omitempty"`
-	IsShared          bool                   `protobuf:"varint,12,opt,name=is_shared,json=isShared,proto3" json:"is_shared,omitempty"`
-	SelectedModelJson string                 `protobuf:"bytes,13,opt,name=selected_model_json,json=selectedModelJson,proto3" json:"selected_model_json,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Id                 string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title              string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	CreatedAt          int64                  `protobuf:"varint,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt          int64                  `protobuf:"varint,4,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	MessageCount       int32                  `protobuf:"varint,5,opt,name=message_count,json=messageCount,proto3" json:"message_count,omitempty"`
+	ProviderId         string                 `protobuf:"bytes,6,opt,name=provider_id,json=providerId,proto3" json:"provider_id,omitempty"`
+	Model              string                 `protobuf:"bytes,7,opt,name=model,proto3" json:"model,omitempty"`
+	SessionId          string                 `protobuf:"bytes,8,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Cwd                string                 `protobuf:"bytes,9,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	IsPinned           bool                   `protobuf:"varint,10,opt,name=is_pinned,json=isPinned,proto3" json:"is_pinned,omitempty"`
+	PinnedAt           int64                  `protobuf:"varint,11,opt,name=pinned_at,json=pinnedAt,proto3" json:"pinned_at,omitempty"`
+	IsShared           bool                   `protobuf:"varint,12,opt,name=is_shared,json=isShared,proto3" json:"is_shared,omitempty"`
+	SelectedModelJson  string                 `protobuf:"bytes,13,opt,name=selected_model_json,json=selectedModelJson,proto3" json:"selected_model_json,omitempty"`
+	ArchivedAt         *int64                 `protobuf:"varint,14,opt,name=archived_at,json=archivedAt,proto3,oneof" json:"archived_at,omitempty"`
+	ArchiveReason      *string                `protobuf:"bytes,15,opt,name=archive_reason,json=archiveReason,proto3,oneof" json:"archive_reason,omitempty"`
+	UnarchivedAt       *int64                 `protobuf:"varint,16,opt,name=unarchived_at,json=unarchivedAt,proto3,oneof" json:"unarchived_at,omitempty"`
+	LastUserMessageAt  *int64                 `protobuf:"varint,17,opt,name=last_user_message_at,json=lastUserMessageAt,proto3,oneof" json:"last_user_message_at,omitempty"`
+	LastTurnFinishedAt *int64                 `protobuf:"varint,18,opt,name=last_turn_finished_at,json=lastTurnFinishedAt,proto3,oneof" json:"last_turn_finished_at,omitempty"`
+	OriginSourceId     *string                `protobuf:"bytes,19,opt,name=origin_source_id,json=originSourceId,proto3,oneof" json:"origin_source_id,omitempty"`
+	LifecycleVersion   int64                  `protobuf:"varint,20,opt,name=lifecycle_version,json=lifecycleVersion,proto3" json:"lifecycle_version,omitempty"`
+	ActivityVersion    int64                  `protobuf:"varint,21,opt,name=activity_version,json=activityVersion,proto3" json:"activity_version,omitempty"`
+	AutoArchiveExempt  bool                   `protobuf:"varint,22,opt,name=auto_archive_exempt,json=autoArchiveExempt,proto3" json:"auto_archive_exempt,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *ConversationSummary) Reset() {
@@ -7288,6 +7402,69 @@ func (x *ConversationSummary) GetSelectedModelJson() string {
 		return x.SelectedModelJson
 	}
 	return ""
+}
+
+func (x *ConversationSummary) GetArchivedAt() int64 {
+	if x != nil && x.ArchivedAt != nil {
+		return *x.ArchivedAt
+	}
+	return 0
+}
+
+func (x *ConversationSummary) GetArchiveReason() string {
+	if x != nil && x.ArchiveReason != nil {
+		return *x.ArchiveReason
+	}
+	return ""
+}
+
+func (x *ConversationSummary) GetUnarchivedAt() int64 {
+	if x != nil && x.UnarchivedAt != nil {
+		return *x.UnarchivedAt
+	}
+	return 0
+}
+
+func (x *ConversationSummary) GetLastUserMessageAt() int64 {
+	if x != nil && x.LastUserMessageAt != nil {
+		return *x.LastUserMessageAt
+	}
+	return 0
+}
+
+func (x *ConversationSummary) GetLastTurnFinishedAt() int64 {
+	if x != nil && x.LastTurnFinishedAt != nil {
+		return *x.LastTurnFinishedAt
+	}
+	return 0
+}
+
+func (x *ConversationSummary) GetOriginSourceId() string {
+	if x != nil && x.OriginSourceId != nil {
+		return *x.OriginSourceId
+	}
+	return ""
+}
+
+func (x *ConversationSummary) GetLifecycleVersion() int64 {
+	if x != nil {
+		return x.LifecycleVersion
+	}
+	return 0
+}
+
+func (x *ConversationSummary) GetActivityVersion() int64 {
+	if x != nil {
+		return x.ActivityVersion
+	}
+	return 0
+}
+
+func (x *ConversationSummary) GetAutoArchiveExempt() bool {
+	if x != nil {
+		return x.AutoArchiveExempt
+	}
+	return false
 }
 
 type HistoryGetRequest struct {
@@ -11357,6 +11534,393 @@ func (x *ProviderModelsResponse) GetModelsJson() string {
 	return ""
 }
 
+// A bounded, allowlisted history lifecycle domain, not arbitrary desktop IPC.
+type HistoryArchiveRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Command       string                 `protobuf:"bytes,1,opt,name=command,proto3" json:"command,omitempty"`
+	ArgsJson      string                 `protobuf:"bytes,2,opt,name=args_json,json=argsJson,proto3" json:"args_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoryArchiveRequest) Reset() {
+	*x = HistoryArchiveRequest{}
+	mi := &file_proto_v1_gateway_proto_msgTypes[139]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoryArchiveRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoryArchiveRequest) ProtoMessage() {}
+
+func (x *HistoryArchiveRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v1_gateway_proto_msgTypes[139]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoryArchiveRequest.ProtoReflect.Descriptor instead.
+func (*HistoryArchiveRequest) Descriptor() ([]byte, []int) {
+	return file_proto_v1_gateway_proto_rawDescGZIP(), []int{139}
+}
+
+func (x *HistoryArchiveRequest) GetCommand() string {
+	if x != nil {
+		return x.Command
+	}
+	return ""
+}
+
+func (x *HistoryArchiveRequest) GetArgsJson() string {
+	if x != nil {
+		return x.ArgsJson
+	}
+	return ""
+}
+
+type HistoryArchiveResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ResultJson    string                 `protobuf:"bytes,1,opt,name=result_json,json=resultJson,proto3" json:"result_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoryArchiveResponse) Reset() {
+	*x = HistoryArchiveResponse{}
+	mi := &file_proto_v1_gateway_proto_msgTypes[140]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoryArchiveResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoryArchiveResponse) ProtoMessage() {}
+
+func (x *HistoryArchiveResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v1_gateway_proto_msgTypes[140]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoryArchiveResponse.ProtoReflect.Descriptor instead.
+func (*HistoryArchiveResponse) Descriptor() ([]byte, []int) {
+	return file_proto_v1_gateway_proto_rawDescGZIP(), []int{140}
+}
+
+func (x *HistoryArchiveResponse) GetResultJson() string {
+	if x != nil {
+		return x.ResultJson
+	}
+	return ""
+}
+
+// Desktop-originated control, never accepted from browser/channel requests.
+// The connector owns routing state; the desktop owns archived history.
+type ChannelBindingRequest struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	OperationId        string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Action             string                 `protobuf:"bytes,2,opt,name=action,proto3" json:"action,omitempty"` // close | query
+	InstallationId     string                 `protobuf:"bytes,3,opt,name=installation_id,json=installationId,proto3" json:"installation_id,omitempty"`
+	ScopeKey           string                 `protobuf:"bytes,4,opt,name=scope_key,json=scopeKey,proto3" json:"scope_key,omitempty"`
+	ExpectedSessionId  string                 `protobuf:"bytes,5,opt,name=expected_session_id,json=expectedSessionId,proto3" json:"expected_session_id,omitempty"`
+	ExpectedGeneration uint64                 `protobuf:"varint,6,opt,name=expected_generation,json=expectedGeneration,proto3" json:"expected_generation,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *ChannelBindingRequest) Reset() {
+	*x = ChannelBindingRequest{}
+	mi := &file_proto_v1_gateway_proto_msgTypes[141]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelBindingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelBindingRequest) ProtoMessage() {}
+
+func (x *ChannelBindingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v1_gateway_proto_msgTypes[141]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelBindingRequest.ProtoReflect.Descriptor instead.
+func (*ChannelBindingRequest) Descriptor() ([]byte, []int) {
+	return file_proto_v1_gateway_proto_rawDescGZIP(), []int{141}
+}
+
+func (x *ChannelBindingRequest) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
+}
+
+func (x *ChannelBindingRequest) GetAction() string {
+	if x != nil {
+		return x.Action
+	}
+	return ""
+}
+
+func (x *ChannelBindingRequest) GetInstallationId() string {
+	if x != nil {
+		return x.InstallationId
+	}
+	return ""
+}
+
+func (x *ChannelBindingRequest) GetScopeKey() string {
+	if x != nil {
+		return x.ScopeKey
+	}
+	return ""
+}
+
+func (x *ChannelBindingRequest) GetExpectedSessionId() string {
+	if x != nil {
+		return x.ExpectedSessionId
+	}
+	return ""
+}
+
+func (x *ChannelBindingRequest) GetExpectedGeneration() uint64 {
+	if x != nil {
+		return x.ExpectedGeneration
+	}
+	return 0
+}
+
+type ChannelBindingResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	OperationId   string                 `protobuf:"bytes,1,opt,name=operation_id,json=operationId,proto3" json:"operation_id,omitempty"`
+	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	SessionId     string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,4,opt,name=generation,proto3" json:"generation,omitempty"`
+	Message       string                 `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelBindingResponse) Reset() {
+	*x = ChannelBindingResponse{}
+	mi := &file_proto_v1_gateway_proto_msgTypes[142]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelBindingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelBindingResponse) ProtoMessage() {}
+
+func (x *ChannelBindingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v1_gateway_proto_msgTypes[142]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelBindingResponse.ProtoReflect.Descriptor instead.
+func (*ChannelBindingResponse) Descriptor() ([]byte, []int) {
+	return file_proto_v1_gateway_proto_rawDescGZIP(), []int{142}
+}
+
+func (x *ChannelBindingResponse) GetOperationId() string {
+	if x != nil {
+		return x.OperationId
+	}
+	return ""
+}
+
+func (x *ChannelBindingResponse) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *ChannelBindingResponse) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ChannelBindingResponse) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *ChannelBindingResponse) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type ChannelBindingRegistration struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	ConversationId   string                 `protobuf:"bytes,1,opt,name=conversation_id,json=conversationId,proto3" json:"conversation_id,omitempty"`
+	InstallationId   string                 `protobuf:"bytes,2,opt,name=installation_id,json=installationId,proto3" json:"installation_id,omitempty"`
+	ScopeKey         string                 `protobuf:"bytes,3,opt,name=scope_key,json=scopeKey,proto3" json:"scope_key,omitempty"`
+	SessionId        string                 `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
+	Generation       uint64                 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
+	LifecycleVersion uint32                 `protobuf:"varint,6,opt,name=lifecycle_version,json=lifecycleVersion,proto3" json:"lifecycle_version,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *ChannelBindingRegistration) Reset() {
+	*x = ChannelBindingRegistration{}
+	mi := &file_proto_v1_gateway_proto_msgTypes[143]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelBindingRegistration) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelBindingRegistration) ProtoMessage() {}
+
+func (x *ChannelBindingRegistration) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v1_gateway_proto_msgTypes[143]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelBindingRegistration.ProtoReflect.Descriptor instead.
+func (*ChannelBindingRegistration) Descriptor() ([]byte, []int) {
+	return file_proto_v1_gateway_proto_rawDescGZIP(), []int{143}
+}
+
+func (x *ChannelBindingRegistration) GetConversationId() string {
+	if x != nil {
+		return x.ConversationId
+	}
+	return ""
+}
+
+func (x *ChannelBindingRegistration) GetInstallationId() string {
+	if x != nil {
+		return x.InstallationId
+	}
+	return ""
+}
+
+func (x *ChannelBindingRegistration) GetScopeKey() string {
+	if x != nil {
+		return x.ScopeKey
+	}
+	return ""
+}
+
+func (x *ChannelBindingRegistration) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
+func (x *ChannelBindingRegistration) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
+func (x *ChannelBindingRegistration) GetLifecycleVersion() uint32 {
+	if x != nil {
+		return x.LifecycleVersion
+	}
+	return 0
+}
+
+type ChannelBindingsSnapshot struct {
+	state         protoimpl.MessageState        `protogen:"open.v1"`
+	Bindings      []*ChannelBindingRegistration `protobuf:"bytes,1,rep,name=bindings,proto3" json:"bindings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ChannelBindingsSnapshot) Reset() {
+	*x = ChannelBindingsSnapshot{}
+	mi := &file_proto_v1_gateway_proto_msgTypes[144]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ChannelBindingsSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChannelBindingsSnapshot) ProtoMessage() {}
+
+func (x *ChannelBindingsSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_v1_gateway_proto_msgTypes[144]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChannelBindingsSnapshot.ProtoReflect.Descriptor instead.
+func (*ChannelBindingsSnapshot) Descriptor() ([]byte, []int) {
+	return file_proto_v1_gateway_proto_rawDescGZIP(), []int{144}
+}
+
+func (x *ChannelBindingsSnapshot) GetBindings() []*ChannelBindingRegistration {
+	if x != nil {
+		return x.Bindings
+	}
+	return nil
+}
+
 var File_proto_v1_gateway_proto protoreflect.FileDescriptor
 
 const file_proto_v1_gateway_proto_rawDesc = "" +
@@ -11370,7 +11934,7 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"\xad \n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\xd4\"\n" +
 	"\x0fGatewayEnvelope\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1c\n" +
@@ -11428,8 +11992,11 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\x0fworkspace_watch\x18Z \x01(\v2+.liveagent.gateway.v1.WorkspaceWatchRequestH\x00R\x0eworkspaceWatch\x12e\n" +
 	"\x17managed_process_request\x18[ \x01(\v2+.liveagent.gateway.v1.ManagedProcessRequestH\x00R\x15managedProcessRequest\x12S\n" +
 	"\x0ehistory_branch\x18\\ \x01(\v2*.liveagent.gateway.v1.HistoryBranchRequestH\x00R\rhistoryBranch\x12s\n" +
-	"\x1afs_read_workspace_artifact\x18] \x01(\v24.liveagent.gateway.v1.FsReadWorkspaceArtifactRequestH\x00R\x17fsReadWorkspaceArtifactB\t\n" +
-	"\apayloadJ\x04\bC\x10DJ\x04\bD\x10EJ\x04\bE\x10FJ\x04\bJ\x10K\"\xbd*\n" +
+	"\x1afs_read_workspace_artifact\x18] \x01(\v24.liveagent.gateway.v1.FsReadWorkspaceArtifactRequestH\x00R\x17fsReadWorkspaceArtifact\x12V\n" +
+	"\x0fhistory_archive\x18^ \x01(\v2+.liveagent.gateway.v1.HistoryArchiveRequestH\x00R\x0ehistoryArchive\x12`\n" +
+	"\x14channel_binding_resp\x18_ \x01(\v2,.liveagent.gateway.v1.ChannelBindingResponseH\x00R\x12channelBindingResp\x12k\n" +
+	"\x19channel_bindings_snapshot\x18` \x01(\v2-.liveagent.gateway.v1.ChannelBindingsSnapshotH\x00R\x17channelBindingsSnapshotB\t\n" +
+	"\apayloadJ\x04\bC\x10DJ\x04\bD\x10EJ\x04\bE\x10FJ\x04\bJ\x10K\"\xf7+\n" +
 	"\rAgentEnvelope\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1c\n" +
@@ -11494,7 +12061,9 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\x18managed_process_response\x18[ \x01(\v2,.liveagent.gateway.v1.ManagedProcessResponseH\x00R\x16managedProcessResponse\x12h\n" +
 	"\x18managed_process_snapshot\x18\\ \x01(\v2,.liveagent.gateway.v1.ManagedProcessSnapshotH\x00R\x16managedProcessSnapshot\x12]\n" +
 	"\x13history_branch_resp\x18] \x01(\v2+.liveagent.gateway.v1.HistoryBranchResponseH\x00R\x11historyBranchResp\x12}\n" +
-	"\x1ffs_read_workspace_artifact_resp\x18^ \x01(\v25.liveagent.gateway.v1.FsReadWorkspaceArtifactResponseH\x00R\x1bfsReadWorkspaceArtifactResp\x12;\n" +
+	"\x1ffs_read_workspace_artifact_resp\x18^ \x01(\v25.liveagent.gateway.v1.FsReadWorkspaceArtifactResponseH\x00R\x1bfsReadWorkspaceArtifactResp\x12`\n" +
+	"\x14history_archive_resp\x18_ \x01(\v2,.liveagent.gateway.v1.HistoryArchiveResponseH\x00R\x12historyArchiveResp\x12V\n" +
+	"\x0fchannel_binding\x18` \x01(\v2+.liveagent.gateway.v1.ChannelBindingRequestH\x00R\x0echannelBinding\x12;\n" +
 	"\x05error\x18c \x01(\v2#.liveagent.gateway.v1.ErrorResponseH\x00R\x05errorB\t\n" +
 	"\apayloadJ\x04\bC\x10DJ\x04\bD\x10EJ\x04\bE\x10FJ\x04\bN\x10O\"|\n" +
 	"\x11ChatSelectedModel\x12,\n" +
@@ -11851,7 +12420,7 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\vGitResponse\x12\x16\n" +
 	"\x06action\x18\x01 \x01(\tR\x06action\x12\x1f\n" +
 	"\vresult_json\x18\x02 \x01(\tR\n" +
-	"resultJson\"\xc0\x03\n" +
+	"resultJson\"\xe6\x04\n" +
 	"\rTrustedOrigin\x12\x18\n" +
 	"\achannel\x18\x01 \x01(\tR\achannel\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x15\n" +
@@ -11865,7 +12434,10 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\x12gateway_request_id\x18\n" +
 	" \x01(\tR\x10gatewayRequestId\x12,\n" +
 	"\x12channel_session_id\x18\v \x01(\tR\x10channelSessionId\x12'\n" +
-	"\x0fchannel_command\x18\f \x01(\tR\x0echannelCommand\"\xd5\x04\n" +
+	"\x0fchannel_command\x18\f \x01(\tR\x0echannelCommand\x12*\n" +
+	"\x11channel_scope_key\x18\r \x01(\tR\x0fchannelScopeKey\x12<\n" +
+	"\x1achannel_session_generation\x18\x0e \x01(\x04R\x18channelSessionGeneration\x12:\n" +
+	"\x19channel_lifecycle_version\x18\x0f \x01(\rR\x17channelLifecycleVersion\"\xd5\x04\n" +
 	"\vChatRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12N\n" +
@@ -11993,7 +12565,7 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\x13HistoryListResponse\x12O\n" +
 	"\rconversations\x18\x01 \x03(\v2).liveagent.gateway.v1.ConversationSummaryR\rconversations\x12\x1f\n" +
 	"\vtotal_count\x18\x02 \x01(\x05R\n" +
-	"totalCount\"\x8d\x03\n" +
+	"totalCount\"\xab\a\n" +
 	"\x13ConversationSummary\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x1d\n" +
@@ -12012,7 +12584,23 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	" \x01(\bR\bisPinned\x12\x1b\n" +
 	"\tpinned_at\x18\v \x01(\x03R\bpinnedAt\x12\x1b\n" +
 	"\tis_shared\x18\f \x01(\bR\bisShared\x12.\n" +
-	"\x13selected_model_json\x18\r \x01(\tR\x11selectedModelJson\"_\n" +
+	"\x13selected_model_json\x18\r \x01(\tR\x11selectedModelJson\x12$\n" +
+	"\varchived_at\x18\x0e \x01(\x03H\x00R\n" +
+	"archivedAt\x88\x01\x01\x12*\n" +
+	"\x0earchive_reason\x18\x0f \x01(\tH\x01R\rarchiveReason\x88\x01\x01\x12(\n" +
+	"\runarchived_at\x18\x10 \x01(\x03H\x02R\funarchivedAt\x88\x01\x01\x124\n" +
+	"\x14last_user_message_at\x18\x11 \x01(\x03H\x03R\x11lastUserMessageAt\x88\x01\x01\x126\n" +
+	"\x15last_turn_finished_at\x18\x12 \x01(\x03H\x04R\x12lastTurnFinishedAt\x88\x01\x01\x12-\n" +
+	"\x10origin_source_id\x18\x13 \x01(\tH\x05R\x0eoriginSourceId\x88\x01\x01\x12+\n" +
+	"\x11lifecycle_version\x18\x14 \x01(\x03R\x10lifecycleVersion\x12)\n" +
+	"\x10activity_version\x18\x15 \x01(\x03R\x0factivityVersion\x12.\n" +
+	"\x13auto_archive_exempt\x18\x16 \x01(\bR\x11autoArchiveExemptB\x0e\n" +
+	"\f_archived_atB\x11\n" +
+	"\x0f_archive_reasonB\x10\n" +
+	"\x0e_unarchived_atB\x17\n" +
+	"\x15_last_user_message_atB\x18\n" +
+	"\x16_last_turn_finished_atB\x13\n" +
+	"\x11_origin_source_id\"_\n" +
 	"\x11HistoryGetRequest\x12'\n" +
 	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12!\n" +
 	"\fmax_messages\x18\x02 \x01(\x05R\vmaxMessages\"\xb2\x02\n" +
@@ -12284,7 +12872,41 @@ const file_proto_v1_gateway_proto_rawDesc = "" +
 	"\x10use_system_proxy\x18\x04 \x01(\bR\x0euseSystemProxy\"9\n" +
 	"\x16ProviderModelsResponse\x12\x1f\n" +
 	"\vmodels_json\x18\x01 \x01(\tR\n" +
-	"modelsJson*\xc6\x04\n" +
+	"modelsJson\"N\n" +
+	"\x15HistoryArchiveRequest\x12\x18\n" +
+	"\acommand\x18\x01 \x01(\tR\acommand\x12\x1b\n" +
+	"\targs_json\x18\x02 \x01(\tR\bargsJson\"9\n" +
+	"\x16HistoryArchiveResponse\x12\x1f\n" +
+	"\vresult_json\x18\x01 \x01(\tR\n" +
+	"resultJson\"\xf9\x01\n" +
+	"\x15ChannelBindingRequest\x12!\n" +
+	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x16\n" +
+	"\x06action\x18\x02 \x01(\tR\x06action\x12'\n" +
+	"\x0finstallation_id\x18\x03 \x01(\tR\x0einstallationId\x12\x1b\n" +
+	"\tscope_key\x18\x04 \x01(\tR\bscopeKey\x12.\n" +
+	"\x13expected_session_id\x18\x05 \x01(\tR\x11expectedSessionId\x12/\n" +
+	"\x13expected_generation\x18\x06 \x01(\x04R\x12expectedGeneration\"\xac\x01\n" +
+	"\x16ChannelBindingResponse\x12!\n" +
+	"\foperation_id\x18\x01 \x01(\tR\voperationId\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x04 \x01(\x04R\n" +
+	"generation\x12\x18\n" +
+	"\amessage\x18\x05 \x01(\tR\amessage\"\xf7\x01\n" +
+	"\x1aChannelBindingRegistration\x12'\n" +
+	"\x0fconversation_id\x18\x01 \x01(\tR\x0econversationId\x12'\n" +
+	"\x0finstallation_id\x18\x02 \x01(\tR\x0einstallationId\x12\x1b\n" +
+	"\tscope_key\x18\x03 \x01(\tR\bscopeKey\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x04 \x01(\tR\tsessionId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x05 \x01(\x04R\n" +
+	"generation\x12+\n" +
+	"\x11lifecycle_version\x18\x06 \x01(\rR\x10lifecycleVersion\"g\n" +
+	"\x17ChannelBindingsSnapshot\x12L\n" +
+	"\bbindings\x18\x01 \x03(\v20.liveagent.gateway.v1.ChannelBindingRegistrationR\bbindings*\xc6\x04\n" +
 	"\x0fTunnelFrameKind\x12!\n" +
 	"\x1dTUNNEL_FRAME_KIND_UNSPECIFIED\x10\x00\x12(\n" +
 	"$TUNNEL_FRAME_KIND_HTTP_REQUEST_START\x10\x01\x12'\n" +
@@ -12321,7 +12943,7 @@ func file_proto_v1_gateway_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_v1_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_proto_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 139)
+var file_proto_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 145)
 var file_proto_v1_gateway_proto_goTypes = []any{
 	(TunnelFrameKind)(0),                      // 0: liveagent.gateway.v1.TunnelFrameKind
 	(TunnelWsMessageType)(0),                  // 1: liveagent.gateway.v1.TunnelWsMessageType
@@ -12465,6 +13087,12 @@ var file_proto_v1_gateway_proto_goTypes = []any{
 	(*ErrorResponse)(nil),                     // 139: liveagent.gateway.v1.ErrorResponse
 	(*ProviderModelsRequest)(nil),             // 140: liveagent.gateway.v1.ProviderModelsRequest
 	(*ProviderModelsResponse)(nil),            // 141: liveagent.gateway.v1.ProviderModelsResponse
+	(*HistoryArchiveRequest)(nil),             // 142: liveagent.gateway.v1.HistoryArchiveRequest
+	(*HistoryArchiveResponse)(nil),            // 143: liveagent.gateway.v1.HistoryArchiveResponse
+	(*ChannelBindingRequest)(nil),             // 144: liveagent.gateway.v1.ChannelBindingRequest
+	(*ChannelBindingResponse)(nil),            // 145: liveagent.gateway.v1.ChannelBindingResponse
+	(*ChannelBindingRegistration)(nil),        // 146: liveagent.gateway.v1.ChannelBindingRegistration
+	(*ChannelBindingsSnapshot)(nil),           // 147: liveagent.gateway.v1.ChannelBindingsSnapshot
 }
 var file_proto_v1_gateway_proto_depIdxs = []int32{
 	55,  // 0: liveagent.gateway.v1.GatewayEnvelope.chat_command:type_name -> liveagent.gateway.v1.ChatCommandRequest
@@ -12514,123 +13142,129 @@ var file_proto_v1_gateway_proto_depIdxs = []int32{
 	30,  // 44: liveagent.gateway.v1.GatewayEnvelope.managed_process_request:type_name -> liveagent.gateway.v1.ManagedProcessRequest
 	75,  // 45: liveagent.gateway.v1.GatewayEnvelope.history_branch:type_name -> liveagent.gateway.v1.HistoryBranchRequest
 	127, // 46: liveagent.gateway.v1.GatewayEnvelope.fs_read_workspace_artifact:type_name -> liveagent.gateway.v1.FsReadWorkspaceArtifactRequest
-	59,  // 47: liveagent.gateway.v1.AgentEnvelope.chat_event:type_name -> liveagent.gateway.v1.ChatEvent
-	65,  // 48: liveagent.gateway.v1.AgentEnvelope.cron_manage_resp:type_name -> liveagent.gateway.v1.CronManageResponse
-	67,  // 49: liveagent.gateway.v1.AgentEnvelope.history_list_resp:type_name -> liveagent.gateway.v1.HistoryListResponse
-	70,  // 50: liveagent.gateway.v1.AgentEnvelope.history_get_resp:type_name -> liveagent.gateway.v1.HistoryGetResponse
-	74,  // 51: liveagent.gateway.v1.AgentEnvelope.history_rename_resp:type_name -> liveagent.gateway.v1.HistoryRenameResponse
-	90,  // 52: liveagent.gateway.v1.AgentEnvelope.history_delete_resp:type_name -> liveagent.gateway.v1.HistoryDeleteResponse
-	91,  // 53: liveagent.gateway.v1.AgentEnvelope.history_sync:type_name -> liveagent.gateway.v1.HistorySyncEvent
-	72,  // 54: liveagent.gateway.v1.AgentEnvelope.history_prefix_resp:type_name -> liveagent.gateway.v1.HistoryPrefixResponse
-	78,  // 55: liveagent.gateway.v1.AgentEnvelope.history_pin_resp:type_name -> liveagent.gateway.v1.HistoryPinResponse
-	81,  // 56: liveagent.gateway.v1.AgentEnvelope.history_share_get_resp:type_name -> liveagent.gateway.v1.HistoryShareGetResponse
-	83,  // 57: liveagent.gateway.v1.AgentEnvelope.history_share_set_resp:type_name -> liveagent.gateway.v1.HistoryShareSetResponse
-	85,  // 58: liveagent.gateway.v1.AgentEnvelope.history_share_resolve_resp:type_name -> liveagent.gateway.v1.HistoryShareResolveResponse
-	88,  // 59: liveagent.gateway.v1.AgentEnvelope.history_workdirs_resp:type_name -> liveagent.gateway.v1.HistoryWorkdirsResponse
-	93,  // 60: liveagent.gateway.v1.AgentEnvelope.provider_list_resp:type_name -> liveagent.gateway.v1.ProviderListResponse
-	95,  // 61: liveagent.gateway.v1.AgentEnvelope.settings_get_resp:type_name -> liveagent.gateway.v1.SettingsGetResponse
-	97,  // 62: liveagent.gateway.v1.AgentEnvelope.settings_update_resp:type_name -> liveagent.gateway.v1.SettingsUpdateResponse
-	100, // 63: liveagent.gateway.v1.AgentEnvelope.settings_sync:type_name -> liveagent.gateway.v1.SettingsSyncEvent
-	102, // 64: liveagent.gateway.v1.AgentEnvelope.skill_files_list_resp:type_name -> liveagent.gateway.v1.SkillFilesListResponse
-	104, // 65: liveagent.gateway.v1.AgentEnvelope.skill_metadata_read_resp:type_name -> liveagent.gateway.v1.SkillMetadataReadResponse
-	106, // 66: liveagent.gateway.v1.AgentEnvelope.skill_text_read_resp:type_name -> liveagent.gateway.v1.SkillTextReadResponse
-	111, // 67: liveagent.gateway.v1.AgentEnvelope.file_mention_list_resp:type_name -> liveagent.gateway.v1.FileMentionListResponse
-	12,  // 68: liveagent.gateway.v1.AgentEnvelope.upload_readable_files_resp:type_name -> liveagent.gateway.v1.UploadReadableFilesResponse
-	114, // 69: liveagent.gateway.v1.AgentEnvelope.fs_roots_resp:type_name -> liveagent.gateway.v1.FsRootsResponse
-	138, // 70: liveagent.gateway.v1.AgentEnvelope.pong:type_name -> liveagent.gateway.v1.PongResponse
-	117, // 71: liveagent.gateway.v1.AgentEnvelope.fs_list_dirs_resp:type_name -> liveagent.gateway.v1.FsListDirsResponse
-	14,  // 72: liveagent.gateway.v1.AgentEnvelope.uploaded_image_preview_resp:type_name -> liveagent.gateway.v1.UploadedImagePreviewResponse
-	33,  // 73: liveagent.gateway.v1.AgentEnvelope.memory_manage_resp:type_name -> liveagent.gateway.v1.MemoryManageResponse
-	108, // 74: liveagent.gateway.v1.AgentEnvelope.skill_manage_resp:type_name -> liveagent.gateway.v1.SkillManageResponse
-	119, // 75: liveagent.gateway.v1.AgentEnvelope.fs_create_project_folder_resp:type_name -> liveagent.gateway.v1.FsCreateProjectFolderResponse
-	46,  // 76: liveagent.gateway.v1.AgentEnvelope.terminal_response:type_name -> liveagent.gateway.v1.TerminalResponse
-	47,  // 77: liveagent.gateway.v1.AgentEnvelope.terminal_event:type_name -> liveagent.gateway.v1.TerminalEvent
-	122, // 78: liveagent.gateway.v1.AgentEnvelope.fs_list_resp:type_name -> liveagent.gateway.v1.FsListResponse
-	130, // 79: liveagent.gateway.v1.AgentEnvelope.fs_write_text_resp:type_name -> liveagent.gateway.v1.FsWriteTextResponse
-	132, // 80: liveagent.gateway.v1.AgentEnvelope.fs_create_dir_resp:type_name -> liveagent.gateway.v1.FsCreateDirResponse
-	134, // 81: liveagent.gateway.v1.AgentEnvelope.fs_rename_resp:type_name -> liveagent.gateway.v1.FsRenameResponse
-	136, // 82: liveagent.gateway.v1.AgentEnvelope.fs_delete_resp:type_name -> liveagent.gateway.v1.FsDeleteResponse
-	50,  // 83: liveagent.gateway.v1.AgentEnvelope.git_response:type_name -> liveagent.gateway.v1.GitResponse
-	124, // 84: liveagent.gateway.v1.AgentEnvelope.fs_read_editable_text_resp:type_name -> liveagent.gateway.v1.FsReadEditableTextResponse
-	126, // 85: liveagent.gateway.v1.AgentEnvelope.fs_read_workspace_image_resp:type_name -> liveagent.gateway.v1.FsReadWorkspaceImageResponse
-	40,  // 86: liveagent.gateway.v1.AgentEnvelope.sftp_response:type_name -> liveagent.gateway.v1.SftpResponse
-	41,  // 87: liveagent.gateway.v1.AgentEnvelope.sftp_event:type_name -> liveagent.gateway.v1.SftpEvent
-	57,  // 88: liveagent.gateway.v1.AgentEnvelope.chat_queue_resp:type_name -> liveagent.gateway.v1.ChatQueueResponse
-	58,  // 89: liveagent.gateway.v1.AgentEnvelope.chat_queue_event:type_name -> liveagent.gateway.v1.ChatQueueEvent
-	60,  // 90: liveagent.gateway.v1.AgentEnvelope.chat_control:type_name -> liveagent.gateway.v1.ChatControlEvent
-	62,  // 91: liveagent.gateway.v1.AgentEnvelope.runtime_status:type_name -> liveagent.gateway.v1.RuntimeStatusEvent
-	99,  // 92: liveagent.gateway.v1.AgentEnvelope.settings_reset_ssh_known_host_resp:type_name -> liveagent.gateway.v1.SettingsResetSshKnownHostResponse
-	61,  // 93: liveagent.gateway.v1.AgentEnvelope.chat_runtime_snapshot:type_name -> liveagent.gateway.v1.ChatRuntimeSnapshot
-	141, // 94: liveagent.gateway.v1.AgentEnvelope.provider_models_resp:type_name -> liveagent.gateway.v1.ProviderModelsResponse
-	16,  // 95: liveagent.gateway.v1.AgentEnvelope.tunnel_desired:type_name -> liveagent.gateway.v1.TunnelDesiredState
-	21,  // 96: liveagent.gateway.v1.AgentEnvelope.tunnel_mutation_result:type_name -> liveagent.gateway.v1.TunnelMutationResult
-	25,  // 97: liveagent.gateway.v1.AgentEnvelope.tunnel_frame:type_name -> liveagent.gateway.v1.TunnelFrame
-	23,  // 98: liveagent.gateway.v1.AgentEnvelope.tunnel_probe_report:type_name -> liveagent.gateway.v1.TunnelProbeReport
-	27,  // 99: liveagent.gateway.v1.AgentEnvelope.workspace_activity:type_name -> liveagent.gateway.v1.WorkspaceActivityEvent
-	31,  // 100: liveagent.gateway.v1.AgentEnvelope.managed_process_response:type_name -> liveagent.gateway.v1.ManagedProcessResponse
-	29,  // 101: liveagent.gateway.v1.AgentEnvelope.managed_process_snapshot:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
-	76,  // 102: liveagent.gateway.v1.AgentEnvelope.history_branch_resp:type_name -> liveagent.gateway.v1.HistoryBranchResponse
-	128, // 103: liveagent.gateway.v1.AgentEnvelope.fs_read_workspace_artifact_resp:type_name -> liveagent.gateway.v1.FsReadWorkspaceArtifactResponse
-	139, // 104: liveagent.gateway.v1.AgentEnvelope.error:type_name -> liveagent.gateway.v1.ErrorResponse
-	10,  // 105: liveagent.gateway.v1.UploadReadableFilesRequest.files:type_name -> liveagent.gateway.v1.UploadReadableFile
-	9,   // 106: liveagent.gateway.v1.UploadReadableFilesResponse.files:type_name -> liveagent.gateway.v1.ChatUploadedFile
-	15,  // 107: liveagent.gateway.v1.TunnelDesiredState.tunnels:type_name -> liveagent.gateway.v1.TunnelSpec
-	17,  // 108: liveagent.gateway.v1.TunnelStatus.local:type_name -> liveagent.gateway.v1.TunnelHealth
-	18,  // 109: liveagent.gateway.v1.TunnelStateSnapshot.tunnels:type_name -> liveagent.gateway.v1.TunnelStatus
-	17,  // 110: liveagent.gateway.v1.TunnelStateSnapshot.relay:type_name -> liveagent.gateway.v1.TunnelHealth
-	17,  // 111: liveagent.gateway.v1.TunnelProbeResult.local:type_name -> liveagent.gateway.v1.TunnelHealth
-	22,  // 112: liveagent.gateway.v1.TunnelProbeReport.results:type_name -> liveagent.gateway.v1.TunnelProbeResult
-	0,   // 113: liveagent.gateway.v1.TunnelFrame.kind:type_name -> liveagent.gateway.v1.TunnelFrameKind
-	24,  // 114: liveagent.gateway.v1.TunnelFrame.headers:type_name -> liveagent.gateway.v1.TunnelHeader
-	1,   // 115: liveagent.gateway.v1.TunnelFrame.ws_message_type:type_name -> liveagent.gateway.v1.TunnelWsMessageType
-	28,  // 116: liveagent.gateway.v1.ManagedProcessSnapshot.processes:type_name -> liveagent.gateway.v1.ManagedProcessRecord
-	29,  // 117: liveagent.gateway.v1.ManagedProcessResponse.snapshot:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
-	36,  // 118: liveagent.gateway.v1.TerminalSession.ssh:type_name -> liveagent.gateway.v1.TerminalSshMetadata
-	38,  // 119: liveagent.gateway.v1.SftpResponse.entries:type_name -> liveagent.gateway.v1.SftpEntry
-	38,  // 120: liveagent.gateway.v1.SftpResponse.entry:type_name -> liveagent.gateway.v1.SftpEntry
-	39,  // 121: liveagent.gateway.v1.SftpResponse.transfer:type_name -> liveagent.gateway.v1.SftpTransfer
-	39,  // 122: liveagent.gateway.v1.SftpEvent.transfer:type_name -> liveagent.gateway.v1.SftpTransfer
-	44,  // 123: liveagent.gateway.v1.TerminalSshTabsSnapshot.tabs:type_name -> liveagent.gateway.v1.TerminalSshTab
-	35,  // 124: liveagent.gateway.v1.TerminalResponse.sessions:type_name -> liveagent.gateway.v1.TerminalSession
-	35,  // 125: liveagent.gateway.v1.TerminalResponse.session:type_name -> liveagent.gateway.v1.TerminalSession
-	43,  // 126: liveagent.gateway.v1.TerminalResponse.shell_options:type_name -> liveagent.gateway.v1.TerminalShellOption
-	42,  // 127: liveagent.gateway.v1.TerminalResponse.ssh_prompt:type_name -> liveagent.gateway.v1.TerminalSshPrompt
-	45,  // 128: liveagent.gateway.v1.TerminalResponse.ssh_tabs:type_name -> liveagent.gateway.v1.TerminalSshTabsSnapshot
-	35,  // 129: liveagent.gateway.v1.TerminalEvent.session:type_name -> liveagent.gateway.v1.TerminalSession
-	45,  // 130: liveagent.gateway.v1.TerminalEvent.ssh_tabs:type_name -> liveagent.gateway.v1.TerminalSshTabsSnapshot
-	35,  // 131: liveagent.gateway.v1.TerminalStreamFrame.session:type_name -> liveagent.gateway.v1.TerminalSession
-	7,   // 132: liveagent.gateway.v1.ChatRequest.selected_model:type_name -> liveagent.gateway.v1.ChatSelectedModel
-	9,   // 133: liveagent.gateway.v1.ChatRequest.uploaded_files:type_name -> liveagent.gateway.v1.ChatUploadedFile
-	8,   // 134: liveagent.gateway.v1.ChatRequest.runtime_controls:type_name -> liveagent.gateway.v1.ChatRuntimeControls
-	51,  // 135: liveagent.gateway.v1.ChatRequest.trusted_origin:type_name -> liveagent.gateway.v1.TrustedOrigin
-	52,  // 136: liveagent.gateway.v1.ChatCommandRequest.request:type_name -> liveagent.gateway.v1.ChatRequest
-	53,  // 137: liveagent.gateway.v1.ChatCommandRequest.base_message_ref:type_name -> liveagent.gateway.v1.ChatMessageRef
-	54,  // 138: liveagent.gateway.v1.ChatCommandRequest.cancel:type_name -> liveagent.gateway.v1.CancelChatRequest
-	2,   // 139: liveagent.gateway.v1.ChatEvent.type:type_name -> liveagent.gateway.v1.ChatEvent.ChatEventType
-	63,  // 140: liveagent.gateway.v1.RuntimeStatusEvent.active_runs:type_name -> liveagent.gateway.v1.ChatRunReport
-	63,  // 141: liveagent.gateway.v1.RuntimeStatusEvent.finished_runs:type_name -> liveagent.gateway.v1.ChatRunReport
-	68,  // 142: liveagent.gateway.v1.HistoryListResponse.conversations:type_name -> liveagent.gateway.v1.ConversationSummary
-	68,  // 143: liveagent.gateway.v1.HistoryGetResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
-	53,  // 144: liveagent.gateway.v1.HistoryPrefixRequest.base_message_ref:type_name -> liveagent.gateway.v1.ChatMessageRef
-	68,  // 145: liveagent.gateway.v1.HistoryPrefixResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
-	68,  // 146: liveagent.gateway.v1.HistoryRenameResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
-	53,  // 147: liveagent.gateway.v1.HistoryBranchRequest.base_message_ref:type_name -> liveagent.gateway.v1.ChatMessageRef
-	68,  // 148: liveagent.gateway.v1.HistoryBranchResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
-	68,  // 149: liveagent.gateway.v1.HistoryPinResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
-	79,  // 150: liveagent.gateway.v1.HistoryShareGetResponse.share:type_name -> liveagent.gateway.v1.HistoryShareStatus
-	79,  // 151: liveagent.gateway.v1.HistoryShareSetResponse.share:type_name -> liveagent.gateway.v1.HistoryShareStatus
-	68,  // 152: liveagent.gateway.v1.HistoryShareResolveResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
-	87,  // 153: liveagent.gateway.v1.HistoryWorkdirsResponse.workdirs:type_name -> liveagent.gateway.v1.HistoryWorkdirSummary
-	68,  // 154: liveagent.gateway.v1.HistorySyncEvent.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
-	110, // 155: liveagent.gateway.v1.FileMentionListResponse.entries:type_name -> liveagent.gateway.v1.FileMentionEntry
-	112, // 156: liveagent.gateway.v1.FsRootsResponse.roots:type_name -> liveagent.gateway.v1.FsRoot
-	116, // 157: liveagent.gateway.v1.FsListDirsResponse.entries:type_name -> liveagent.gateway.v1.FsDirEntry
-	121, // 158: liveagent.gateway.v1.FsListResponse.entries:type_name -> liveagent.gateway.v1.FsListEntry
-	159, // [159:159] is the sub-list for method output_type
-	159, // [159:159] is the sub-list for method input_type
-	159, // [159:159] is the sub-list for extension type_name
-	159, // [159:159] is the sub-list for extension extendee
-	0,   // [0:159] is the sub-list for field type_name
+	142, // 47: liveagent.gateway.v1.GatewayEnvelope.history_archive:type_name -> liveagent.gateway.v1.HistoryArchiveRequest
+	145, // 48: liveagent.gateway.v1.GatewayEnvelope.channel_binding_resp:type_name -> liveagent.gateway.v1.ChannelBindingResponse
+	147, // 49: liveagent.gateway.v1.GatewayEnvelope.channel_bindings_snapshot:type_name -> liveagent.gateway.v1.ChannelBindingsSnapshot
+	59,  // 50: liveagent.gateway.v1.AgentEnvelope.chat_event:type_name -> liveagent.gateway.v1.ChatEvent
+	65,  // 51: liveagent.gateway.v1.AgentEnvelope.cron_manage_resp:type_name -> liveagent.gateway.v1.CronManageResponse
+	67,  // 52: liveagent.gateway.v1.AgentEnvelope.history_list_resp:type_name -> liveagent.gateway.v1.HistoryListResponse
+	70,  // 53: liveagent.gateway.v1.AgentEnvelope.history_get_resp:type_name -> liveagent.gateway.v1.HistoryGetResponse
+	74,  // 54: liveagent.gateway.v1.AgentEnvelope.history_rename_resp:type_name -> liveagent.gateway.v1.HistoryRenameResponse
+	90,  // 55: liveagent.gateway.v1.AgentEnvelope.history_delete_resp:type_name -> liveagent.gateway.v1.HistoryDeleteResponse
+	91,  // 56: liveagent.gateway.v1.AgentEnvelope.history_sync:type_name -> liveagent.gateway.v1.HistorySyncEvent
+	72,  // 57: liveagent.gateway.v1.AgentEnvelope.history_prefix_resp:type_name -> liveagent.gateway.v1.HistoryPrefixResponse
+	78,  // 58: liveagent.gateway.v1.AgentEnvelope.history_pin_resp:type_name -> liveagent.gateway.v1.HistoryPinResponse
+	81,  // 59: liveagent.gateway.v1.AgentEnvelope.history_share_get_resp:type_name -> liveagent.gateway.v1.HistoryShareGetResponse
+	83,  // 60: liveagent.gateway.v1.AgentEnvelope.history_share_set_resp:type_name -> liveagent.gateway.v1.HistoryShareSetResponse
+	85,  // 61: liveagent.gateway.v1.AgentEnvelope.history_share_resolve_resp:type_name -> liveagent.gateway.v1.HistoryShareResolveResponse
+	88,  // 62: liveagent.gateway.v1.AgentEnvelope.history_workdirs_resp:type_name -> liveagent.gateway.v1.HistoryWorkdirsResponse
+	93,  // 63: liveagent.gateway.v1.AgentEnvelope.provider_list_resp:type_name -> liveagent.gateway.v1.ProviderListResponse
+	95,  // 64: liveagent.gateway.v1.AgentEnvelope.settings_get_resp:type_name -> liveagent.gateway.v1.SettingsGetResponse
+	97,  // 65: liveagent.gateway.v1.AgentEnvelope.settings_update_resp:type_name -> liveagent.gateway.v1.SettingsUpdateResponse
+	100, // 66: liveagent.gateway.v1.AgentEnvelope.settings_sync:type_name -> liveagent.gateway.v1.SettingsSyncEvent
+	102, // 67: liveagent.gateway.v1.AgentEnvelope.skill_files_list_resp:type_name -> liveagent.gateway.v1.SkillFilesListResponse
+	104, // 68: liveagent.gateway.v1.AgentEnvelope.skill_metadata_read_resp:type_name -> liveagent.gateway.v1.SkillMetadataReadResponse
+	106, // 69: liveagent.gateway.v1.AgentEnvelope.skill_text_read_resp:type_name -> liveagent.gateway.v1.SkillTextReadResponse
+	111, // 70: liveagent.gateway.v1.AgentEnvelope.file_mention_list_resp:type_name -> liveagent.gateway.v1.FileMentionListResponse
+	12,  // 71: liveagent.gateway.v1.AgentEnvelope.upload_readable_files_resp:type_name -> liveagent.gateway.v1.UploadReadableFilesResponse
+	114, // 72: liveagent.gateway.v1.AgentEnvelope.fs_roots_resp:type_name -> liveagent.gateway.v1.FsRootsResponse
+	138, // 73: liveagent.gateway.v1.AgentEnvelope.pong:type_name -> liveagent.gateway.v1.PongResponse
+	117, // 74: liveagent.gateway.v1.AgentEnvelope.fs_list_dirs_resp:type_name -> liveagent.gateway.v1.FsListDirsResponse
+	14,  // 75: liveagent.gateway.v1.AgentEnvelope.uploaded_image_preview_resp:type_name -> liveagent.gateway.v1.UploadedImagePreviewResponse
+	33,  // 76: liveagent.gateway.v1.AgentEnvelope.memory_manage_resp:type_name -> liveagent.gateway.v1.MemoryManageResponse
+	108, // 77: liveagent.gateway.v1.AgentEnvelope.skill_manage_resp:type_name -> liveagent.gateway.v1.SkillManageResponse
+	119, // 78: liveagent.gateway.v1.AgentEnvelope.fs_create_project_folder_resp:type_name -> liveagent.gateway.v1.FsCreateProjectFolderResponse
+	46,  // 79: liveagent.gateway.v1.AgentEnvelope.terminal_response:type_name -> liveagent.gateway.v1.TerminalResponse
+	47,  // 80: liveagent.gateway.v1.AgentEnvelope.terminal_event:type_name -> liveagent.gateway.v1.TerminalEvent
+	122, // 81: liveagent.gateway.v1.AgentEnvelope.fs_list_resp:type_name -> liveagent.gateway.v1.FsListResponse
+	130, // 82: liveagent.gateway.v1.AgentEnvelope.fs_write_text_resp:type_name -> liveagent.gateway.v1.FsWriteTextResponse
+	132, // 83: liveagent.gateway.v1.AgentEnvelope.fs_create_dir_resp:type_name -> liveagent.gateway.v1.FsCreateDirResponse
+	134, // 84: liveagent.gateway.v1.AgentEnvelope.fs_rename_resp:type_name -> liveagent.gateway.v1.FsRenameResponse
+	136, // 85: liveagent.gateway.v1.AgentEnvelope.fs_delete_resp:type_name -> liveagent.gateway.v1.FsDeleteResponse
+	50,  // 86: liveagent.gateway.v1.AgentEnvelope.git_response:type_name -> liveagent.gateway.v1.GitResponse
+	124, // 87: liveagent.gateway.v1.AgentEnvelope.fs_read_editable_text_resp:type_name -> liveagent.gateway.v1.FsReadEditableTextResponse
+	126, // 88: liveagent.gateway.v1.AgentEnvelope.fs_read_workspace_image_resp:type_name -> liveagent.gateway.v1.FsReadWorkspaceImageResponse
+	40,  // 89: liveagent.gateway.v1.AgentEnvelope.sftp_response:type_name -> liveagent.gateway.v1.SftpResponse
+	41,  // 90: liveagent.gateway.v1.AgentEnvelope.sftp_event:type_name -> liveagent.gateway.v1.SftpEvent
+	57,  // 91: liveagent.gateway.v1.AgentEnvelope.chat_queue_resp:type_name -> liveagent.gateway.v1.ChatQueueResponse
+	58,  // 92: liveagent.gateway.v1.AgentEnvelope.chat_queue_event:type_name -> liveagent.gateway.v1.ChatQueueEvent
+	60,  // 93: liveagent.gateway.v1.AgentEnvelope.chat_control:type_name -> liveagent.gateway.v1.ChatControlEvent
+	62,  // 94: liveagent.gateway.v1.AgentEnvelope.runtime_status:type_name -> liveagent.gateway.v1.RuntimeStatusEvent
+	99,  // 95: liveagent.gateway.v1.AgentEnvelope.settings_reset_ssh_known_host_resp:type_name -> liveagent.gateway.v1.SettingsResetSshKnownHostResponse
+	61,  // 96: liveagent.gateway.v1.AgentEnvelope.chat_runtime_snapshot:type_name -> liveagent.gateway.v1.ChatRuntimeSnapshot
+	141, // 97: liveagent.gateway.v1.AgentEnvelope.provider_models_resp:type_name -> liveagent.gateway.v1.ProviderModelsResponse
+	16,  // 98: liveagent.gateway.v1.AgentEnvelope.tunnel_desired:type_name -> liveagent.gateway.v1.TunnelDesiredState
+	21,  // 99: liveagent.gateway.v1.AgentEnvelope.tunnel_mutation_result:type_name -> liveagent.gateway.v1.TunnelMutationResult
+	25,  // 100: liveagent.gateway.v1.AgentEnvelope.tunnel_frame:type_name -> liveagent.gateway.v1.TunnelFrame
+	23,  // 101: liveagent.gateway.v1.AgentEnvelope.tunnel_probe_report:type_name -> liveagent.gateway.v1.TunnelProbeReport
+	27,  // 102: liveagent.gateway.v1.AgentEnvelope.workspace_activity:type_name -> liveagent.gateway.v1.WorkspaceActivityEvent
+	31,  // 103: liveagent.gateway.v1.AgentEnvelope.managed_process_response:type_name -> liveagent.gateway.v1.ManagedProcessResponse
+	29,  // 104: liveagent.gateway.v1.AgentEnvelope.managed_process_snapshot:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
+	76,  // 105: liveagent.gateway.v1.AgentEnvelope.history_branch_resp:type_name -> liveagent.gateway.v1.HistoryBranchResponse
+	128, // 106: liveagent.gateway.v1.AgentEnvelope.fs_read_workspace_artifact_resp:type_name -> liveagent.gateway.v1.FsReadWorkspaceArtifactResponse
+	143, // 107: liveagent.gateway.v1.AgentEnvelope.history_archive_resp:type_name -> liveagent.gateway.v1.HistoryArchiveResponse
+	144, // 108: liveagent.gateway.v1.AgentEnvelope.channel_binding:type_name -> liveagent.gateway.v1.ChannelBindingRequest
+	139, // 109: liveagent.gateway.v1.AgentEnvelope.error:type_name -> liveagent.gateway.v1.ErrorResponse
+	10,  // 110: liveagent.gateway.v1.UploadReadableFilesRequest.files:type_name -> liveagent.gateway.v1.UploadReadableFile
+	9,   // 111: liveagent.gateway.v1.UploadReadableFilesResponse.files:type_name -> liveagent.gateway.v1.ChatUploadedFile
+	15,  // 112: liveagent.gateway.v1.TunnelDesiredState.tunnels:type_name -> liveagent.gateway.v1.TunnelSpec
+	17,  // 113: liveagent.gateway.v1.TunnelStatus.local:type_name -> liveagent.gateway.v1.TunnelHealth
+	18,  // 114: liveagent.gateway.v1.TunnelStateSnapshot.tunnels:type_name -> liveagent.gateway.v1.TunnelStatus
+	17,  // 115: liveagent.gateway.v1.TunnelStateSnapshot.relay:type_name -> liveagent.gateway.v1.TunnelHealth
+	17,  // 116: liveagent.gateway.v1.TunnelProbeResult.local:type_name -> liveagent.gateway.v1.TunnelHealth
+	22,  // 117: liveagent.gateway.v1.TunnelProbeReport.results:type_name -> liveagent.gateway.v1.TunnelProbeResult
+	0,   // 118: liveagent.gateway.v1.TunnelFrame.kind:type_name -> liveagent.gateway.v1.TunnelFrameKind
+	24,  // 119: liveagent.gateway.v1.TunnelFrame.headers:type_name -> liveagent.gateway.v1.TunnelHeader
+	1,   // 120: liveagent.gateway.v1.TunnelFrame.ws_message_type:type_name -> liveagent.gateway.v1.TunnelWsMessageType
+	28,  // 121: liveagent.gateway.v1.ManagedProcessSnapshot.processes:type_name -> liveagent.gateway.v1.ManagedProcessRecord
+	29,  // 122: liveagent.gateway.v1.ManagedProcessResponse.snapshot:type_name -> liveagent.gateway.v1.ManagedProcessSnapshot
+	36,  // 123: liveagent.gateway.v1.TerminalSession.ssh:type_name -> liveagent.gateway.v1.TerminalSshMetadata
+	38,  // 124: liveagent.gateway.v1.SftpResponse.entries:type_name -> liveagent.gateway.v1.SftpEntry
+	38,  // 125: liveagent.gateway.v1.SftpResponse.entry:type_name -> liveagent.gateway.v1.SftpEntry
+	39,  // 126: liveagent.gateway.v1.SftpResponse.transfer:type_name -> liveagent.gateway.v1.SftpTransfer
+	39,  // 127: liveagent.gateway.v1.SftpEvent.transfer:type_name -> liveagent.gateway.v1.SftpTransfer
+	44,  // 128: liveagent.gateway.v1.TerminalSshTabsSnapshot.tabs:type_name -> liveagent.gateway.v1.TerminalSshTab
+	35,  // 129: liveagent.gateway.v1.TerminalResponse.sessions:type_name -> liveagent.gateway.v1.TerminalSession
+	35,  // 130: liveagent.gateway.v1.TerminalResponse.session:type_name -> liveagent.gateway.v1.TerminalSession
+	43,  // 131: liveagent.gateway.v1.TerminalResponse.shell_options:type_name -> liveagent.gateway.v1.TerminalShellOption
+	42,  // 132: liveagent.gateway.v1.TerminalResponse.ssh_prompt:type_name -> liveagent.gateway.v1.TerminalSshPrompt
+	45,  // 133: liveagent.gateway.v1.TerminalResponse.ssh_tabs:type_name -> liveagent.gateway.v1.TerminalSshTabsSnapshot
+	35,  // 134: liveagent.gateway.v1.TerminalEvent.session:type_name -> liveagent.gateway.v1.TerminalSession
+	45,  // 135: liveagent.gateway.v1.TerminalEvent.ssh_tabs:type_name -> liveagent.gateway.v1.TerminalSshTabsSnapshot
+	35,  // 136: liveagent.gateway.v1.TerminalStreamFrame.session:type_name -> liveagent.gateway.v1.TerminalSession
+	7,   // 137: liveagent.gateway.v1.ChatRequest.selected_model:type_name -> liveagent.gateway.v1.ChatSelectedModel
+	9,   // 138: liveagent.gateway.v1.ChatRequest.uploaded_files:type_name -> liveagent.gateway.v1.ChatUploadedFile
+	8,   // 139: liveagent.gateway.v1.ChatRequest.runtime_controls:type_name -> liveagent.gateway.v1.ChatRuntimeControls
+	51,  // 140: liveagent.gateway.v1.ChatRequest.trusted_origin:type_name -> liveagent.gateway.v1.TrustedOrigin
+	52,  // 141: liveagent.gateway.v1.ChatCommandRequest.request:type_name -> liveagent.gateway.v1.ChatRequest
+	53,  // 142: liveagent.gateway.v1.ChatCommandRequest.base_message_ref:type_name -> liveagent.gateway.v1.ChatMessageRef
+	54,  // 143: liveagent.gateway.v1.ChatCommandRequest.cancel:type_name -> liveagent.gateway.v1.CancelChatRequest
+	2,   // 144: liveagent.gateway.v1.ChatEvent.type:type_name -> liveagent.gateway.v1.ChatEvent.ChatEventType
+	63,  // 145: liveagent.gateway.v1.RuntimeStatusEvent.active_runs:type_name -> liveagent.gateway.v1.ChatRunReport
+	63,  // 146: liveagent.gateway.v1.RuntimeStatusEvent.finished_runs:type_name -> liveagent.gateway.v1.ChatRunReport
+	68,  // 147: liveagent.gateway.v1.HistoryListResponse.conversations:type_name -> liveagent.gateway.v1.ConversationSummary
+	68,  // 148: liveagent.gateway.v1.HistoryGetResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
+	53,  // 149: liveagent.gateway.v1.HistoryPrefixRequest.base_message_ref:type_name -> liveagent.gateway.v1.ChatMessageRef
+	68,  // 150: liveagent.gateway.v1.HistoryPrefixResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
+	68,  // 151: liveagent.gateway.v1.HistoryRenameResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
+	53,  // 152: liveagent.gateway.v1.HistoryBranchRequest.base_message_ref:type_name -> liveagent.gateway.v1.ChatMessageRef
+	68,  // 153: liveagent.gateway.v1.HistoryBranchResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
+	68,  // 154: liveagent.gateway.v1.HistoryPinResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
+	79,  // 155: liveagent.gateway.v1.HistoryShareGetResponse.share:type_name -> liveagent.gateway.v1.HistoryShareStatus
+	79,  // 156: liveagent.gateway.v1.HistoryShareSetResponse.share:type_name -> liveagent.gateway.v1.HistoryShareStatus
+	68,  // 157: liveagent.gateway.v1.HistoryShareResolveResponse.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
+	87,  // 158: liveagent.gateway.v1.HistoryWorkdirsResponse.workdirs:type_name -> liveagent.gateway.v1.HistoryWorkdirSummary
+	68,  // 159: liveagent.gateway.v1.HistorySyncEvent.conversation:type_name -> liveagent.gateway.v1.ConversationSummary
+	110, // 160: liveagent.gateway.v1.FileMentionListResponse.entries:type_name -> liveagent.gateway.v1.FileMentionEntry
+	112, // 161: liveagent.gateway.v1.FsRootsResponse.roots:type_name -> liveagent.gateway.v1.FsRoot
+	116, // 162: liveagent.gateway.v1.FsListDirsResponse.entries:type_name -> liveagent.gateway.v1.FsDirEntry
+	121, // 163: liveagent.gateway.v1.FsListResponse.entries:type_name -> liveagent.gateway.v1.FsListEntry
+	146, // 164: liveagent.gateway.v1.ChannelBindingsSnapshot.bindings:type_name -> liveagent.gateway.v1.ChannelBindingRegistration
+	165, // [165:165] is the sub-list for method output_type
+	165, // [165:165] is the sub-list for method input_type
+	165, // [165:165] is the sub-list for extension type_name
+	165, // [165:165] is the sub-list for extension extendee
+	0,   // [0:165] is the sub-list for field type_name
 }
 
 func init() { file_proto_v1_gateway_proto_init() }
@@ -12686,6 +13320,9 @@ func file_proto_v1_gateway_proto_init() {
 		(*GatewayEnvelope_ManagedProcessRequest)(nil),
 		(*GatewayEnvelope_HistoryBranch)(nil),
 		(*GatewayEnvelope_FsReadWorkspaceArtifact)(nil),
+		(*GatewayEnvelope_HistoryArchive)(nil),
+		(*GatewayEnvelope_ChannelBindingResp)(nil),
+		(*GatewayEnvelope_ChannelBindingsSnapshot)(nil),
 	}
 	file_proto_v1_gateway_proto_msgTypes[3].OneofWrappers = []any{
 		(*AgentEnvelope_ChatEvent)(nil),
@@ -12745,10 +13382,13 @@ func file_proto_v1_gateway_proto_init() {
 		(*AgentEnvelope_ManagedProcessSnapshot)(nil),
 		(*AgentEnvelope_HistoryBranchResp)(nil),
 		(*AgentEnvelope_FsReadWorkspaceArtifactResp)(nil),
+		(*AgentEnvelope_HistoryArchiveResp)(nil),
+		(*AgentEnvelope_ChannelBinding)(nil),
 		(*AgentEnvelope_Error)(nil),
 	}
 	file_proto_v1_gateway_proto_msgTypes[17].OneofWrappers = []any{}
 	file_proto_v1_gateway_proto_msgTypes[25].OneofWrappers = []any{}
+	file_proto_v1_gateway_proto_msgTypes[65].OneofWrappers = []any{}
 	file_proto_v1_gateway_proto_msgTypes[79].OneofWrappers = []any{}
 	file_proto_v1_gateway_proto_msgTypes[106].OneofWrappers = []any{}
 	file_proto_v1_gateway_proto_msgTypes[117].OneofWrappers = []any{}
@@ -12758,7 +13398,7 @@ func file_proto_v1_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_v1_gateway_proto_rawDesc), len(file_proto_v1_gateway_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   139,
+			NumMessages:   145,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

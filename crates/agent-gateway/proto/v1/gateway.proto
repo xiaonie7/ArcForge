@@ -72,6 +72,9 @@ message GatewayEnvelope {
     ManagedProcessRequest managed_process_request = 91;
     HistoryBranchRequest history_branch = 92;
     FsReadWorkspaceArtifactRequest fs_read_workspace_artifact = 93;
+    HistoryArchiveRequest history_archive = 94;
+    ChannelBindingResponse channel_binding_resp = 95;
+    ChannelBindingsSnapshot channel_bindings_snapshot = 96;
   }
 
   // Legacy tunnel control/frame payloads (pre-rewrite protocol) and the
@@ -141,6 +144,8 @@ message AgentEnvelope {
     ManagedProcessSnapshot managed_process_snapshot = 92;
     HistoryBranchResponse history_branch_resp = 93;
     FsReadWorkspaceArtifactResponse fs_read_workspace_artifact_resp = 94;
+    HistoryArchiveResponse history_archive_resp = 95;
+    ChannelBindingRequest channel_binding = 96;
     ErrorResponse error = 99;
   }
 
@@ -592,6 +597,10 @@ message TrustedOrigin {
   // Gateway-validated channel command. This field is never populated from
   // ordinary user message text by the desktop runtime.
   string channel_command = 12;
+  // Opaque, adapter-normalized scope; absent for legacy connectors.
+  string channel_scope_key = 13;
+  uint64 channel_session_generation = 14;
+  uint32 channel_lifecycle_version = 15;
 }
 
 message ChatRequest {
@@ -756,6 +765,15 @@ message ConversationSummary {
   int64 pinned_at = 11;
   bool is_shared = 12;
   string selected_model_json = 13;
+  optional int64 archived_at = 14;
+  optional string archive_reason = 15;
+  optional int64 unarchived_at = 16;
+  optional int64 last_user_message_at = 17;
+  optional int64 last_turn_finished_at = 18;
+  optional string origin_source_id = 19;
+  int64 lifecycle_version = 20;
+  int64 activity_version = 21;
+  bool auto_archive_exempt = 22;
 }
 
 message HistoryGetRequest {
@@ -1153,4 +1171,46 @@ message ProviderModelsRequest {
 
 message ProviderModelsResponse {
   string models_json = 1;
+}
+
+// A bounded, allowlisted history lifecycle domain, not arbitrary desktop IPC.
+message HistoryArchiveRequest {
+  string command = 1;
+  string args_json = 2;
+}
+
+message HistoryArchiveResponse {
+  string result_json = 1;
+}
+
+// Desktop-originated control, never accepted from browser/channel requests.
+// The connector owns routing state; the desktop owns archived history.
+message ChannelBindingRequest {
+  string operation_id = 1;
+  string action = 2; // close | query
+  string installation_id = 3;
+  string scope_key = 4;
+  string expected_session_id = 5;
+  uint64 expected_generation = 6;
+}
+
+message ChannelBindingResponse {
+  string operation_id = 1;
+  string status = 2;
+  string session_id = 3;
+  uint64 generation = 4;
+  string message = 5;
+}
+
+message ChannelBindingRegistration {
+  string conversation_id = 1;
+  string installation_id = 2;
+  string scope_key = 3;
+  string session_id = 4;
+  uint64 generation = 5;
+  uint32 lifecycle_version = 6;
+}
+
+message ChannelBindingsSnapshot {
+  repeated ChannelBindingRegistration bindings = 1;
 }

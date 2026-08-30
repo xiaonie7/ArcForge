@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
+  Archive,
   ArrowLeft,
   BookOpen,
   Brain,
@@ -15,6 +16,7 @@ import {
 import { useLocale } from "../i18n";
 import { useAutomation } from "../lib/automation";
 import { AgentsSection } from "./settings/AgentsSection";
+import { ArchivedChatsSection } from "./settings/ArchivedChatsSection";
 import { CronSection } from "./settings/CronSection";
 import { HooksSection } from "./settings/HooksSection";
 import { MemoryPanel } from "./settings/memory/MemoryPanel";
@@ -121,6 +123,10 @@ const NAV_GROUPS: NavGroup[] = [
       { id: "remote", icon: <Cloud className="h-4 w-4" /> },
     ],
   },
+  {
+    labelKey: "settings.groupArchived",
+    items: [{ id: "archived", icon: <Archive className="h-4 w-4" /> }],
+  },
 ];
 
 export function SettingsPage(props: SettingsPageProps) {
@@ -138,6 +144,7 @@ export function SettingsPage(props: SettingsPageProps) {
 
   const sectionLabels: Record<SectionId, string> = {
     system: t("settings.navSystem"),
+    archived: t("archive.title"),
     systemTools: t("settings.navSystemTools"),
     providers: t("settings.navProviders"),
     agents: t("settings.navAgents"),
@@ -186,6 +193,8 @@ export function SettingsPage(props: SettingsPageProps) {
   const saveIndicator = getSaveIndicator(saveState, t);
   const sectionContent = (() => {
     switch (effectiveSection) {
+      case "archived":
+        return <ArchivedChatsSection onOpenConversation={props.onOpenConversation} projects={settings.system.workspaceProjects} />;
       case "providers":
         return <ProvidersSection settings={settings} setSettings={setSettings} />;
       case "system":
@@ -277,7 +286,7 @@ export function SettingsPage(props: SettingsPageProps) {
       </aside>
 
       <main className="settings-main flex min-w-0 flex-1 flex-col">
-        <header className="settings-main-header flex items-center justify-between border-b px-6 py-4">
+        {effectiveSection !== "archived" ? <header className="settings-main-header flex items-center justify-between border-b px-6 py-4">
           <div className="settings-main-title overflow-hidden">
             <div
               key={effectiveSection}
@@ -293,7 +302,7 @@ export function SettingsPage(props: SettingsPageProps) {
             <div className={`h-1.5 w-1.5 rounded-full ${saveIndicator.dotClass}`} />
             {saveIndicator.text}
           </div>
-        </header>
+        </header> : null}
 
         <div
           key={effectiveSection}

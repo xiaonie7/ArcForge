@@ -1,5 +1,6 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { invoke } from "@tauri-apps/api/core";
+import type { ConversationLifecycle } from "../../conversationArchive/types";
 import { normalizeConversationSystemPrompt } from "../context/systemPrompt";
 import { redactDatabaseSecretsForPersistence } from "../../security/databaseToolSecrets";
 import {
@@ -11,7 +12,7 @@ import {
   type StoredSummaryMessage,
 } from "../conversation/conversationState";
 
-export type ChatHistorySummary = {
+export type ChatHistorySummary = ConversationLifecycle & {
   id: string;
   title: string;
   providerId: string;
@@ -192,6 +193,15 @@ function normalizeWireRecord(
   const state: ConversationViewState = normalizeConversationState({ meta, segments });
 
   return {
+    archivedAt: record.archivedAt,
+    archiveReason: record.archiveReason,
+    unarchivedAt: record.unarchivedAt,
+    lifecycleVersion: record.lifecycleVersion,
+    lastUserMessageAt: record.lastUserMessageAt,
+    lastTurnFinishedAt: record.lastTurnFinishedAt,
+    activityVersion: record.activityVersion,
+    autoArchiveExempt: record.autoArchiveExempt,
+    originSourceId: record.originSourceId,
     id: record.id,
     title: record.title,
     providerId: record.providerId,
@@ -244,6 +254,15 @@ export async function getChatHistoryActiveSegment(id: string, fallbackSystemProm
   }
 
   return {
+    archivedAt: record.archivedAt,
+    archiveReason: record.archiveReason,
+    unarchivedAt: record.unarchivedAt,
+    lifecycleVersion: record.lifecycleVersion,
+    lastUserMessageAt: record.lastUserMessageAt,
+    lastTurnFinishedAt: record.lastTurnFinishedAt,
+    activityVersion: record.activityVersion,
+    autoArchiveExempt: record.autoArchiveExempt,
+    originSourceId: record.originSourceId,
     id: record.id,
     title: record.title,
     providerId: record.providerId,

@@ -1,9 +1,11 @@
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tauri::Emitter;
 
 use crate::services::chat_run_ledger::{ChatRunLedger, ChatRunLedgerState};
+use crate::services::conversation_lifecycle;
 
 use super::*;
 
@@ -41,7 +43,65 @@ pub(crate) struct RemoteChatEnqueueOutcome {
     pub(crate) inserted: bool,
 }
 
+fn remote_chat_admission_token(request_id: &str) -> String {
+    let candidate = format!("inbox:{}", request_id.trim());
+    if candidate.len() <= 512 {
+        return candidate;
+    }
+    let digest = Sha256::digest(candidate.as_bytes());
+    let hash: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("inbox:sha256:{hash}")
+}
+
+fn remote_chat_source(request: &GatewayChatRequestEvent) -> &str {
+    request
+        .origin
+        .as_ref()
+        .map(|origin| origin.channel.trim())
+        .filter(|source| !source.is_empty())
+        .unwrap_or("web")
+}
+
+fn admit_remote_chat_request(
+    request_id: &str,
+    request: &GatewayChatRequestEvent,
+) -> Result<(), String> {
+    conversation_lifecycle::admit(
+        &request.conversation_id,
+        &remote_chat_admission_token(request_id),
+        "queued",
+        Some(remote_chat_source(request)),
+        chrono::Utc::now().timestamp_millis(),
+    )
+}
+
+fn release_remote_chat_request(request_id: &str) -> Result<(), String> {
+    conversation_lifecycle::release(
+        &remote_chat_admission_token(request_id),
+        false,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+    Ok(())
+}
+
 impl GatewayController {
+    /// Native Inbox ownership begins before the WebView claims a request. Keep
+    /// that interval under the same archive gate as the visible turn queue.
+    pub fn has_pending_chat_request(&self, conversation_id: &str) -> Result<bool, String> {
+        let id = conversation_id.trim();
+        if id.is_empty() {
+            return Ok(false);
+        }
+        let inbox = self
+            .remote_chat_inbox
+            .lock()
+            .map_err(|_| "gateway remote chat inbox lock poisoned".to_string())?;
+        Ok(inbox.values().any(|record| {
+            record.request.conversation_id.trim() == id
+                && !matches!(record.state.trim(), "completed" | "failed" | "cancelled")
+        }))
+    }
+
     pub(crate) fn enqueue_remote_chat_request(
         &self,
         request: GatewayChatRequestEvent,
@@ -82,6 +142,11 @@ impl GatewayController {
             let record = inbox
                 .get_mut(&existing_request_id)
                 .ok_or_else(|| "remote chat request disappeared while enqueueing".to_string())?;
+            // Hold the native inbox lock while taking the durable lifecycle
+            // admission. Archive preparation takes the same history DB lock,
+            // so either this request is protected before it becomes visible or
+            // it is rejected because the archive gate already won.
+            admit_remote_chat_request(&existing_request_id, &request)?;
             Self::merge_duplicate_remote_chat_request(record, request, now);
             return Ok(RemoteChatEnqueueOutcome {
                 request_id: existing_request_id,
@@ -92,6 +157,7 @@ impl GatewayController {
             });
         }
 
+        admit_remote_chat_request(&request_id, &request)?;
         let now = Instant::now();
         inbox.insert(
             request_id.clone(),
@@ -129,6 +195,7 @@ impl GatewayController {
             .remote_chat_inbox
             .lock()
             .map_err(|_| "gateway remote chat inbox lock poisoned".to_string())?;
+        release_remote_chat_request(request_id)?;
         inbox.remove(request_id);
         Ok(())
     }
@@ -144,6 +211,21 @@ impl GatewayController {
             .remote_chat_inbox
             .lock()
             .map_err(|_| "gateway remote chat inbox lock poisoned".to_string())?;
+        let mut removed_request_ids = Vec::new();
+        if !request_id.is_empty() {
+            removed_request_ids.push(request_id.to_string());
+        }
+        if !conversation_id.is_empty() {
+            removed_request_ids.extend(inbox.iter().filter_map(|(candidate_id, record)| {
+                (candidate_id != request_id
+                    && record.request.conversation_id.trim() == conversation_id
+                    && Self::remote_chat_record_should_cancel_for_conversation(record))
+                .then(|| candidate_id.clone())
+            }));
+        }
+        for removed_request_id in &removed_request_ids {
+            release_remote_chat_request(removed_request_id)?;
+        }
         if !request_id.is_empty() {
             inbox.remove(request_id);
         }
@@ -494,6 +576,7 @@ impl GatewayController {
             if !Self::remote_chat_record_is_owned_by_worker(record, &worker_id) {
                 return Ok(());
             }
+            release_remote_chat_request(&request_id)?;
             inbox.remove(&request_id);
             true
         };
@@ -547,6 +630,7 @@ impl GatewayController {
                         record.last_error = Some(message.clone());
                         record.updated_at = Instant::now();
                         if terminal {
+                            release_remote_chat_request(&request_id)?;
                             inbox.remove(&request_id);
                         }
                         Some(true)
@@ -613,6 +697,7 @@ impl GatewayController {
             if !Self::remote_chat_record_is_owned_by_worker(record, &worker_id) {
                 return Ok(());
             }
+            release_remote_chat_request(&request_id)?;
             inbox.remove(&request_id);
             true
         };
@@ -846,6 +931,7 @@ impl GatewayController {
                 wake = true;
             }
             for (request_id, _) in &failed {
+                release_remote_chat_request(request_id)?;
                 inbox.remove(request_id);
             }
         }

@@ -208,6 +208,15 @@ export type ConversationSummary = {
   is_pinned?: boolean;
   pinned_at?: number;
   is_shared?: boolean;
+  archived_at?: number;
+  archive_reason?: string;
+  unarchived_at?: number;
+  last_user_message_at?: number;
+  last_turn_finished_at?: number;
+  origin_source_id?: string;
+  lifecycle_version?: number;
+  activity_version?: number;
+  auto_archive_exempt?: boolean;
 };
 
 export type HistoryList = {

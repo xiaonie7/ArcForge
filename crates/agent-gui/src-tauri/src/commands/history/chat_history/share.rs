@@ -90,7 +90,29 @@ fn set_chat_history_share_enabled_sync(
     enabled: bool,
     redact_tool_content: Option<bool>,
 ) -> Result<ChatHistoryShareStatus, String> {
-    let chat_id = ensure_chat_history_exists(conn, id)?;
+    let tx = rusqlite::Transaction::new_unchecked(
+        conn,
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .map_err(|e| format!("开启历史对话分享事务失败：{e}"))?;
+    let status = set_chat_history_share_enabled_in_transaction(
+        &tx,
+        id,
+        enabled,
+        redact_tool_content,
+    )?;
+    tx.commit()
+        .map_err(|e| format!("提交历史对话分享事务失败：{e}"))?;
+    Ok(status)
+}
+
+fn set_chat_history_share_enabled_in_transaction(
+    conn: &Connection,
+    id: &str,
+    enabled: bool,
+    redact_tool_content: Option<bool>,
+) -> Result<ChatHistoryShareStatus, String> {
+    let chat_id = ensure_chat_history_mutable(conn, id)?;
     let now = now_ms();
 
     if enabled {

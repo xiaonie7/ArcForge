@@ -5,7 +5,9 @@
 // web adapter normalizes the gateway's second-based fields before they reach
 // this layer.
 
-export type SidebarConversation = {
+import type { ConversationLifecycle } from "../conversationArchive/types";
+
+export type SidebarConversation = ConversationLifecycle & {
   id: string;
   title: string;
   providerId: string;
@@ -45,10 +47,12 @@ export type SidebarErrorCode =
   | "renameFailed"
   | "renameBlockedRunning"
   | "pinFailed"
+  | "archiveFailed"
+  | "archiveBlockedRunning"
   | "deleteFailed"
   | "deleteBlockedRunning";
 
-export type SidebarMutationKind = "rename" | "pin" | "delete";
+export type SidebarMutationKind = "rename" | "pin" | "archive" | "delete";
 
 export type SidebarRunningItem = {
   conversationId: string;

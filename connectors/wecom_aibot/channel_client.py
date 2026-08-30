@@ -18,6 +18,8 @@ from .config import ConnectorConfig
 from .protocol import (
     CHANNEL_ROLE,
     CHANNEL_SUBPROTOCOL,
+    ChannelBindingResponse,
+    ChannelSessionSnapshot,
     ChannelAccepted,
     ChannelClientFrame,
     ChannelFinal,
@@ -95,6 +97,8 @@ class ChannelClient:
         self._answer_waiters: dict[str, asyncio.Future[Any]] = {}
         self._answer_waiters_lock = asyncio.Lock()
         self._callback_tasks: set[asyncio.Task[None]] = set()
+        self.binding_handler: ChannelInputHandler | None = None
+        self.binding_snapshot_loader: ChannelInputHandler | None = None
 
     async def connect(self) -> None:
         if self._ws is not None or self._reader_task is not None:
@@ -129,6 +133,7 @@ class ChannelClient:
                 channel_tenant_id=self.config.tenant_id,
                 channel_bot_id=self.config.bot_id,
                 connector_id=self.config.connector_id,
+                channel_lifecycle_version=1 if self.binding_handler is not None else 0,
             )
             await self._send(ChannelClientFrame(request_id=request_id, hello=hello))
             await asyncio.wait_for(self._hello.wait(), timeout=10)
@@ -136,6 +141,17 @@ class ChannelClient:
                 raise RuntimeError(
                     str(self._connection_error)
                 ) from self._connection_error
+            if self.binding_snapshot_loader is not None:
+                offset = 0
+                while True:
+                    bindings = await self.binding_snapshot_loader(offset)
+                    if not bindings:
+                        break
+                    await self._send(ChannelClientFrame(
+                        request_id=f"bindings-{uuid.uuid4().hex}",
+                        binding_snapshot=ChannelSessionSnapshot(bindings=bindings),
+                    ))
+                    offset += len(bindings)
             self._connected.set()
         except asyncio.CancelledError:
             raise
@@ -379,6 +395,29 @@ class ChannelClient:
                 )
             )
             return
+        if frame.HasField("binding_request"):
+            request = _copy_message(frame.binding_request)
+            transport = self._ws
+
+            async def answer_binding() -> None:
+                try:
+                    if self.binding_handler is None:
+                        result = ChannelBindingResponse(operation_id=request.operation_id, status="unsupported")
+                    else:
+                        result = await self.binding_handler(request)
+                    # Do not deliver an old transport's acknowledgement to a
+                    # different connection. Durable operation replay recovers it.
+                    if self._ws is transport:
+                        await self._send(ChannelClientFrame(request_id=request_id, binding_response=result))
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("Channel binding operation could not be acknowledged")
+
+            task = asyncio.create_task(answer_binding(), name="arcforge-channel-binding")
+            self._callback_tasks.add(task)
+            task.add_done_callback(self._callback_tasks.discard)
+            return
         if frame.HasField("input_answer_result"):
             async with self._answer_waiters_lock:
                 waiter = self._answer_waiters.get(request_id)
@@ -515,6 +554,8 @@ def make_inbound(
     text: str,
     command: str = "",
     channel_session_id: str = "",
+    channel_scope_key: str = "",
+    channel_session_generation: int = 0,
     files: list[ChannelInboundFile] | tuple[ChannelInboundFile, ...] = (),
     timestamp: int | None = None,
 ) -> ChannelInboundMessage:
@@ -527,5 +568,7 @@ def make_inbound(
         timestamp=timestamp or int(time.time()),
         command=command.strip().lower(),
         channel_session_id=channel_session_id.strip(),
+        channel_scope_key=channel_scope_key,
+        channel_session_generation=channel_session_generation,
         files=files,
     )

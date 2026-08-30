@@ -226,6 +226,14 @@ export function GatewaySidebarContainer(props: GatewaySidebarContainerProps) {
     void store.remove(id);
   });
 
+  const handleArchiveConversation = useStableCallback((id: string) => {
+    if (sectionsDisabled) {
+      return;
+    }
+    clearMutationErrors();
+    void store.archive(id);
+  });
+
   const handleLoadMore = useStableCallback(() => {
     if (sectionsDisabled) {
       return;
@@ -349,6 +357,7 @@ export function GatewaySidebarContainer(props: GatewaySidebarContainerProps) {
       sharedConversationCount={props.sharedConversationCount}
       onShareConversation={props.onShareConversation}
       onOpenSharedConversations={props.onOpenSharedConversations}
+      onArchiveConversation={handleArchiveConversation}
       onDeleteConversation={handleDeleteConversation}
       onLoadMore={handleLoadMore}
       onCloseSidebar={props.onCloseSidebar}

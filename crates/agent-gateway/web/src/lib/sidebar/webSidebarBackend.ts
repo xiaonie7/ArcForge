@@ -25,6 +25,7 @@ import type {
   HistoryWorkdirsResponse,
 } from "@/lib/gatewayTypes";
 import type { SidebarBackend, SidebarListPage } from "./backend";
+import { archiveConversation } from "../conversationArchive/api";
 import type { SidebarBackendEvent, SidebarConversation, SidebarScope } from "./types";
 
 // Epoch values below this are seconds (up to year 2286); at or above, they
@@ -61,6 +62,15 @@ export function normalizeGatewayConversationSummary(
     isPinned: summary.is_pinned === true,
     pinnedAt: summary.is_pinned === true && pinnedAt > 0 ? pinnedAt : null,
     isShared: summary.is_shared === true,
+    archivedAt: normalizeGatewayEpochMs(summary.archived_at) || null,
+    archiveReason: summary.archive_reason ?? null,
+    unarchivedAt: normalizeGatewayEpochMs(summary.unarchived_at) || null,
+    lifecycleVersion: summary.lifecycle_version,
+    lastUserMessageAt: normalizeGatewayEpochMs(summary.last_user_message_at) || null,
+    lastTurnFinishedAt: normalizeGatewayEpochMs(summary.last_turn_finished_at) || null,
+    activityVersion: summary.activity_version,
+    autoArchiveExempt: summary.auto_archive_exempt,
+    originSourceId: summary.origin_source_id ?? null,
   };
 }
 
@@ -186,6 +196,8 @@ export function createWebSidebarBackend(deps: WebSidebarBackendDeps): SidebarBac
     async deleteConversation(id) {
       await api.deleteHistory(id);
     },
+
+    archiveConversation,
 
     // The single event subscription: gateway history.event upserts/deletes
     // plus a diff bridge over the activity store (running/idle transitions).
@@ -325,6 +337,7 @@ export function createIdleSidebarBackend(): SidebarBackend {
     listWorkdirs: () => Promise.resolve([]),
     renameConversation: notReady,
     setConversationPinned: notReady,
+    archiveConversation: notReady,
     deleteConversation: notReady,
     subscribeEvents: () => () => {},
     getProtectedConversationIds: () => [],

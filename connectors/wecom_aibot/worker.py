@@ -1037,6 +1037,7 @@ async def _handle_message(
     async def submit_in_order() -> None:
         rotation = None
         rotation_matches_canonical_retry = False
+        pinned_session = await dedupe.bound_session_async(session_key, external_id)
         if command == "new":
             rotation = await dedupe.load_rotation_async(session_key, external_id)
             if rotation is None:
@@ -1050,8 +1051,19 @@ async def _handle_message(
             else:
                 rotation_matches_canonical_retry = True
             channel_session_id = rotation.candidate_session_id
+        elif pinned_session is not None:
+            channel_session_id = pinned_session[0]
         else:
             channel_session_id = await sessions.get_for_key_async(session_key)
+
+        session_generation = pinned_session[1] if pinned_session is not None else (
+            (rotation.expected_generation or 0) + 1
+            if rotation is not None and rotation.expected_generation is not None
+            else await sessions.generation_for_key_async(session_key)
+        )
+        channel_session_id, session_generation = await dedupe.bound_session_async(
+            session_key, external_id, channel_session_id, session_generation,
+        )
 
         inbound = make_inbound(
             external_message_id=external_id,
@@ -1061,6 +1073,8 @@ async def _handle_message(
             text="" if command else text,
             command=command,
             channel_session_id=channel_session_id,
+            channel_scope_key=session_key.scope_key(),
+            channel_session_generation=session_generation,
             files=inbound_files,
         )
         if interactions is None:
@@ -1840,6 +1854,22 @@ async def run(config: ConnectorConfig | None = None) -> None:
     )
     sessions = SessionStore(state_store=state_store)
     sequencer = SessionSequencer(state_store=state_store)
+    if state_store is not None:
+        from .lifecycle import binding_handler
+
+        channel.binding_handler = binding_handler(state_store, sequencer)
+        binding_snapshot_cache = None
+        async def load_bindings(offset):
+            nonlocal binding_snapshot_cache
+            if offset == 0 or binding_snapshot_cache is None:
+                # Freeze one ordered view for the whole paged handshake. Live
+                # OFFSET pagination could skip a still-open row if another
+                # lifecycle request closes an earlier row between pages.
+                binding_snapshot_cache = await state_store.run_async(
+                    state_store.current_bindings, 0, None,
+                )
+            return binding_snapshot_cache[offset:offset + 100]
+        channel.binding_snapshot_loader = load_bindings
     wecom = WSClient(
         WSClientOptions(
             bot_id=config.bot_id,

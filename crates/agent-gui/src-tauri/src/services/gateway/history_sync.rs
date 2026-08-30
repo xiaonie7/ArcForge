@@ -22,6 +22,15 @@ pub fn build_history_sync_upsert(summary: &ChatHistorySummary) -> GatewayHistory
             is_pinned: summary.is_pinned,
             pinned_at: summary.pinned_at,
             is_shared: summary.is_shared,
+            archived_at: summary.archived_at,
+            archive_reason: summary.archive_reason.clone(),
+            unarchived_at: summary.unarchived_at,
+            last_user_message_at: summary.last_user_message_at,
+            last_turn_finished_at: summary.last_turn_finished_at,
+            origin_source_id: summary.origin_source_id.clone(),
+            lifecycle_version: summary.lifecycle_version,
+            activity_version: summary.activity_version,
+            auto_archive_exempt: summary.auto_archive_exempt,
         }),
     }
 }
@@ -57,6 +66,15 @@ pub(crate) fn build_history_sync_upsert_from_proto(
             is_pinned: summary.is_pinned,
             pinned_at: (summary.pinned_at > 0).then_some(summary.pinned_at),
             is_shared: summary.is_shared,
+            archived_at: summary.archived_at,
+            archive_reason: summary.archive_reason.clone(),
+            unarchived_at: summary.unarchived_at,
+            last_user_message_at: summary.last_user_message_at,
+            last_turn_finished_at: summary.last_turn_finished_at,
+            origin_source_id: summary.origin_source_id.clone(),
+            lifecycle_version: summary.lifecycle_version,
+            activity_version: summary.activity_version,
+            auto_archive_exempt: summary.auto_archive_exempt,
         }),
     }
 }
@@ -95,6 +113,15 @@ pub(crate) fn build_history_sync_envelope(
             is_pinned: conversation.is_pinned,
             pinned_at: conversation.pinned_at.unwrap_or_default(),
             is_shared: conversation.is_shared,
+            archived_at: conversation.archived_at,
+            archive_reason: conversation.archive_reason,
+            unarchived_at: conversation.unarchived_at,
+            last_user_message_at: conversation.last_user_message_at,
+            last_turn_finished_at: conversation.last_turn_finished_at,
+            origin_source_id: conversation.origin_source_id,
+            lifecycle_version: conversation.lifecycle_version,
+            activity_version: conversation.activity_version,
+            auto_archive_exempt: conversation.auto_archive_exempt,
         });
 
     Ok(proto::AgentEnvelope {

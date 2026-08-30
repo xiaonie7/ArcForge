@@ -434,6 +434,7 @@ mod tests {
             ChatHistoryListFilter {
                 cwd: Some("/tmp/project-a".to_string()),
                 cwd_empty: false,
+                ..ChatHistoryListFilter::default()
             },
         )
         .expect("list project cwd history");
@@ -447,6 +448,7 @@ mod tests {
             ChatHistoryListFilter {
                 cwd: None,
                 cwd_empty: true,
+                ..ChatHistoryListFilter::default()
             },
         )
         .expect("list empty cwd history");
@@ -1862,5 +1864,178 @@ mod tests {
             kept[1].summary_json.as_deref(),
             Some(r#"{"role":"summary","id":"summary-1","content":"older"}"#)
         );
+    }
+
+    #[test]
+    fn archived_queries_facets_snapshots_and_deletes_share_one_authoritative_scope() {
+        let mut conn = open_test_db().expect("open test db");
+        for (id, title, cwd, archived_at, source) in [
+            ("active", "Active chat", "/tmp/active", None, "desktop"),
+            (
+                "archived-a",
+                "Invoice investigation",
+                "/tmp/project-a",
+                Some(1_700_000_010_000_i64),
+                "wecom",
+            ),
+            (
+                "archived-b",
+                "Archived notes",
+                "/tmp/project-b",
+                Some(1_700_000_020_000_i64),
+                "web",
+            ),
+            (
+                "archived-c",
+                "Versioned archive",
+                "/tmp/project-c",
+                Some(1_700_000_030_000_i64),
+                "desktop",
+            ),
+        ] {
+            let mut conversation = sample_conversation();
+            conversation.id = id.into();
+            conversation.title = title.into();
+            conversation.cwd = Some(cwd.into());
+            upsert_chat_history_header(&conn, &conversation).expect("upsert history header");
+            conn.execute(
+                "UPDATE chatHistory SET archived_at=?1,archive_reason=CASE WHEN ?1 IS NULL THEN NULL ELSE 'manual' END,
+                    lifecycle_version=CASE WHEN ?1 IS NULL THEN 0 ELSE 1 END,origin_source_id=?2 WHERE id=?3",
+                params![archived_at, source, id],
+            )
+            .expect("set archive metadata");
+        }
+
+        let active = list_chat_history_sync_with_filter(
+            &conn,
+            1,
+            20,
+            ChatHistoryListFilter::default(),
+        )
+        .expect("list active history");
+        assert_eq!(
+            active
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["active"]
+        );
+
+        let filtered = list_chat_history_sync_with_filter(
+            &conn,
+            1,
+            20,
+            ChatHistoryListFilter {
+                archive_state: Some("archived".into()),
+                search: Some("invoice".into()),
+                source_id: Some("wecom".into()),
+                cwd: Some("/tmp/project-a".into()),
+                ..Default::default()
+            },
+        )
+        .expect("list filtered archive");
+        assert_eq!(filtered.total_count, 1);
+        assert_eq!(filtered.items[0].id, "archived-a");
+
+        let facets =
+            archive_facets_on(&conn, Some("archived".into())).expect("archive facets");
+        assert_eq!(
+            facets.sources.iter().map(|item| item.count).sum::<i64>(),
+            3
+        );
+        assert!(facets
+            .sources
+            .iter()
+            .any(|item| item.id == "wecom" && item.count == 1));
+        assert!(facets
+            .projects
+            .iter()
+            .any(|item| item.path == "/tmp/project-b" && item.count == 1));
+
+        let mut archived_update = sample_conversation();
+        archived_update.id = "archived-c".into();
+        archived_update.title = "must remain read-only".into();
+        assert!(upsert_chat_history_header(&conn, &archived_update)
+            .expect_err("archived content update must fail")
+            .starts_with("conversation_archived"));
+        assert_eq!(
+            get_summary_by_id(&conn, "archived-c")
+                .expect("read unchanged archived summary")
+                .title,
+            "Versioned archive"
+        );
+        for error in [
+            rename_chat_history_sync(&conn, "archived-c", "must remain read-only")
+                .expect_err("archived rename must fail"),
+            set_chat_history_pinned_sync(&conn, "archived-c", true)
+                .expect_err("archived pin update must fail"),
+            set_chat_history_model_sync(
+                &conn,
+                "archived-c",
+                r#"{"customProviderId":"codex","model":"gpt-5"}"#,
+            )
+            .expect_err("archived model update must fail"),
+            set_chat_history_share_enabled_sync(&conn, "archived-c", true, None)
+                .expect_err("archived share update must fail"),
+        ] {
+            assert!(error.starts_with("conversation_archived"), "{error}");
+        }
+
+        let snapshot = archive_snapshot_on(
+            &conn,
+            ChatHistoryListFilter {
+                // A destructive snapshot always narrows itself to archived
+                // rows even if a caller supplies a broader state.
+                archive_state: Some("active".into()),
+                ..Default::default()
+            },
+        )
+        .expect("freeze destructive archive snapshot");
+        assert_eq!(snapshot.total_count, 3);
+        assert!(snapshot
+            .candidates
+            .iter()
+            .all(|candidate| candidate.lifecycle_version == 1));
+
+        // A concurrent restore and a version change after confirmation must
+        // both be skipped; the exact untouched candidate is deleted.
+        conn.execute(
+            "UPDATE chatHistory SET archived_at=NULL,archive_reason=NULL,lifecycle_version=2 WHERE id='archived-b'",
+            [],
+        )
+        .expect("concurrently restore archived-b");
+        conn.execute(
+            "UPDATE chatHistory SET lifecycle_version=2 WHERE id='archived-c'",
+            [],
+        )
+        .expect("concurrently update archived-c");
+        let (deleted, _) = delete_archived_on(
+            &mut conn,
+            DeleteArchivedChatInput {
+                candidates: snapshot.candidates,
+            },
+        )
+        .expect("delete frozen archive snapshot");
+        assert_eq!(deleted.deleted_ids, ["archived-a"]);
+        assert!(deleted
+            .skipped
+            .iter()
+            .any(|item| item.id == "archived-b" && item.reason == "not_archived"));
+        assert!(deleted
+            .skipped
+            .iter()
+            .any(|item| item.id == "archived-c" && item.reason == "version_changed"));
+        assert!(get_summary_by_id(&conn, "active").is_ok());
+        assert!(get_summary_by_id(&conn, "archived-b").is_ok());
+        assert!(get_summary_by_id(&conn, "archived-a").is_err());
+
+        let mut delayed_save = sample_conversation();
+        delayed_save.id = "archived-a".into();
+        assert_eq!(
+            upsert_chat_history_header(&conn, &delayed_save),
+            Err("conversation_deleted".into())
+        );
+        assert!(get_summary_by_id(&conn, "archived-a").is_err());
     }
 }

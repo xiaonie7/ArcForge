@@ -182,6 +182,15 @@ fn build_proto_history_list_response(
             is_pinned: item.is_pinned,
             pinned_at: item.pinned_at.unwrap_or_default(),
             is_shared: item.is_shared,
+            archived_at: item.archived_at,
+            archive_reason: item.archive_reason,
+            unarchived_at: item.unarchived_at,
+            last_user_message_at: item.last_user_message_at,
+            last_turn_finished_at: item.last_turn_finished_at,
+            origin_source_id: item.origin_source_id,
+            lifecycle_version: item.lifecycle_version,
+            activity_version: item.activity_version,
+            auto_archive_exempt: item.auto_archive_exempt,
         })
         .collect();
 
@@ -1461,6 +1470,15 @@ fn build_proto_conversation_summary_from_record(
         is_pinned: record.is_pinned,
         pinned_at: record.pinned_at.unwrap_or_default(),
         is_shared: record.is_shared,
+        archived_at: record.archived_at,
+        archive_reason: record.archive_reason.clone(),
+        unarchived_at: record.unarchived_at,
+        last_user_message_at: record.last_user_message_at,
+        last_turn_finished_at: record.last_turn_finished_at,
+        origin_source_id: record.origin_source_id.clone(),
+        lifecycle_version: record.lifecycle_version,
+        activity_version: record.activity_version,
+        auto_archive_exempt: record.auto_archive_exempt,
     }
 }
 
@@ -1481,6 +1499,15 @@ fn build_proto_conversation_summary(
         is_pinned: summary.is_pinned,
         pinned_at: summary.pinned_at.unwrap_or_default(),
         is_shared: summary.is_shared,
+        archived_at: summary.archived_at,
+        archive_reason: summary.archive_reason,
+        unarchived_at: summary.unarchived_at,
+        last_user_message_at: summary.last_user_message_at,
+        last_turn_finished_at: summary.last_turn_finished_at,
+        origin_source_id: summary.origin_source_id,
+        lifecycle_version: summary.lifecycle_version,
+        activity_version: summary.activity_version,
+        auto_archive_exempt: summary.auto_archive_exempt,
     }
 }
 

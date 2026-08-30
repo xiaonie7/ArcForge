@@ -137,6 +137,11 @@ function applyRuntimeSystemDefaults(settings: AppSettings, defaultWorkdir: strin
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SectionId>("system");
+  const [openConversationRequest, setOpenConversationRequest] = useState<{
+    id: string;
+    sequence: number;
+  } | null>(null);
+  const openConversationSequenceRef = useRef(0);
   const [settingsReady, setSettingsReady] = useState(false);
   const [settings, setSettingsState] = useState<AppSettings>(() => getDefaultSettings());
   const [settingsSaveState, setSettingsSaveState] = useState<SettingsSaveState>({
@@ -409,6 +414,17 @@ export default function App() {
     setOverlay("leaving");
   }, []);
 
+  const openArchivedConversation = useCallback(
+    (conversationId: string) => {
+      const id = conversationId.trim();
+      if (!id) return;
+      openConversationSequenceRef.current += 1;
+      setOpenConversationRequest({ id, sequence: openConversationSequenceRef.current });
+      closeSettings();
+    },
+    [closeSettings],
+  );
+
   // 全局快捷键「新建对话」触发时，若设置覆盖层开着则先收起，露出对话页。
   const closeSettingsRef = useRef(closeSettings);
   closeSettingsRef.current = closeSettings;
@@ -527,6 +543,7 @@ export default function App() {
             setContext={setContext}
             onOpenSettings={openSettings}
             onToggleTheme={toggleTheme}
+            openConversationRequest={openConversationRequest}
           />
         </AppErrorBoundary>
         {visible && (
@@ -542,6 +559,7 @@ export default function App() {
                 setSettings={setSettings}
                 saveState={settingsSaveState}
                 onBack={closeSettings}
+                onOpenConversation={openArchivedConversation}
                 initialSection={settingsSection}
               />
             </AppErrorBoundary>

@@ -16,6 +16,7 @@ export type ConversationRuntimeEntry = {
   hookWarning: string | null;
   sessionId: string;
   createdAt: number;
+  archivedAt?: number | null;
   workdir?: string;
   selectedModel?: SelectedModel;
 };
@@ -24,6 +25,7 @@ export function createConversationRuntimeEntry(params: {
   state: ConversationViewState;
   sessionId: string;
   createdAt: number;
+  archivedAt?: number | null;
   compactionStatus?: CompactionStatus;
   isSending?: boolean;
   errorMessage?: string | null;
@@ -35,6 +37,7 @@ export function createConversationRuntimeEntry(params: {
     state,
     sessionId,
     createdAt,
+    archivedAt = null,
     compactionStatus = { phase: "idle" },
     isSending = false,
     errorMessage = null,
@@ -50,6 +53,7 @@ export function createConversationRuntimeEntry(params: {
     hookWarning,
     sessionId,
     createdAt,
+    archivedAt,
     workdir: workdir?.trim() || undefined,
     selectedModel,
   };

@@ -144,6 +144,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
   onSend: () => void;
   onStop: () => void;
   onComposerBusyChange: (isBusy: boolean) => void;
+  onDraftContentChange?: (hasContent: boolean) => void;
   onSelectModel: (selection: SelectedModel) => void;
   onSelectExecutionMode: (mode: "text" | "tools") => void;
   onChatRuntimeControlsChange: (patch: Partial<ChatRuntimeControls>) => void;
@@ -184,6 +185,7 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
     onSend,
     onStop,
     onComposerBusyChange,
+    onDraftContentChange,
     onSelectModel,
     onSelectExecutionMode,
     onChatRuntimeControlsChange,
@@ -226,6 +228,9 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
   const uploadDisabled = isInputDisabled || isUploadingFiles || !isAgentMode || !workdir;
   const controlsDisabled = isInputDisabled;
   const hasSendableDraft = !composerIsEmpty || pendingUploadedFiles.length > 0;
+  useEffect(() => {
+    onDraftContentChange?.(hasSendableDraft);
+  }, [hasSendableDraft, onDraftContentChange]);
   const thinkingSupported = reasoningOptions.length > 0;
   const sendDisabled = isInputDisabled || isUploadingFiles || !hasSendableDraft;
   const canQueueDraftWhileSending = isSending && !sendDisabled;

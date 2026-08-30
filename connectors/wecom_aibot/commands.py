@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import threading
 import uuid
 from collections.abc import Callable
@@ -33,6 +34,25 @@ class SessionKey:
     chat_type: str
     chat_id: str
     external_user_id: str
+
+    def scope_key(self) -> str:
+        """Versioned adapter-owned routing key; existing conversation IDs stay unchanged."""
+        return "v1:" + json.dumps(
+            [self.chat_type, self.chat_id, self.external_user_id],
+            ensure_ascii=False, separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_scope_key(cls, value: str) -> "SessionKey":
+        if not value.startswith("v1:") or len(value.encode("utf-8")) > 2048:
+            raise ValueError("invalid channel scope key")
+        parts = json.loads(value[3:])
+        if not isinstance(parts, list) or len(parts) != 3 or not all(isinstance(p, str) for p in parts):
+            raise ValueError("invalid channel scope key")
+        key = SessionStore.key(chat_type=parts[0], chat_id=parts[1], external_user_id=parts[2])
+        if key.scope_key() != value:
+            raise ValueError("noncanonical channel scope key")
+        return key
 
 
 @dataclass(frozen=True)
@@ -299,6 +319,11 @@ class SessionStore:
             key,
             self._new_id,
         )
+
+    async def generation_for_key_async(self, key: SessionKey) -> int:
+        if self._state_store is None:
+            return 0  # In-memory test/legacy stores do not advertise durable close.
+        return await self._state_store.run_async(self._state_store.session_generation, key)
 
     def commit_rotation(self, rotation: SessionRotation) -> bool:
         """Commit a reservation only if its observed session is still current."""

@@ -3,6 +3,7 @@ package pbws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -940,6 +941,144 @@ func TestChannelTrustedOriginUsesDesktopRunIDForRequestBinding(t *testing.T) {
 	)
 	if origin.GetGatewayRequestId() != "channel-run-1" {
 		t.Fatalf("origin request binding = %q, want desktop run id", origin.GetGatewayRequestId())
+	}
+}
+
+func TestRememberedInboundBindingReplaysWhenAgentConnectsLater(t *testing.T) {
+	srv := &Server{}
+	connector := &channelConn{
+		srv: srv,
+		binding: channelBinding{
+			tenantID: "tenant-1", botID: "bot-1", connectorID: "connector-1", lifecycleVersion: 1,
+		},
+	}
+	inbound := &gatewayv2.ChannelInboundMessage{
+		ChannelScopeKey: "scope-1", ChannelSessionId: "session-1", ChannelSessionGeneration: 3,
+	}
+	srv.rememberInboundBinding(connector, inbound, "wecom:conversation-1")
+
+	agent := session.NewAgentSession(session.AuthSnapshot{SessionID: "agent-session-1"})
+	t.Cleanup(agent.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		srv.replayBindingSnapshots(ctx, agent)
+		close(done)
+	}()
+
+	select {
+	case outbound := <-agent.Outbound():
+		snapshot := outbound.GetChannelBindingsSnapshot()
+		if snapshot == nil || len(snapshot.GetBindings()) != 1 {
+			t.Fatalf("replayed binding snapshot = %#v", snapshot)
+		}
+		binding := snapshot.GetBindings()[0]
+		if binding.GetConversationId() != "wecom:conversation-1" ||
+			binding.GetScopeKey() != "scope-1" || binding.GetSessionId() != "session-1" ||
+			binding.GetGeneration() != 3 || binding.GetLifecycleVersion() != 1 {
+			t.Fatalf("replayed binding = %#v", binding)
+		}
+		outbound.Ack(nil)
+	case <-ctx.Done():
+		t.Fatal("binding snapshot was not replayed")
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("binding replay did not settle after delivery acknowledgement")
+	}
+}
+
+func TestBindingSnapshotPagesMergeAndNewerScopeGenerationReplacesOlder(t *testing.T) {
+	srv := &Server{}
+	registration := func(scope, session string, generation uint64) *gatewayv1.ChannelBindingRegistration {
+		return &gatewayv1.ChannelBindingRegistration{
+			ConversationId: "conversation-" + session, InstallationId: "installation-1",
+			ScopeKey: scope, SessionId: session, Generation: generation, LifecycleVersion: 1,
+		}
+	}
+	srv.rememberBindingSnapshot("installation-1", []*gatewayv1.ChannelBindingRegistration{
+		registration("scope-1", "session-1", 1),
+	})
+	srv.rememberBindingSnapshot("installation-1", []*gatewayv1.ChannelBindingRegistration{
+		registration("scope-2", "session-2", 1),
+	})
+	srv.rememberBindingSnapshot("installation-1", []*gatewayv1.ChannelBindingRegistration{
+		registration("scope-1", "session-3", 2),
+	})
+	// Out-of-order delivery from an older page or replaced connection must not
+	// regress the route cached for later agent reconnects.
+	srv.rememberBindingSnapshot("installation-1", []*gatewayv1.ChannelBindingRegistration{
+		registration("scope-1", "session-stale", 1),
+		registration("scope-1", "session-conflict", 2),
+	})
+
+	srv.channelsMu.Lock()
+	stored := srv.bindingSnapshots["installation-1"]
+	srv.channelsMu.Unlock()
+	if len(stored) != 2 {
+		t.Fatalf("merged snapshot size = %d, want 2", len(stored))
+	}
+	if got := stored["scope-1"]; got == nil || got.GetSessionId() != "session-3" || got.GetGeneration() != 2 {
+		t.Fatalf("newer scope registration = %#v", got)
+	}
+	if got := stored["scope-2"]; got == nil || got.GetSessionId() != "session-2" {
+		t.Fatalf("second snapshot page was lost: %#v", got)
+	}
+}
+
+func TestChannelBindingSnapshotValidationAcceptsOpaqueProviderScope(t *testing.T) {
+	entry := &gatewayv2.ChannelInboundMessage{
+		ExternalUserId: "user-1", ChatType: "single", ChannelSessionId: "session-1",
+		ChannelScopeKey: "dingtalk:v7:opaque/scope?tenant=一", ChannelSessionGeneration: 4,
+	}
+	if err := validateChannelBindingSnapshotEntry(entry); err != nil {
+		t.Fatalf("generic binding snapshot rejected: %v", err)
+	}
+	entry.ChannelSessionGeneration = 0
+	if err := validateChannelBindingSnapshotEntry(entry); err == nil {
+		t.Fatal("zero generation binding snapshot was accepted")
+	}
+}
+
+func TestBindingSnapshotReplayKeepsPagesBounded(t *testing.T) {
+	srv := &Server{}
+	registrations := make([]*gatewayv1.ChannelBindingRegistration, 0, 101)
+	for index := 0; index < 101; index++ {
+		registrations = append(registrations, &gatewayv1.ChannelBindingRegistration{
+			ConversationId: fmt.Sprintf("conversation-%d", index), InstallationId: "installation-1",
+			ScopeKey: fmt.Sprintf("scope-%d", index), SessionId: fmt.Sprintf("session-%d", index),
+			Generation: 1, LifecycleVersion: 1,
+		})
+	}
+	srv.rememberBindingSnapshot("installation-1", registrations)
+	agent := session.NewAgentSession(session.AuthSnapshot{SessionID: "agent-session-1"})
+	t.Cleanup(agent.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		srv.replayBindingSnapshots(ctx, agent)
+		close(done)
+	}()
+	pageSizes := make([]int, 0, 2)
+	for len(pageSizes) < 2 {
+		select {
+		case outbound := <-agent.Outbound():
+			pageSizes = append(pageSizes, len(outbound.GetChannelBindingsSnapshot().GetBindings()))
+			outbound.Ack(nil)
+		case <-ctx.Done():
+			t.Fatalf("timed out after replay pages %v", pageSizes)
+		}
+	}
+	if pageSizes[0] != 100 || pageSizes[1] != 1 {
+		t.Fatalf("replay page sizes = %v, want [100 1]", pageSizes)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("paged binding replay did not settle")
 	}
 }
 

@@ -9,6 +9,13 @@ export async function listen<T>(
   event: string,
   handler: (event: TauriEvent<T>) => void,
 ): Promise<() => void> {
+  if (event === "chat-history:changed") {
+    const token = loadToken().trim();
+    if (!token) return () => {};
+    return getGatewayWebSocketClient(token).subscribeHistory((payload) => {
+      handler({ payload: payload as T });
+    });
+  }
   if (event === "gateway:status") {
     const token = loadToken().trim();
     if (!token) {

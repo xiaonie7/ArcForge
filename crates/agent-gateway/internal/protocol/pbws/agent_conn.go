@@ -132,6 +132,7 @@ func (s *Server) serveAgent(conn *websocket.Conn) {
 			}
 		}
 	}()
+	go s.replayBindingSnapshots(ctx, sess)
 
 	// ---- 入站循环 ----
 	for {
@@ -149,6 +150,10 @@ func (s *Server) serveAgent(conn *websocket.Conn) {
 		// 任何入站信封都证明桌面端存活；活跃流式传输中的 agent 绝不能被判心跳过期。
 		s.sm.TouchHeartbeat(sess)
 		// Pong 与其他信封同一分发：关联探测按 request_id 命中注册流，周期心跳的 Pong 无注册流、被无害忽略。
+		if request := env.GetChannelBinding(); request != nil {
+			go s.handleAgentBindingRequest(ctx, sess, env.GetRequestId(), request)
+			continue
+		}
 		s.sm.DispatchFromAgentForSession(sess, env)
 	}
 }
