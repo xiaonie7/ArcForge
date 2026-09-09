@@ -400,15 +400,146 @@ fn capture_target_state(target: &Path, allow_replace: bool) -> Result<TargetStat
     })
 }
 
+const PRESENTATION_MAX_SVG_BYTES: u64 = 2 * 1024 * 1024;
+const PRESENTATION_MAX_SLIDES: usize = 200;
+const PRESENTATION_MAX_ASSETS: usize = 500;
+
+fn is_image_asset_extension(extension: &str) -> bool {
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp"
+    )
+}
+
+/// Reject SVG pages that could pull in external data or scripts before the runtime parses
+/// them. The Python converter enforces the full element subset; this is the outer gate.
+fn reject_unsafe_svg_markup(svg: &str, label: &str) -> Result<(), String> {
+    let lowered = svg.to_ascii_lowercase();
+    for (needle, reason) in [
+        ("href=", "href attributes (use data-asset for pictures)"),
+        ("xlink:", "xlink references"),
+        ("<foreignobject", "foreignObject"),
+        ("<script", "script"),
+        ("<style", "style sheets"),
+        ("<use", "use references"),
+        ("<!doctype", "DOCTYPE declarations"),
+        ("<!entity", "entity declarations"),
+        ("data:", "data URIs"),
+        ("url(http", "remote URLs"),
+        ("url('http", "remote URLs"),
+        ("url(\"http", "remote URLs"),
+    ] {
+        if lowered.contains(needle) {
+            return Err(format!("{label} must not contain {reason}"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_svg_deck_manifest(
+    value: &serde_json::Value,
+    spec_dir: &Path,
+    workspace: &Path,
+) -> Result<(), String> {
+    if let Some(mode) = value.get("mode").and_then(serde_json::Value::as_str) {
+        if !matches!(mode, "blank" | "template") {
+            return Err("specPath mode must be blank or template".to_string());
+        }
+    }
+    if let Some(stage) = value.get("stage").and_then(serde_json::Value::as_str) {
+        if !matches!(stage, "plan" | "design") {
+            return Err("specPath stage must be plan or design".to_string());
+        }
+    }
+    if let Some(template) = value.get("template") {
+        let Some(template) = template.as_str() else {
+            return Err("specPath template must be a workspace .pptx path".to_string());
+        };
+        resolve_existing_path(workspace, spec_dir, template, "pptx", "specPath template")?;
+    }
+    if let Some(assets) = value.get("assets").filter(|value| !value.is_null()) {
+        let Some(assets) = assets.as_object() else {
+            return Err(
+                "specPath assets must be an object mapping ids to workspace image paths"
+                    .to_string(),
+            );
+        };
+        if assets.len() > PRESENTATION_MAX_ASSETS {
+            return Err(format!(
+                "specPath declares more than {PRESENTATION_MAX_ASSETS} assets"
+            ));
+        }
+        for (asset_id, raw) in assets {
+            let Some(raw) = raw.as_str() else {
+                return Err(format!(
+                    "specPath assets.{asset_id} must be a workspace image path"
+                ));
+            };
+            let extension = Path::new(raw)
+                .extension()
+                .and_then(OsStr::to_str)
+                .unwrap_or_default();
+            if !is_image_asset_extension(extension) {
+                return Err(format!(
+                    "specPath assets.{asset_id} must point to a PNG, JPEG, GIF, BMP, or WebP image"
+                ));
+            }
+            resolve_existing_path(
+                workspace,
+                spec_dir,
+                raw,
+                extension,
+                &format!("specPath assets.{asset_id}"),
+            )?;
+        }
+    }
+    let Some(slides) = value.get("slides").and_then(serde_json::Value::as_array) else {
+        return Err(
+            "specPath slides must be a non-empty array of {slide_id, svg} entries".to_string(),
+        );
+    };
+    if slides.is_empty() {
+        return Err("specPath slides must not be empty".to_string());
+    }
+    if slides.len() > PRESENTATION_MAX_SLIDES {
+        return Err(format!(
+            "specPath declares more than {PRESENTATION_MAX_SLIDES} slides"
+        ));
+    }
+    for (index, slide) in slides.iter().enumerate() {
+        let Some(svg) = slide.get("svg").and_then(serde_json::Value::as_str) else {
+            return Err(format!("specPath slides[{index}].svg is required"));
+        };
+        let label = format!("slides[{index}].svg");
+        let path = resolve_existing_path(workspace, spec_dir, svg, "svg", &label)?;
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| format!("{label} could not be read: {error}"))?;
+        if metadata.len() > PRESENTATION_MAX_SVG_BYTES {
+            return Err(format!("{label} exceeds the 2 MiB SVG page limit"));
+        }
+        let svg_text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("{label} must be UTF-8 text: {error}"))?;
+        reject_unsafe_svg_markup(&svg_text, &label)?;
+    }
+    Ok(())
+}
+
 fn validate_presentation_assets(spec_path: &Path, workspace: &Path) -> Result<(), String> {
     let raw = std::fs::read_to_string(spec_path)
         .map_err(|error| format!("specPath could not be read: {error}"))?;
     let value: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|error| format!("specPath is not valid JSON: {error}"))?;
+    let spec_dir = spec_path.parent().unwrap_or(workspace);
+    let schema_version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if schema_version >= 3 {
+        return validate_svg_deck_manifest(&value, spec_dir, workspace);
+    }
     let Some(slides) = value.get("slides").and_then(serde_json::Value::as_array) else {
         return Ok(());
     };
-    let spec_dir = spec_path.parent().unwrap_or(workspace);
     for (index, slide) in slides.iter().enumerate() {
         let Some(image) = slide.get("image").and_then(serde_json::Value::as_str) else {
             continue;
@@ -425,6 +556,114 @@ fn validate_presentation_assets(spec_path: &Path, workspace: &Path) -> Result<()
         )?;
     }
     Ok(())
+}
+
+fn presentation_spec_is_svg_deck(spec_path: &Path) -> bool {
+    std::fs::read_to_string(spec_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("schema_version")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .is_some_and(|version| version >= 3)
+}
+
+/// Count `ppt/slides/slideN.xml` parts so a PNG preview can request every page explicitly.
+fn count_pptx_slides(path: &Path) -> Result<usize, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("inputPath could not be opened: {error}"))?;
+    let archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("inputPath is not a valid PPTX package: {error}"))?;
+    let count = archive
+        .file_names()
+        .filter(|name| {
+            name.strip_prefix("ppt/slides/slide")
+                .and_then(|rest| rest.strip_suffix(".xml"))
+                .is_some_and(|digits| {
+                    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+        .count();
+    if count == 0 {
+        return Err("inputPath does not contain any slides".to_string());
+    }
+    Ok(count)
+}
+
+#[derive(Debug, Default)]
+struct PresentationRenderOptions {
+    pages: Option<String>,
+    grid: bool,
+}
+
+fn parse_presentation_render_options(
+    spec_path: &Path,
+) -> Result<PresentationRenderOptions, String> {
+    let raw = std::fs::read_to_string(spec_path)
+        .map_err(|error| format!("specPath could not be read: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("specPath is not valid JSON: {error}"))?;
+    let Some(object) = value.as_object() else {
+        return Err("specPath render options must be a JSON object".to_string());
+    };
+    for key in object.keys() {
+        if !matches!(key.as_str(), "pages" | "grid") {
+            return Err(format!("specPath render option '{key}' is not supported"));
+        }
+    }
+    let mut options = PresentationRenderOptions::default();
+    if let Some(pages) = object.get("pages") {
+        let pages = match pages {
+            serde_json::Value::String(value) => value.trim().to_string(),
+            serde_json::Value::Number(value) => value.to_string(),
+            serde_json::Value::Array(values) => values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|page| *page >= 1)
+                        .map(|page| page.to_string())
+                        .ok_or_else(|| {
+                            "specPath pages entries must be positive integers".to_string()
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(","),
+            _ => {
+                return Err(
+                    "specPath pages must be a page range string or an array of page numbers"
+                        .to_string(),
+                )
+            }
+        };
+        if pages.is_empty()
+            || !pages.split(',').all(|part| {
+                let mut bounds = part.split('-');
+                let start = bounds.next().unwrap_or_default();
+                let end = bounds.next();
+                bounds.next().is_none()
+                    && !start.is_empty()
+                    && start.bytes().all(|byte| byte.is_ascii_digit())
+                    && start != "0"
+                    && end.is_none_or(|end| {
+                        !end.is_empty()
+                            && end.bytes().all(|byte| byte.is_ascii_digit())
+                            && end != "0"
+                    })
+            })
+        {
+            return Err("specPath pages must look like \"2\", \"1-3\", or \"1,3,5\"".to_string());
+        }
+        options.pages = Some(pages);
+    }
+    if let Some(grid) = object.get("grid") {
+        options.grid = grid
+            .as_bool()
+            .ok_or_else(|| "specPath grid must be true or false".to_string())?;
+    }
+    Ok(options)
 }
 
 fn resolve_officecli_input(
@@ -720,7 +959,6 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
             push_path_argument(&mut arguments, "--input", workbook);
         }
         ("presentation", "create") => {
-            reject_path(&input.input_path, "inputPath")?;
             reject_path(&input.script_path, "scriptPath")?;
             let spec = resolve_existing_path(
                 &workspace,
@@ -736,8 +974,68 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                 "pptx",
                 "outputPath",
             )?;
-            push_path_argument(&mut arguments, "--spec", spec);
+            push_path_argument(&mut arguments, "--spec", spec.clone());
             push_path_argument(&mut arguments, "--output", output);
+            if let Some(raw_template) = input
+                .input_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if !presentation_spec_is_svg_deck(&spec) {
+                    return Err(
+                        "inputPath (template PPTX) is only supported with a schema_version 3 SVG deck manifest"
+                            .to_string(),
+                    );
+                }
+                let template = resolve_existing_path(
+                    &workspace,
+                    &workspace,
+                    raw_template,
+                    "pptx",
+                    "inputPath",
+                )?;
+                input_target = Some(template.clone());
+                push_path_argument(&mut arguments, "--template", template);
+            }
+        }
+        ("presentation", "validate") => {
+            reject_path(&input.script_path, "scriptPath")?;
+            reject_path(&input.output_path, "outputPath")?;
+            if input.force {
+                return Err("force is not valid for validate".to_string());
+            }
+            let spec = resolve_existing_path(
+                &workspace,
+                &workspace,
+                required_path(&input.spec_path, "specPath")?,
+                "json",
+                "specPath",
+            )?;
+            if !presentation_spec_is_svg_deck(&spec) {
+                return Err(
+                    "Presentation validate requires a schema_version 3 SVG deck manifest"
+                        .to_string(),
+                );
+            }
+            validate_presentation_assets(&spec, &workspace)?;
+            push_path_argument(&mut arguments, "--spec", spec);
+            if let Some(raw_template) = input
+                .input_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let template = resolve_existing_path(
+                    &workspace,
+                    &workspace,
+                    raw_template,
+                    "pptx",
+                    "inputPath",
+                )?;
+                input_target = Some(template.clone());
+                push_path_argument(&mut arguments, "--template", template);
+            }
         }
         ("presentation", "inspect") => {
             reject_path(&input.spec_path, "specPath")?;
@@ -757,7 +1055,6 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
             push_path_argument(&mut arguments, "--input", presentation);
         }
         ("presentation", "render") => {
-            reject_path(&input.spec_path, "specPath")?;
             reject_path(&input.script_path, "scriptPath")?;
             let presentation = resolve_existing_path(
                 &workspace,
@@ -766,15 +1063,78 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                 "pptx",
                 "inputPath",
             )?;
-            let output = resolve_output_path(
-                &workspace,
-                required_path(&input.output_path, "outputPath")?,
-                "pdf",
-                "outputPath",
-            )?;
+            let output_raw = required_path(&input.output_path, "outputPath")?;
+            let output_extension = Path::new(output_raw)
+                .extension()
+                .and_then(OsStr::to_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             input_target = Some(presentation.clone());
-            push_path_argument(&mut arguments, "--input", presentation);
-            push_path_argument(&mut arguments, "--output", output);
+            match output_extension.as_str() {
+                "pdf" => {
+                    reject_path(&input.spec_path, "specPath")?;
+                    let output = resolve_output_path(&workspace, output_raw, "pdf", "outputPath")?;
+                    push_path_argument(&mut arguments, "--input", presentation);
+                    push_path_argument(&mut arguments, "--output", output);
+                }
+                "png" => {
+                    backend = RuntimeBackend::OfficeCli;
+                    let output = resolve_output_path(&workspace, output_raw, "png", "outputPath")?;
+                    if output.exists() && !input.force {
+                        return Err(
+                            "outputPath already exists; set force=true to overwrite it".to_string(),
+                        );
+                    }
+                    let options = match input
+                        .spec_path
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        Some(raw_spec) => {
+                            let spec = resolve_existing_path(
+                                &workspace,
+                                &workspace,
+                                raw_spec,
+                                "json",
+                                "specPath",
+                            )?;
+                            parse_presentation_render_options(&spec)?
+                        }
+                        None => PresentationRenderOptions::default(),
+                    };
+                    let slide_count = count_pptx_slides(&presentation)?;
+                    let (pages, grid) = match options.pages {
+                        Some(pages) => (pages, options.grid),
+                        None => (format!("1-{slide_count}"), slide_count > 1 || options.grid),
+                    };
+                    officecli_output = Some(OfficeCliOutput::New {
+                        expected: capture_target_state(&output, input.force)?,
+                        target: output.clone(),
+                    });
+                    arguments = vec![
+                        OsString::from("view"),
+                        presentation.into_os_string(),
+                        OsString::from("screenshot"),
+                        OsString::from("--render"),
+                        OsString::from("html"),
+                        OsString::from("--page"),
+                        OsString::from(pages),
+                    ];
+                    if grid {
+                        arguments.push(OsString::from("--grid"));
+                    }
+                    arguments.push(OsString::from("-o"));
+                    arguments.push(output.into_os_string());
+                    push_officecli_json(&mut arguments);
+                }
+                _ => {
+                    return Err(
+                        "outputPath must end with .pdf (LibreOffice) or .png (OfficeCLI page preview) for presentation render"
+                            .to_string(),
+                    )
+                }
+            }
         }
         ("word", "create") => {
             backend = RuntimeBackend::OfficeCli;
@@ -917,7 +1277,9 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
             return Err("Spreadsheet action must be create, patch, code, or inspect".to_string())
         }
         ("presentation", _) => {
-            return Err("Presentation action must be create, inspect, or render".to_string())
+            return Err(
+                "Presentation action must be create, inspect, validate, or render".to_string(),
+            )
         }
         ("word", _) => {
             return Err(
@@ -1975,5 +2337,205 @@ mod tests {
             std::fs::read(&target).expect("read target"),
             b"new external content"
         );
+    }
+
+    fn presentation_request(workspace: &Path, action: &str) -> OfficeRuntimeRequest {
+        OfficeRuntimeRequest {
+            request_id: format!("presentation-{action}-test"),
+            workdir: workspace.to_string_lossy().into_owned(),
+            document_type: "presentation".to_string(),
+            action: action.to_string(),
+            spec_path: None,
+            script_path: None,
+            input_path: None,
+            output_path: None,
+            force: false,
+            timeout_ms: Some(5_000),
+        }
+    }
+
+    const SAFE_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720"><rect data-arcforge="background" x="0" y="0" width="1280" height="720" fill="#F4F6FA"/><text x="60" y="118" font-size="34" font-weight="bold">标题</text><image data-asset="hero" x="60" y="150" width="400" height="300"/></svg>"##;
+
+    fn write_svg_deck(workspace: &Path, svg: &str) {
+        std::fs::create_dir_all(workspace.join("pages")).expect("pages dir");
+        std::fs::write(workspace.join("pages/p-01.svg"), svg).expect("write svg");
+        std::fs::write(workspace.join("hero.png"), b"\x89PNG\r\n\x1a\n").expect("write asset");
+        std::fs::write(
+            workspace.join("deck.json"),
+            r#"{"schema_version":3,"stage":"design","assets":{"hero":"hero.png"},"slides":[{"slide_id":"p-01","svg":"pages/p-01.svg"}]}"#,
+        )
+        .expect("write manifest");
+    }
+
+    fn write_test_pptx(path: &Path, slide_count: usize) {
+        use std::io::Write as _;
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).expect("create pptx"));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer
+            .start_file("[Content_Types].xml", options)
+            .expect("start content types");
+        writer.write_all(b"<Types/>").expect("write content types");
+        for index in 1..=slide_count {
+            writer
+                .start_file(format!("ppt/slides/slide{index}.xml"), options)
+                .expect("start slide");
+            writer.write_all(b"<p:sld/>").expect("write slide");
+        }
+        writer
+            .start_file("ppt/slides/_rels/slide1.xml.rels", options)
+            .expect("start rels");
+        writer.write_all(b"<Relationships/>").expect("write rels");
+        writer.finish().expect("finish pptx");
+    }
+
+    #[test]
+    fn presentation_create_accepts_an_svg_deck_manifest_with_a_template() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_svg_deck(temp.path(), SAFE_SVG);
+        write_test_pptx(&temp.path().join("brand.pptx"), 2);
+
+        let mut request = presentation_request(temp.path(), "create");
+        request.spec_path = Some("deck.json".to_string());
+        request.input_path = Some("brand.pptx".to_string());
+        request.output_path = Some("out/deck.pptx".to_string());
+        let invocation = prepare_invocation(request).expect("prepare presentation create");
+        let arguments = argument_strings(&invocation);
+
+        assert_eq!(invocation.backend, RuntimeBackend::ArcForge);
+        assert_eq!(arguments[0], "presentation");
+        assert_eq!(arguments[1], "create");
+        assert!(arguments.iter().any(|value| value == "--template"));
+        assert!(arguments.iter().any(|value| value.ends_with("brand.pptx")));
+        assert!(invocation
+            .input_target
+            .as_deref()
+            .is_some_and(|path| path.ends_with("brand.pptx")));
+    }
+
+    #[test]
+    fn presentation_create_rejects_a_template_for_legacy_specs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp.path().join("legacy.json"),
+            r#"{"slides":[{"type":"title","title":"Hello"}]}"#,
+        )
+        .expect("write legacy spec");
+        write_test_pptx(&temp.path().join("brand.pptx"), 1);
+
+        let mut request = presentation_request(temp.path(), "create");
+        request.spec_path = Some("legacy.json".to_string());
+        request.input_path = Some("brand.pptx".to_string());
+        request.output_path = Some("deck.pptx".to_string());
+        let error = prepare_invocation(request).expect_err("legacy spec must reject template");
+        assert!(
+            error.contains("schema_version 3"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn svg_deck_manifest_rejects_external_references_and_missing_assets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_svg_deck(
+            temp.path(),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1280 720"><image xlink:href="file:///C:/secret.png" x="0" y="0" width="10" height="10"/></svg>"##,
+        );
+        let mut request = presentation_request(temp.path(), "create");
+        request.spec_path = Some("deck.json".to_string());
+        request.output_path = Some("deck.pptx".to_string());
+        let error = prepare_invocation(request).expect_err("href must be rejected");
+        assert!(error.contains("href"), "unexpected error: {error}");
+
+        std::fs::write(
+            temp.path().join("deck.json"),
+            r#"{"schema_version":3,"assets":{"hero":"../outside.png"},"slides":[{"slide_id":"p-01","svg":"pages/p-01.svg"}]}"#,
+        )
+        .expect("rewrite manifest");
+        std::fs::write(temp.path().join("pages/p-01.svg"), SAFE_SVG).expect("safe svg");
+        let mut request = presentation_request(temp.path(), "create");
+        request.spec_path = Some("deck.json".to_string());
+        request.output_path = Some("deck.pptx".to_string());
+        let error = prepare_invocation(request).expect_err("asset escape must be rejected");
+        assert!(
+            error.contains("must not contain '..'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn presentation_validate_runs_the_runtime_against_the_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_svg_deck(temp.path(), SAFE_SVG);
+        let mut request = presentation_request(temp.path(), "validate");
+        request.spec_path = Some("deck.json".to_string());
+        let invocation = prepare_invocation(request).expect("prepare validate");
+        let arguments = argument_strings(&invocation);
+        assert_eq!(invocation.backend, RuntimeBackend::ArcForge);
+        assert_eq!(arguments[1], "validate");
+        assert!(arguments.iter().any(|value| value == "--spec"));
+        assert!(!arguments.iter().any(|value| value == "--template"));
+    }
+
+    #[test]
+    fn presentation_render_selects_pdf_runtime_or_png_screenshot() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_pptx(&temp.path().join("deck.pptx"), 3);
+
+        let mut pdf = presentation_request(temp.path(), "render");
+        pdf.input_path = Some("deck.pptx".to_string());
+        pdf.output_path = Some("preview.pdf".to_string());
+        let pdf_invocation = prepare_invocation(pdf).expect("prepare pdf render");
+        assert_eq!(pdf_invocation.backend, RuntimeBackend::ArcForge);
+        assert!(argument_strings(&pdf_invocation)
+            .iter()
+            .any(|value| value.ends_with("preview.pdf")));
+
+        let mut png = presentation_request(temp.path(), "render");
+        png.input_path = Some("deck.pptx".to_string());
+        png.output_path = Some("previews/deck.png".to_string());
+        let png_invocation = prepare_invocation(png).expect("prepare png render");
+        let arguments = argument_strings(&png_invocation);
+        assert_eq!(png_invocation.backend, RuntimeBackend::OfficeCli);
+        assert_eq!(arguments[0], "view");
+        assert_eq!(arguments[2], "screenshot");
+        assert_eq!(arguments[3], "--render");
+        assert_eq!(arguments[4], "html");
+        assert_eq!(arguments[5], "--page");
+        assert_eq!(arguments[6], "1-3");
+        assert_eq!(arguments[7], "--grid");
+        assert_eq!(arguments[8], "-o");
+        assert!(arguments[9].ends_with("deck.png"));
+        assert_eq!(arguments[10], "--json");
+        assert!(matches!(
+            png_invocation.officecli_output,
+            Some(OfficeCliOutput::New { target, .. }) if target.ends_with("previews/deck.png")
+        ));
+
+        std::fs::write(temp.path().join("render.json"), r#"{"pages":"2"}"#).expect("render spec");
+        let mut single = presentation_request(temp.path(), "render");
+        single.input_path = Some("deck.pptx".to_string());
+        single.spec_path = Some("render.json".to_string());
+        single.output_path = Some("previews/p2.png".to_string());
+        let single_arguments = argument_strings(&prepare_invocation(single).expect("single page"));
+        assert_eq!(single_arguments[6], "2");
+        assert!(!single_arguments.iter().any(|value| value == "--grid"));
+
+        std::fs::write(temp.path().join("bad.json"), r#"{"pages":"2;rm"}"#).expect("bad spec");
+        let mut bad = presentation_request(temp.path(), "render");
+        bad.input_path = Some("deck.pptx".to_string());
+        bad.spec_path = Some("bad.json".to_string());
+        bad.output_path = Some("previews/bad.png".to_string());
+        let error = prepare_invocation(bad).expect_err("bad page range must be rejected");
+        assert!(
+            error.contains("pages must look like"),
+            "unexpected error: {error}"
+        );
+
+        let mut other = presentation_request(temp.path(), "render");
+        other.input_path = Some("deck.pptx".to_string());
+        other.output_path = Some("preview.html".to_string());
+        let error = prepare_invocation(other).expect_err("html must be rejected");
+        assert!(error.contains(".pdf") && error.contains(".png"));
     }
 }

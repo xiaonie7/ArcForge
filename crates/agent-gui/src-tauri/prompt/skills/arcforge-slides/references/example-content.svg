@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="Microsoft YaHei" fill="#1B1F29">
+  <rect data-arcforge="background" x="0" y="0" width="1280" height="720" fill="#F4F6FA"/>
+  <text id="kicker" x="60" y="78" font-size="16" fill="#2EC4B6">03 · 效果</text>
+  <text id="title" x="60" y="118" font-size="34" font-weight="bold">策划稿先行，设计稿收尾</text>
+
+  <!-- hero card with a native chart -->
+  <rect id="hero" x="60" y="150" width="1160" height="310" rx="24" fill="#FFFFFF" stroke="#E5E9F0" stroke-width="1"/>
+  <text id="hero-heading" x="100" y="200" font-size="22" font-weight="bold">各阶段耗时与返工次数</text>
+  <rect id="hero-chart" data-arcforge="chart" x="100" y="220" width="1080" height="220" fill="none"
+        data-chart='{"type":"column","categories":["调研","大纲","策划稿","设计稿","审稿"],"series":[{"name":"耗时（分钟）","values":[6,4,9,12,5]},{"name":"返工次数","values":[1,1,3,2,1]}],"colors":["#1F3A93","#2EC4B6"]}'/>
+
+  <!-- three equal cards -->
+  <g id="card-a">
+    <rect x="60" y="480" width="373" height="192" rx="20" fill="#FFFFFF" stroke="#E5E9F0" stroke-width="1"/>
+    <circle cx="118" cy="538" r="18" fill="#E3F7F4"/>
+    <path d="M109 538 L116 545 L128 531" fill="none" stroke="#2EC4B6" stroke-width="3"/>
+    <text x="100" y="596" font-size="18" font-weight="bold">内容有来源</text>
+    <text x="100" y="626" font-size="14" fill="#6B7280" data-width="293">
+      <tspan x="100" y="626">每条要点记录附件、查询或链接</tspan>
+      <tspan x="100" dy="22">没有来源的数据不上页面</tspan>
+    </text>
+  </g>
+  <g id="card-b" transform="translate(393 0)">
+    <rect x="60" y="480" width="373" height="192" rx="20" fill="#FFFFFF" stroke="#E5E9F0" stroke-width="1"/>
+    <circle cx="118" cy="538" r="18" fill="#E3F7F4"/>
+    <line x1="109" y1="531" x2="127" y2="531" stroke="#2EC4B6" stroke-width="3"/>
+    <line x1="109" y1="538" x2="127" y2="538" stroke="#2EC4B6" stroke-width="3"/>
+    <line x1="109" y1="545" x2="127" y2="545" stroke="#2EC4B6" stroke-width="3"/>
+    <text x="100" y="596" font-size="18" font-weight="bold">版式可解释</text>
+    <text x="100" y="626" font-size="14" fill="#6B7280" data-width="293">
+      <tspan x="100" y="626">卡片层级由信息重要性决定</tspan>
+      <tspan x="100" dy="22">用户在线框阶段就能直接调整</tspan>
+    </text>
+  </g>
+  <g id="card-c" transform="translate(786 0)">
+    <rect x="60" y="480" width="373" height="192" rx="20" fill="#FFFFFF" stroke="#E5E9F0" stroke-width="1"/>
+    <circle cx="118" cy="538" r="18" fill="#E3F7F4"/>
+    <circle cx="118" cy="538" r="8" fill="none" stroke="#2EC4B6" stroke-width="3"/>
+    <circle cx="118" cy="538" r="2.5" fill="#2EC4B6"/>
+    <text x="100" y="596" font-size="18" font-weight="bold">文件可编辑</text>
+    <text x="100" y="626" font-size="14" fill="#6B7280" data-width="293">
+      <tspan x="100" y="626">文字、图片、图表都是原生对象</tspan>
+      <tspan x="100" dy="22">PowerPoint 与 WPS 都能直接修改</tspan>
+    </text>
+  </g>
+
+  <text id="page-number" x="1220" y="700" font-size="12" fill="#6B7280" text-anchor="end">2</text>
+</svg>

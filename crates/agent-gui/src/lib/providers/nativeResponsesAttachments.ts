@@ -535,7 +535,12 @@ async function buildGeminiNativeAttachmentContentPart(params: {
   file: PendingUploadedFile;
 }): Promise<GeminiNativeAttachmentCandidate | null> {
   const { file, model, workdir } = params;
-  if (file.kind === "archive" || file.kind === "word" || file.kind === "spreadsheet") {
+  if (
+    file.kind === "archive" ||
+    file.kind === "word" ||
+    file.kind === "spreadsheet" ||
+    file.kind === "presentation"
+  ) {
     return null;
   }
   if ((file.kind === "image" || file.kind === "pdf") && !modelSupportsImageInput(model)) {

@@ -137,9 +137,25 @@ const SLIDES_FILES: &[BuiltinSkillFile] = &[
         content: include_str!("../../../prompt/skills/arcforge-slides/references/spec.md"),
     },
     BuiltinSkillFile {
+        path: "references/prompts.md",
+        content: include_str!("../../../prompt/skills/arcforge-slides/references/prompts.md"),
+    },
+    BuiltinSkillFile {
         path: "references/example-deck.json",
         content: include_str!(
             "../../../prompt/skills/arcforge-slides/references/example-deck.json"
+        ),
+    },
+    BuiltinSkillFile {
+        path: "references/example-cover.svg",
+        content: include_str!(
+            "../../../prompt/skills/arcforge-slides/references/example-cover.svg"
+        ),
+    },
+    BuiltinSkillFile {
+        path: "references/example-content.svg",
+        content: include_str!(
+            "../../../prompt/skills/arcforge-slides/references/example-content.svg"
         ),
     },
     BuiltinSkillFile {

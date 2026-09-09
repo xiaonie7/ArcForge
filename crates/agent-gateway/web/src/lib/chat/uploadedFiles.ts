@@ -8,6 +8,7 @@ export type UploadedReadableFileKind =
   | "notebook"
   | "word"
   | "spreadsheet"
+  | "presentation"
   | "archive";
 
 const UPLOADED_READABLE_FILE_KINDS = new Set<string>([
@@ -17,6 +18,7 @@ const UPLOADED_READABLE_FILE_KINDS = new Set<string>([
   "notebook",
   "word",
   "spreadsheet",
+  "presentation",
   "archive",
 ]);
 

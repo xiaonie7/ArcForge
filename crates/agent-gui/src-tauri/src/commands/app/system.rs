@@ -195,6 +195,13 @@ fn is_spreadsheet_upload(path: &Path) -> bool {
     )
 }
 
+fn is_presentation_upload(path: &Path) -> bool {
+    matches!(
+        upload_extension_lower(path).as_deref(),
+        Some("pptx") | Some("pptm") | Some("potx") | Some("ppt")
+    )
+}
+
 fn is_archive_upload(path: &Path) -> bool {
     let name = upload_file_name_lower(path);
     matches!(
@@ -251,6 +258,18 @@ fn is_spreadsheet_upload_mime(mime_type: Option<&str>) -> bool {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.ms-excel.sheet.macroenabled.12",
             "application/vnd.ms-excel.template.macroenabled.12",
+        ],
+    )
+}
+
+fn is_presentation_upload_mime(mime_type: Option<&str>) -> bool {
+    normalized_mime_matches(
+        mime_type,
+        &[
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.openxmlformats-officedocument.presentationml.template",
+            "application/vnd.ms-powerpoint.presentation.macroenabled.12",
         ],
     )
 }
@@ -325,6 +344,9 @@ fn detect_upload_file_kind(path: &Path) -> Result<&'static str, String> {
     if is_spreadsheet_upload(path) {
         return Ok("spreadsheet");
     }
+    if is_presentation_upload(path) {
+        return Ok("presentation");
+    }
     if is_archive_upload(path) {
         return Ok("archive");
     }
@@ -332,7 +354,7 @@ fn detect_upload_file_kind(path: &Path) -> Result<&'static str, String> {
         return Ok("text");
     }
     Err(format!(
-        "{} 不是当前 Read 支持解析的文本/图片/PDF/notebook/Word/Excel/压缩包文件",
+        "{} 不是当前 Read 支持解析的文本/图片/PDF/notebook/Word/Excel/PowerPoint/压缩包文件",
         path.display()
     ))
 }
@@ -370,6 +392,9 @@ fn detect_uploaded_bytes_kind(
     if is_spreadsheet_upload(path) || is_spreadsheet_upload_mime(mime_type) {
         return Ok("spreadsheet");
     }
+    if is_presentation_upload(path) || is_presentation_upload_mime(mime_type) {
+        return Ok("presentation");
+    }
     if is_archive_upload(path) || is_archive_upload_mime(mime_type) {
         return Ok("archive");
     }
@@ -378,7 +403,7 @@ fn detect_uploaded_bytes_kind(
     }
 
     Err(format!(
-        "{file_name} 不是当前 Read 支持解析的文本/图片/PDF/notebook/Word/Excel/压缩包文件"
+        "{file_name} 不是当前 Read 支持解析的文本/图片/PDF/notebook/Word/Excel/PowerPoint/压缩包文件"
     ))
 }
 
@@ -753,6 +778,15 @@ fn infer_native_attachment_mime(path: &Path, kind: Option<&str>) -> String {
         }
         .to_string();
     }
+    if is_presentation_upload(path) {
+        return match upload_extension_lower(path).as_deref() {
+            Some("ppt") => "application/vnd.ms-powerpoint",
+            Some("pptm") => "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+            Some("potx") => "application/vnd.openxmlformats-officedocument.presentationml.template",
+            _ => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        }
+        .to_string();
+    }
     if is_archive_upload(path) {
         return match upload_extension_lower(path).as_deref() {
             Some("zip") => "application/zip",
@@ -776,6 +810,9 @@ fn infer_native_attachment_mime(path: &Path, kind: Option<&str>) -> String {
         }
         Some("spreadsheet") => {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
+        }
+        Some("presentation") => {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string()
         }
         Some("archive") => "application/octet-stream".to_string(),
         _ => "application/octet-stream".to_string(),
@@ -2003,6 +2040,24 @@ mod tests {
             )
             .expect("xlsx should be accepted"),
             "spreadsheet"
+        );
+        assert_eq!(
+            detect_uploaded_bytes_kind(
+                "deck.pptx",
+                Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+                b"not validated here",
+            )
+            .expect("pptx should be accepted"),
+            "presentation"
+        );
+        assert_eq!(
+            detect_uploaded_bytes_kind(
+                "brand-template",
+                Some("application/vnd.ms-powerpoint"),
+                b"ppt"
+            )
+            .expect("PowerPoint mime should be accepted without an extension"),
+            "presentation"
         );
         assert_eq!(
             detect_uploaded_bytes_kind("bundle.tar.gz", Some("application/gzip"), b"gzip")

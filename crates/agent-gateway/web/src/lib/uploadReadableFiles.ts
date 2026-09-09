@@ -12,6 +12,7 @@ const READABLE_FILE_KINDS = new Set([
   "notebook",
   "word",
   "spreadsheet",
+  "presentation",
   "archive",
 ]);
 

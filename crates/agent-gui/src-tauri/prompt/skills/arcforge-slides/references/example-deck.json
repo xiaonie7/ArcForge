@@ -1,88 +1,28 @@
 {
+  "schema_version": 3,
+  "mode": "blank",
+  "stage": "design",
   "metadata": {
-    "title": "ArcForge Quarterly Operations",
-    "subject": "Local-first work agent operating review",
-    "author": "ArcForge",
-    "company": "ArcForge"
+    "title": "ArcForge presentation capability",
+    "author": "ArcForge"
   },
-  "theme": {
-    "background": "F8FAFC",
-    "surface": "E2E8F0",
-    "primary": "0F172A",
-    "accent": "2563EB",
-    "text": "0F172A",
-    "muted": "64748B",
-    "inverse": "F8FAFC",
-    "font": "Microsoft YaHei",
-    "font_alt": "Aptos"
-  },
-  "footer": "ArcForge · Reviewable work, verified locally",
-  "slides": [
-    {
-      "type": "title",
-      "kicker": "QUARTERLY OPERATIONS",
-      "title": "From goals to reviewable delivery",
-      "subtitle": "A concise operating review for a local-first Windows Work Agent"
+  "style": {
+    "palette": {
+      "primary": "#1F3A93",
+      "accent": "#2EC4B6",
+      "background": "#F4F6FA",
+      "surface": "#FFFFFF",
+      "text": "#1B1F29",
+      "muted": "#6B7280"
     },
-    {
-      "type": "metrics",
-      "title": "Quarter at a glance",
-      "subtitle": "Representative example metrics",
-      "metrics": [
-        { "label": "Completed work items", "value": "128", "delta": "+18%" },
-        { "label": "Verified deliverables", "value": "94%", "delta": "+7 pts" },
-        { "label": "Local actions", "value": "1,842", "delta": "+24%" },
-        { "label": "Approval exceptions", "value": "3", "delta": "-40%" }
-      ]
-    },
-    {
-      "type": "chart",
-      "title": "Delivery volume increased steadily",
-      "subtitle": "Completed and verified work items by quarter",
-      "chart_type": "column",
-      "categories": ["Q1", "Q2", "Q3", "Q4"],
-      "series": [
-        { "name": "Completed", "values": [82, 96, 111, 128] },
-        { "name": "Verified", "values": [70, 84, 101, 120] }
-      ]
-    },
-    {
-      "type": "two-column",
-      "title": "What changed",
-      "left": {
-        "heading": "Capabilities",
-        "bullets": [
-          "Structured local tool execution",
-          "Checkpointed conversation context",
-          "Isolated sub-agent worktrees"
-        ]
-      },
-      "right": {
-        "heading": "Controls",
-        "bullets": [
-          "Workspace path boundaries",
-          "Stale-write protection",
-          "Review evidence attached to outputs"
-        ]
-      }
-    },
-    {
-      "type": "table",
-      "title": "Next-quarter priorities",
-      "columns": ["Priority", "Outcome", "Owner", "Status"],
-      "rows": [
-        ["P0", "Tool authorization policy", "Platform", "Planned"],
-        ["P1", "Office deliverable skills", "Product", "In progress"],
-        ["P1", "PPT visual verification", "Desktop", "Planned"],
-        ["P2", "Evidence export", "Agent", "Discovery"]
-      ],
-      "column_widths": [1.1, 4.4, 2.0, 1.8]
-    },
-    {
-      "type": "closing",
-      "title": "Build locally. Review clearly. Act deliberately.",
-      "subtitle": "ArcForge turns goals and context into inspectable work."
+    "fonts": {
+      "heading": ["Microsoft YaHei", "SimHei"],
+      "body": ["Microsoft YaHei", "SimHei"]
     }
+  },
+  "assets": {},
+  "slides": [
+    { "slide_id": "p-01", "svg": "example-cover.svg" },
+    { "slide_id": "p-02", "svg": "example-content.svg", "notes": "Planning draft first, design pass second." }
   ]
 }
-

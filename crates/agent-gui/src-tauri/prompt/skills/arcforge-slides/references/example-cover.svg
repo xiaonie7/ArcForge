@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" font-family="Microsoft YaHei">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#142850"/>
+      <stop offset="55%" stop-color="#1F3A93"/>
+      <stop offset="100%" stop-color="#27496D"/>
+    </linearGradient>
+  </defs>
+  <rect id="background" data-arcforge="background" x="0" y="0" width="1280" height="720" fill="url(#bgGrad)"/>
+  <circle id="deco-1" cx="1100" cy="120" r="220" fill="#2EC4B6" fill-opacity="0.18"/>
+  <circle id="deco-2" cx="1180" cy="620" r="140" fill="#FFFFFF" fill-opacity="0.08"/>
+  <rect id="accent-bar" x="80" y="300" width="64" height="6" fill="#2EC4B6"/>
+  <text id="kicker" x="80" y="280" font-size="18" fill="#9FE8DF">ARCFORGE · PRODUCT CAPABILITY</text>
+  <text id="title" x="80" y="380" font-size="56" font-weight="bold" fill="#FFFFFF">让 AI 做出可编辑的 PPT</text>
+  <text id="subtitle" x="80" y="440" font-size="24" fill="#D6DEEB">调研、大纲、策划稿、设计稿的完整流程</text>
+  <text id="meta" x="80" y="640" font-size="16" fill="#9AA5B8">2026 年 9 月 · 内部技术方案</text>
+  <path id="logo-mark" d="M1120 640 L1150 600 L1180 640 Z" fill="#2EC4B6"/>
+</svg>

@@ -1017,6 +1017,7 @@ const UPLOAD_KIND_FALLBACK_FILENAME: Record<string, string> = {
   notebook: "file.ipynb",
   word: "file.docx",
   spreadsheet: "file.xlsx",
+  presentation: "file.pptx",
   archive: "file.zip",
 };
 

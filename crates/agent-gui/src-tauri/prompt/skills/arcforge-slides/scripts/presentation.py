@@ -1,27 +1,40 @@
 #!/usr/bin/env python3
-"""Deterministic PPTX creation, inspection, and optional PDF rendering for ArcForge."""
+"""Deterministic PPTX creation, inspection, and optional PDF rendering for ArcForge.
+
+Two deck specifications are supported:
+
+* the legacy ``slides[]`` layout specification (``schema_version`` 1 or absent), and
+* the ``schema_version: 3`` deck manifest whose pages are SVG page descriptions
+  converted into native PPTX objects (shapes, text boxes, pictures, charts).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:
-    from PIL import Image
+    from lxml import etree
+    from PIL import Image, ImageFont
     from pptx import Presentation
     from pptx.chart.data import ChartData
     from pptx.dml.color import RGBColor
     from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
-    from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE
+    from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE, MSO_SHAPE_TYPE
     from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
-    from pptx.util import Inches, Pt
+    from pptx.oxml.ns import qn
+    from pptx.util import Emu, Inches, Pt
 
     PPTX_IMPORT_ERROR: Optional[Exception] = None
 except (
@@ -1084,6 +1097,1171 @@ def create_presentation(spec: Mapping[str, Any], spec_dir: Path) -> Any:
     return presentation
 
 
+# ---------------------------------------------------------------------------
+# schema_version 3: SVG page descriptions converted into native PPTX objects
+# ---------------------------------------------------------------------------
+
+SVG_NS = "{http://www.w3.org/2000/svg}"
+XLINK_NS = "{http://www.w3.org/1999/xlink}"
+CANVAS_WIDTH = 1280.0
+CANVAS_HEIGHT = 720.0
+EMU_PER_PX = 9525
+MAX_SVG_BYTES = 2 * 1024 * 1024
+MAX_SVG_ELEMENTS = 2000
+DECK_SCHEMA_VERSION = 3
+SUPPORTED_SVG_ELEMENTS = frozenset(
+    {
+        "svg",
+        "g",
+        "defs",
+        "linearGradient",
+        "stop",
+        "rect",
+        "circle",
+        "ellipse",
+        "line",
+        "polygon",
+        "path",
+        "text",
+        "tspan",
+        "image",
+        "title",
+        "desc",
+    }
+)
+SUPPORTED_SVG_ATTRIBUTES = frozenset(
+    {
+        "id",
+        "x",
+        "y",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "cx",
+        "cy",
+        "r",
+        "rx",
+        "ry",
+        "dx",
+        "dy",
+        "width",
+        "height",
+        "d",
+        "points",
+        "fill",
+        "fill-opacity",
+        "stroke",
+        "stroke-width",
+        "font-size",
+        "font-weight",
+        "font-family",
+        "text-anchor",
+        "transform",
+        "viewBox",
+        "xmlns",
+        "preserveAspectRatio",
+        "offset",
+        "stop-color",
+        "stop-opacity",
+        "gradientUnits",
+        "data-arcforge",
+        "data-asset",
+        "data-chart",
+        "data-width",
+        "data-role",
+        "role",
+        "lang",
+    }
+)
+CHART_TYPES_V3 = {
+    "column": "column",
+    "bar": "bar",
+    "line": "line",
+    "pie": "pie",
+    "doughnut": "doughnut",
+    "area": "area",
+}
+FALLBACK_FONTS = ("Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "PingFang SC", "Arial")
+
+
+def px_to_emu(value: float) -> Any:
+    return Emu(int(round(value * EMU_PER_PX)))
+
+
+def svg_local_name(tag: str) -> str:
+    return tag.split("}")[-1]
+
+
+def parse_svg_length(value: Any, label: str) -> float:
+    text = str(value).strip()
+    if text.endswith("px"):
+        text = text[:-2]
+    try:
+        return float(text)
+    except ValueError as error:
+        raise PresentationError(label + " must be a number in px, got " + str(value)) from error
+
+
+def parse_svg_color(value: Optional[str], label: str) -> Optional[str]:
+    if value is None:
+        return None
+    text = value.strip()
+    if text in ("none", "transparent", ""):
+        return None
+    if text.startswith("#"):
+        digits = text[1:]
+        if len(digits) == 3:
+            digits = "".join(character * 2 for character in digits)
+        if len(digits) == 8:
+            digits = digits[:6]
+        return normalize_color(digits, label)
+    match = re.match(r"rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)", text)
+    if match:
+        return "".join("%02X" % min(255, int(part)) for part in match.groups())
+    named = {
+        "white": "FFFFFF",
+        "black": "000000",
+        "gray": "808080",
+        "grey": "808080",
+        "red": "FF0000",
+        "blue": "0000FF",
+    }
+    if text.lower() in named:
+        return named[text.lower()]
+    raise PresentationError(label + " uses unsupported color " + text)
+
+
+@dataclass
+class SvgStyle:
+    fill: Optional[str] = "000000"
+    fill_opacity: float = 1.0
+    stroke: Optional[str] = None
+    stroke_width: float = 1.0
+    font_family: str = "Microsoft YaHei"
+    font_size: float = 16.0
+    font_weight: str = "normal"
+    text_anchor: str = "start"
+    dx: float = 0.0
+    dy: float = 0.0
+
+    def inherit(self, element: Any, page: str) -> "SvgStyle":
+        style = SvgStyle(**self.__dict__)
+        attributes = dict(element.attrib)
+        if "style" in attributes:
+            raise PresentationError(
+                page + ": inline style attributes are not supported; use presentation attributes"
+            )
+        for key in attributes:
+            if key.startswith("{"):
+                if key.startswith(XLINK_NS):
+                    raise PresentationError(page + ": xlink attributes are not supported")
+                continue
+            if key not in SUPPORTED_SVG_ATTRIBUTES:
+                raise PresentationError(
+                    page + ": unsupported SVG attribute '" + key + "' on <" + svg_local_name(element.tag) + ">"
+                )
+        if "fill" in attributes:
+            raw = attributes["fill"].strip()
+            style.fill = raw if raw.startswith("url(") else parse_svg_color(raw, page + " fill")
+        if "fill-opacity" in attributes:
+            style.fill_opacity = max(0.0, min(1.0, parse_svg_length(attributes["fill-opacity"], page + " fill-opacity")))
+        if "stroke" in attributes:
+            style.stroke = parse_svg_color(attributes["stroke"], page + " stroke")
+        if "stroke-width" in attributes:
+            style.stroke_width = parse_svg_length(attributes["stroke-width"], page + " stroke-width")
+        if "font-family" in attributes:
+            style.font_family = attributes["font-family"].split(",")[0].strip("'\" ") or style.font_family
+        if "font-size" in attributes:
+            style.font_size = parse_svg_length(attributes["font-size"], page + " font-size")
+        if "font-weight" in attributes:
+            style.font_weight = attributes["font-weight"].strip().lower()
+        if "text-anchor" in attributes:
+            style.text_anchor = attributes["text-anchor"].strip().lower()
+        if "transform" in attributes:
+            match = re.fullmatch(
+                r"\s*translate\(\s*(-?[\d.]+)(?:[\s,]+(-?[\d.]+))?\s*\)\s*",
+                attributes["transform"],
+            )
+            if not match:
+                raise PresentationError(
+                    page + ": only transform=\"translate(x y)\" is supported, got " + attributes["transform"]
+                )
+            style.dx += float(match.group(1))
+            style.dy += float(match.group(2) or 0.0)
+        return style
+
+
+@dataclass
+class DeckFonts:
+    heading: List[str] = field(default_factory=lambda: list(FALLBACK_FONTS))
+    body: List[str] = field(default_factory=lambda: list(FALLBACK_FONTS))
+
+
+def font_directories() -> List[Path]:
+    directories: List[Path] = []
+    windir = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if windir:
+        directories.append(Path(windir) / "Fonts")
+    local_app = os.environ.get("LOCALAPPDATA")
+    if local_app:
+        directories.append(Path(local_app) / "Microsoft" / "Windows" / "Fonts")
+    directories.extend(
+        [
+            Path("/usr/share/fonts"),
+            Path("/usr/local/share/fonts"),
+            Path.home() / ".fonts",
+            Path("/System/Library/Fonts"),
+            Path("/Library/Fonts"),
+        ]
+    )
+    return [directory for directory in directories if directory.is_dir()]
+
+
+FONT_FILE_CANDIDATES: Dict[Tuple[str, bool], Tuple[str, ...]] = {
+    ("microsoft yahei", False): ("msyh.ttc", "msyh.ttf"),
+    ("microsoft yahei", True): ("msyhbd.ttc", "msyhbd.ttf", "msyh.ttc"),
+    ("simhei", False): ("simhei.ttf",),
+    ("simhei", True): ("simhei.ttf",),
+    ("simsun", False): ("simsun.ttc",),
+    ("simsun", True): ("simsun.ttc",),
+    ("dengxian", False): ("Deng.ttf",),
+    ("dengxian", True): ("Dengb.ttf", "Deng.ttf"),
+    ("arial", False): ("arial.ttf",),
+    ("arial", True): ("arialbd.ttf", "arial.ttf"),
+    ("noto sans cjk sc", False): ("NotoSansCJK-Regular.ttc", "NotoSansCJKsc-Regular.otf"),
+    ("noto sans cjk sc", True): ("NotoSansCJK-Bold.ttc", "NotoSansCJKsc-Bold.otf"),
+}
+
+
+class TextMeasurer:
+    """Measure rendered text width with real font files when available."""
+
+    def __init__(self) -> None:
+        self._cache: Dict[Tuple[str, bool, int], Any] = {}
+        self._resolved: Dict[Tuple[str, bool], Optional[Path]] = {}
+        self.missing_fonts: List[str] = []
+        self.measured_with_fonts = True
+
+    def _resolve_file(self, family: str, bold: bool) -> Optional[Path]:
+        key = (family.lower(), bold)
+        if key in self._resolved:
+            return self._resolved[key]
+        candidates = FONT_FILE_CANDIDATES.get(key) or FONT_FILE_CANDIDATES.get((key[0], False)) or ()
+        found: Optional[Path] = None
+        for directory in font_directories():
+            for name in candidates:
+                candidate = directory / name
+                if candidate.is_file():
+                    found = candidate
+                    break
+            if found:
+                break
+        self._resolved[key] = found
+        return found
+
+    def _font(self, family: str, bold: bool, size: float) -> Optional[Any]:
+        size_px = max(1, int(round(size)))
+        key = (family.lower(), bold, size_px)
+        if key in self._cache:
+            return self._cache[key]
+        font = None
+        for candidate_family in [family] + [name for name in FALLBACK_FONTS if name.lower() != family.lower()]:
+            path = self._resolve_file(candidate_family, bold)
+            if path is None:
+                continue
+            try:
+                font = ImageFont.truetype(str(path), size_px)
+            except OSError:
+                continue
+            if candidate_family.lower() != family.lower() and family not in self.missing_fonts:
+                self.missing_fonts.append(family)
+            break
+        if font is None:
+            self.measured_with_fonts = False
+            if family not in self.missing_fonts:
+                self.missing_fonts.append(family)
+        self._cache[key] = font
+        return font
+
+    def width(self, text: str, family: str, bold: bool, size: float) -> float:
+        font = self._font(family, bold, size)
+        if font is None:
+            cjk = sum(1 for character in text if ord(character) > 0x2E7F)
+            return cjk * size + (len(text) - cjk) * size * 0.55
+        return float(font.getlength(text))
+
+    def wrap(self, text: str, family: str, bold: bool, size: float, width: float) -> List[str]:
+        lines: List[str] = []
+        current = ""
+        for token in re.findall(r"\s+|[A-Za-z0-9_@#%&$€£¥.,:;!?'\"()\[\]/-]+|.", text):
+            candidate = current + token
+            if not current or self.width(candidate.rstrip(), family, bold, size) <= width:
+                current = candidate
+                continue
+            lines.append(current.rstrip())
+            current = token.lstrip()
+        if current.strip():
+            lines.append(current.rstrip())
+        return lines or [""]
+
+
+@dataclass
+class ConversionReport:
+    warnings: List[str] = field(default_factory=list)
+    text_overflows: List[Dict[str, Any]] = field(default_factory=list)
+    out_of_bounds: List[Dict[str, Any]] = field(default_factory=list)
+    protected_collisions: List[Dict[str, Any]] = field(default_factory=list)
+    missing_fonts: List[str] = field(default_factory=list)
+    measured_with_fonts: bool = True
+    element_counts: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class DeckManifest:
+    schema_version: int
+    mode: str
+    stage: str
+    template: Optional[Path]
+    assets: Dict[str, Path]
+    style: Dict[str, Any]
+    slides: List[Dict[str, Any]]
+    metadata: Dict[str, Any]
+    fonts: DeckFonts
+
+
+def load_deck_manifest(spec: Mapping[str, Any], spec_dir: Path) -> DeckManifest:
+    if int(spec.get("schema_version", 1)) != DECK_SCHEMA_VERSION:
+        raise PresentationError("schema_version must be " + str(DECK_SCHEMA_VERSION) + " for an SVG deck manifest")
+    mode = str(spec.get("mode", "blank")).strip().lower()
+    if mode not in ("blank", "template"):
+        raise PresentationError("mode must be blank or template")
+    stage = str(spec.get("stage", "design")).strip().lower()
+    if stage not in ("plan", "design"):
+        raise PresentationError("stage must be plan or design")
+    template: Optional[Path] = None
+    if mode == "template":
+        raw_template = spec.get("template")
+        if not raw_template:
+            raise PresentationError("mode=template requires a template path")
+        template = Path(str(raw_template)).expanduser()
+        if not template.is_absolute():
+            template = spec_dir / template
+        template = template.resolve()
+        if not template.is_file() or template.suffix.lower() != ".pptx":
+            raise PresentationError("template must be an existing .pptx file: " + str(template))
+    elif spec.get("template"):
+        raise PresentationError("template is only valid when mode is template")
+
+    assets_raw = spec.get("assets", {})
+    if assets_raw is None:
+        assets_raw = {}
+    if not isinstance(assets_raw, dict):
+        raise PresentationError("assets must be an object mapping asset ids to workspace image paths")
+    assets: Dict[str, Path] = {}
+    for asset_id, raw_path in assets_raw.items():
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(asset_id)):
+            raise PresentationError("asset id '" + str(asset_id) + "' must use letters, digits, '_', '-' or '.'")
+        assets[str(asset_id)] = resolve_asset_path(raw_path, spec_dir)
+
+    slides_raw = spec.get("slides")
+    if not isinstance(slides_raw, list) or not slides_raw:
+        raise PresentationError("slides must be a non-empty array of {slide_id, svg} entries")
+    seen_ids: set[str] = set()
+    slides: List[Dict[str, Any]] = []
+    for index, entry in enumerate(slides_raw):
+        if not isinstance(entry, dict):
+            raise PresentationError("slides[" + str(index) + "] must be an object")
+        slide_id = str(entry.get("slide_id", "")).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", slide_id):
+            raise PresentationError("slides[" + str(index) + "].slide_id must use letters, digits, '_', '-' or '.'")
+        if slide_id in seen_ids:
+            raise PresentationError("duplicate slide_id " + slide_id)
+        seen_ids.add(slide_id)
+        raw_svg = entry.get("svg")
+        if not raw_svg:
+            raise PresentationError("slides[" + str(index) + "].svg is required")
+        svg_path = Path(str(raw_svg)).expanduser()
+        if not svg_path.is_absolute():
+            svg_path = spec_dir / svg_path
+        svg_path = svg_path.resolve()
+        if not svg_path.is_file() or svg_path.suffix.lower() != ".svg":
+            raise PresentationError("slides[" + str(index) + "].svg must be an existing .svg file: " + str(svg_path))
+        slides.append(
+            {
+                "slide_id": slide_id,
+                "svg": svg_path,
+                "notes": entry.get("notes"),
+                "layout": entry.get("layout"),
+            }
+        )
+
+    style = spec.get("style", {})
+    if style is None:
+        style = {}
+    if not isinstance(style, dict):
+        raise PresentationError("style must be an object")
+    fonts = DeckFonts()
+    raw_fonts = style.get("fonts", {})
+    if isinstance(raw_fonts, dict):
+        for key in ("heading", "body"):
+            value = raw_fonts.get(key)
+            if isinstance(value, str) and value.strip():
+                setattr(fonts, key, [value.strip()] + [name for name in FALLBACK_FONTS if name != value.strip()])
+            elif isinstance(value, list) and value:
+                names = [str(item).strip() for item in value if str(item).strip()]
+                setattr(fonts, key, names + [name for name in FALLBACK_FONTS if name not in names])
+    metadata = spec.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise PresentationError("metadata must be an object")
+    return DeckManifest(
+        schema_version=DECK_SCHEMA_VERSION,
+        mode=mode,
+        stage=stage,
+        template=template,
+        assets=assets,
+        style=style,
+        slides=slides,
+        metadata=metadata,
+        fonts=fonts,
+    )
+
+
+def remove_placeholder_shapes(container: Any, types: Sequence[int]) -> None:
+    for shape in list(container.placeholders):
+        try:
+            placeholder_type = int(shape.placeholder_format.type)
+        except Exception:
+            continue
+        if placeholder_type in types:
+            element = shape._element  # noqa: SLF001 - python-pptx has no public removal API
+            element.getparent().remove(element)
+
+
+def strip_footer_placeholders(presentation: Any) -> None:
+    """Remove date/footer/slide-number placeholders from the blank layout and its master.
+
+    PowerPoint does not draw them unless a slide instantiates them, but HTML renderers do.
+    """
+    # MSO_PLACEHOLDER: DATE=16, FOOTER=15, SLIDE_NUMBER=13
+    footer_types = (16, 15, 13)
+    for layout in presentation.slide_layouts:
+        remove_placeholder_shapes(layout, footer_types)
+    for master in presentation.slide_masters:
+        remove_placeholder_shapes(master, footer_types)
+
+
+def blank_layout(presentation: Any, preferred_name: Optional[str] = None) -> Any:
+    if preferred_name:
+        for layout in presentation.slide_layouts:
+            if layout.name.strip().lower() == preferred_name.strip().lower():
+                return layout
+        raise PresentationError("layout '" + preferred_name + "' does not exist in the template")
+    for layout in presentation.slide_layouts:
+        if layout.name.strip().lower() in ("blank", "空白"):
+            return layout
+    best = None
+    best_count = None
+    for layout in presentation.slide_layouts:
+        count = len(list(layout.placeholders))
+        if best is None or count < best_count:
+            best, best_count = layout, count
+    if best is None:
+        raise PresentationError("the template does not provide any slide layout")
+    return best
+
+
+def remove_all_slides(presentation: Any) -> int:
+    """Drop template sample slides while keeping masters, layouts, and theme parts."""
+    sldIdLst = presentation.slides._sldIdLst  # noqa: SLF001 - python-pptx has no public API
+    removed = 0
+    for sldId in list(sldIdLst):
+        rId = sldId.rId
+        presentation.part.drop_rel(rId)
+        sldIdLst.remove(sldId)
+        removed += 1
+    return removed
+
+
+def protected_regions_px(presentation: Any, layout: Any) -> List[Dict[str, Any]]:
+    """Return non-placeholder master/layout shapes as 1280-canvas rectangles."""
+    scale_x = CANVAS_WIDTH / float(presentation.slide_width)
+    scale_y = CANVAS_HEIGHT / float(presentation.slide_height)
+    regions: List[Dict[str, Any]] = []
+    for source, container in (("master", layout.slide_master), ("layout", layout)):
+        for shape in container.shapes:
+            if getattr(shape, "is_placeholder", False):
+                continue
+            if shape.width is None or shape.height is None or shape.left is None or shape.top is None:
+                continue
+            width = float(shape.width) * scale_x
+            height = float(shape.height) * scale_y
+            if width >= CANVAS_WIDTH * 0.98 and height >= CANVAS_HEIGHT * 0.98:
+                continue  # full-bleed background image, not a protected element
+            regions.append(
+                {
+                    "source": source,
+                    "name": shape.name,
+                    "x": round(float(shape.left) * scale_x, 1),
+                    "y": round(float(shape.top) * scale_y, 1),
+                    "width": round(width, 1),
+                    "height": round(height, 1),
+                }
+            )
+    return regions
+
+
+def theme_summary(presentation: Any) -> Dict[str, Any]:
+    """Extract theme colors and fonts from the first slide master."""
+    summary: Dict[str, Any] = {"colors": {}, "fonts": {}}
+    try:
+        master = presentation.slide_masters[0]
+        theme_part = None
+        for rel in master.part.rels.values():
+            if rel.reltype.endswith("/theme"):
+                theme_part = rel.target_part
+                break
+        if theme_part is None:
+            return summary
+        root = etree.fromstring(theme_part.blob)
+        ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        scheme = root.find(".//a:clrScheme", ns)
+        if scheme is not None:
+            for child in scheme:
+                name = svg_local_name(child.tag)
+                color = child.find("a:srgbClr", ns)
+                system = child.find("a:sysClr", ns)
+                if color is not None:
+                    summary["colors"][name] = color.get("val")
+                elif system is not None:
+                    summary["colors"][name] = system.get("lastClr") or system.get("val")
+        font_scheme = root.find(".//a:fontScheme", ns)
+        if font_scheme is not None:
+            for role in ("majorFont", "minorFont"):
+                node = font_scheme.find("a:" + role, ns)
+                if node is None:
+                    continue
+                latin = node.find("a:latin", ns)
+                east_asian = node.find("a:ea", ns)
+                summary["fonts"][role] = {
+                    "latin": latin.get("typeface") if latin is not None else None,
+                    "east_asian": east_asian.get("typeface") if east_asian is not None else None,
+                }
+    except Exception:
+        return summary
+    return summary
+
+
+class SvgSlideConverter:
+    def __init__(
+        self,
+        manifest: DeckManifest,
+        measurer: TextMeasurer,
+        report: ConversionReport,
+        protected: Sequence[Mapping[str, Any]],
+        scale: Tuple[float, float],
+    ) -> None:
+        self.manifest = manifest
+        self.measurer = measurer
+        self.report = report
+        self.protected = list(protected)
+        self.scale_x, self.scale_y = scale
+        self.gradients: Dict[str, Dict[str, Any]] = {}
+        self.page = ""
+        self.element_count = 0
+
+    # -- geometry helpers ---------------------------------------------------
+
+    def emu_x(self, value: float) -> Any:
+        return Emu(int(round(value * self.scale_x * EMU_PER_PX)))
+
+    def emu_y(self, value: float) -> Any:
+        return Emu(int(round(value * self.scale_y * EMU_PER_PX)))
+
+    def record_bounds(self, name: str, x: float, y: float, width: float, height: float) -> None:
+        if x < -0.5 or y < -0.5 or x + width > CANVAS_WIDTH + 0.5 or y + height > CANVAS_HEIGHT + 0.5:
+            self.report.out_of_bounds.append(
+                {"slide": self.page, "element": name, "x": round(x, 1), "y": round(y, 1), "width": round(width, 1), "height": round(height, 1)}
+            )
+        for region in self.protected:
+            if (
+                x < region["x"] + region["width"]
+                and x + width > region["x"]
+                and y < region["y"] + region["height"]
+                and y + height > region["y"]
+            ):
+                self.report.protected_collisions.append(
+                    {"slide": self.page, "element": name, "protected": region["name"], "source": region["source"]}
+                )
+
+    def count_element(self, tag: str) -> None:
+        self.element_count += 1
+        if self.element_count > MAX_SVG_ELEMENTS:
+            raise PresentationError(self.page + ": SVG contains more than " + str(MAX_SVG_ELEMENTS) + " elements")
+        self.report.element_counts[tag] = self.report.element_counts.get(tag, 0) + 1
+
+    # -- fill / line ---------------------------------------------------------
+
+    def apply_fill(self, shape: Any, style: SvgStyle, fill_value: Optional[str]) -> None:
+        fill = shape.fill
+        if not fill_value:
+            fill.background()
+            return
+        match = re.fullmatch(r"url\(#([A-Za-z0-9_-]+)\)", fill_value)
+        if match:
+            gradient = self.gradients.get(match.group(1))
+            if gradient is None:
+                raise PresentationError(self.page + ": unknown gradient " + match.group(1))
+            fill.gradient()
+            fill.gradient_angle = gradient["angle"]
+            gs_lst = fill._fill._gradFill.gsLst  # noqa: SLF001 - python-pptx exposes no stop API
+            for gs in list(gs_lst):
+                gs_lst.remove(gs)
+            for offset, color, opacity in gradient["stops"]:
+                gs = etree.SubElement(gs_lst, qn("a:gs"))
+                gs.set("pos", str(int(round(offset * 100000))))
+                srgb = etree.SubElement(gs, qn("a:srgbClr"))
+                srgb.set("val", color)
+                if opacity < 1.0:
+                    alpha = etree.SubElement(srgb, qn("a:alpha"))
+                    alpha.set("val", str(int(round(opacity * 100000))))
+            return
+        fill.solid()
+        fill.fore_color.rgb = RGBColor.from_string(fill_value)
+        if style.fill_opacity < 1.0:
+            srgb = fill._xPr.find(qn("a:solidFill")).find(qn("a:srgbClr"))  # noqa: SLF001
+            alpha = etree.SubElement(srgb, qn("a:alpha"))
+            alpha.set("val", str(int(round(style.fill_opacity * 100000))))
+
+    def apply_line(self, shape: Any, style: SvgStyle) -> None:
+        if style.stroke is None:
+            shape.line.fill.background()
+            return
+        shape.line.color.rgb = RGBColor.from_string(style.stroke)
+        shape.line.width = px_to_emu(style.stroke_width)
+
+    def add_autoshape(self, slide: Any, kind: Any, x: float, y: float, width: float, height: float, style: SvgStyle, fill_value: Optional[str], name: str) -> Any:
+        shape = slide.shapes.add_shape(kind, self.emu_x(x), self.emu_y(y), self.emu_x(width), self.emu_y(height))
+        shape.name = name
+        shape.shadow.inherit = False
+        self.apply_fill(shape, style, fill_value)
+        self.apply_line(shape, style)
+        self.record_bounds(name, x, y, width, height)
+        return shape
+
+    # -- element handlers ----------------------------------------------------
+
+    def handle_defs(self, defs: Any) -> None:
+        for child in defs:
+            tag = svg_local_name(child.tag)
+            if tag != "linearGradient":
+                raise PresentationError(self.page + ": <defs> may only contain <linearGradient>, got <" + tag + ">")
+            gradient_id = child.get("id")
+            if not gradient_id:
+                raise PresentationError(self.page + ": linearGradient requires an id")
+            stops: List[Tuple[float, str, float]] = []
+            for stop in child:
+                if svg_local_name(stop.tag) != "stop":
+                    raise PresentationError(self.page + ": linearGradient may only contain <stop>")
+                raw_offset = str(stop.get("offset", "0")).strip()
+                offset = float(raw_offset.rstrip("%")) / 100.0 if raw_offset.endswith("%") else float(raw_offset)
+                color = parse_svg_color(stop.get("stop-color", "#000000"), self.page + " stop-color") or "000000"
+                opacity = float(stop.get("stop-opacity", "1"))
+                stops.append((max(0.0, min(1.0, offset)), color, max(0.0, min(1.0, opacity))))
+            if len(stops) < 2:
+                raise PresentationError(self.page + ": linearGradient requires at least two stops")
+
+            def coordinate(name: str, default: str) -> float:
+                raw = str(child.get(name, default)).strip()
+                return float(raw.rstrip("%")) if raw.endswith("%") else float(raw) * 100.0
+
+            x1, y1 = coordinate("x1", "0%"), coordinate("y1", "0%")
+            x2, y2 = coordinate("x2", "100%"), coordinate("y2", "0%")
+            angle = math.degrees(math.atan2(y2 - y1, x2 - x1)) % 360.0
+            self.gradients[gradient_id] = {"stops": stops, "angle": angle}
+
+    def handle_rect(self, slide: Any, element: Any, style: SvgStyle) -> None:
+        name = element.get("id") or "Rect"
+        x = parse_svg_length(element.get("x", 0), self.page + " rect.x") + style.dx
+        y = parse_svg_length(element.get("y", 0), self.page + " rect.y") + style.dy
+        width = parse_svg_length(element.get("width"), self.page + " rect.width")
+        height = parse_svg_length(element.get("height"), self.page + " rect.height")
+        if width <= 0 or height <= 0:
+            raise PresentationError(self.page + ": rect " + name + " must have positive width and height")
+        role = (element.get("data-arcforge") or "").strip().lower()
+        if role == "background":
+            fill_value = style.fill
+            if fill_value and fill_value.startswith("url("):
+                shape = self.add_autoshape(slide, MSO_SHAPE.RECTANGLE, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT, style, fill_value, "Background")
+                shape.line.fill.background()
+            elif fill_value:
+                slide.background.fill.solid()
+                slide.background.fill.fore_color.rgb = RGBColor.from_string(fill_value)
+            return
+        if role == "chart":
+            self.handle_chart(slide, element, name, x, y, width, height)
+            return
+        if role:
+            raise PresentationError(self.page + ": unsupported data-arcforge role '" + role + "'")
+        radius = parse_svg_length(element.get("rx", 0), self.page + " rect.rx")
+        if radius > 0:
+            shape = self.add_autoshape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, x, y, width, height, style, style.fill, name)
+            shape.adjustments[0] = max(0.0, min(0.5, radius / min(width, height)))
+        else:
+            self.add_autoshape(slide, MSO_SHAPE.RECTANGLE, x, y, width, height, style, style.fill, name)
+
+    def handle_ellipse(self, slide: Any, element: Any, style: SvgStyle) -> None:
+        name = element.get("id") or "Oval"
+        cx = parse_svg_length(element.get("cx", 0), self.page + " cx") + style.dx
+        cy = parse_svg_length(element.get("cy", 0), self.page + " cy") + style.dy
+        if svg_local_name(element.tag) == "circle":
+            rx = ry = parse_svg_length(element.get("r"), self.page + " r")
+        else:
+            rx = parse_svg_length(element.get("rx"), self.page + " rx")
+            ry = parse_svg_length(element.get("ry"), self.page + " ry")
+        if rx <= 0 or ry <= 0:
+            raise PresentationError(self.page + ": " + name + " must have a positive radius")
+        self.add_autoshape(slide, MSO_SHAPE.OVAL, cx - rx, cy - ry, 2 * rx, 2 * ry, style, style.fill, name)
+
+    def handle_line(self, slide: Any, element: Any, style: SvgStyle) -> None:
+        name = element.get("id") or "Line"
+        x1 = parse_svg_length(element.get("x1", 0), self.page + " x1") + style.dx
+        y1 = parse_svg_length(element.get("y1", 0), self.page + " y1") + style.dy
+        x2 = parse_svg_length(element.get("x2", 0), self.page + " x2") + style.dx
+        y2 = parse_svg_length(element.get("y2", 0), self.page + " y2") + style.dy
+        connector = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, self.emu_x(x1), self.emu_y(y1), self.emu_x(x2), self.emu_y(y2))
+        connector.name = name
+        if style.stroke is None:
+            connector.line.fill.background()
+        else:
+            connector.line.color.rgb = RGBColor.from_string(style.stroke)
+            connector.line.width = px_to_emu(style.stroke_width)
+        self.record_bounds(name, min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+
+    def handle_path(self, slide: Any, element: Any, style: SvgStyle) -> None:
+        name = element.get("id") or "Freeform"
+        closed = False
+        points: List[Tuple[float, float]] = []
+        if svg_local_name(element.tag) == "polygon":
+            numbers = [float(value) for value in re.findall(r"-?\d+(?:\.\d+)?(?:e-?\d+)?", element.get("points", ""))]
+            if len(numbers) < 6 or len(numbers) % 2:
+                raise PresentationError(self.page + ": polygon " + name + " needs at least three x,y pairs")
+            points = list(zip(numbers[0::2], numbers[1::2]))
+            closed = True
+        else:
+            data = element.get("d", "")
+            tokens = re.findall(r"[A-Za-z]|-?\d+(?:\.\d+)?(?:e-?\d+)?", data)
+            command = None
+            index = 0
+            current = (0.0, 0.0)
+            while index < len(tokens):
+                token = tokens[index]
+                if token.isalpha():
+                    if token in ("Z", "z"):
+                        closed = True
+                        index += 1
+                        continue
+                    if token not in ("M", "L", "m", "l", "H", "V", "h", "v"):
+                        raise PresentationError(
+                            self.page + ": path " + name + " uses unsupported command '" + token + "'; only M, L, H, V and Z are allowed"
+                        )
+                    command = token
+                    index += 1
+                    continue
+                if command is None:
+                    raise PresentationError(self.page + ": path " + name + " must start with M")
+                if command in ("H", "h", "V", "v"):
+                    value = float(token)
+                    index += 1
+                    if command == "H":
+                        current = (value, current[1])
+                    elif command == "h":
+                        current = (current[0] + value, current[1])
+                    elif command == "V":
+                        current = (current[0], value)
+                    else:
+                        current = (current[0], current[1] + value)
+                    points.append(current)
+                    continue
+                if index + 1 >= len(tokens):
+                    raise PresentationError(self.page + ": path " + name + " has a dangling coordinate")
+                px, py = float(token), float(tokens[index + 1])
+                index += 2
+                if command in ("m", "l"):
+                    current = (current[0] + px, current[1] + py)
+                else:
+                    current = (px, py)
+                points.append(current)
+                if command == "M":
+                    command = "L"
+                elif command == "m":
+                    command = "l"
+            if len(points) < 2:
+                raise PresentationError(self.page + ": path " + name + " needs at least two points")
+        points = [(px + style.dx, py + style.dy) for px, py in points]
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        builder = slide.shapes.build_freeform(self.emu_x(points[0][0]), self.emu_y(points[0][1]), scale=1.0)
+        builder.add_line_segments([(self.emu_x(px), self.emu_y(py)) for px, py in points[1:]], close=closed)
+        shape = builder.convert_to_shape()
+        shape.name = name
+        shape.shadow.inherit = False
+        self.apply_fill(shape, style, style.fill if closed else None)
+        self.apply_line(shape, style)
+        self.record_bounds(name, min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
+
+    def apply_font(self, run: Any, family: str, size_px: float, bold: bool, color: str) -> None:
+        font = run.font
+        font.size = Pt(size_px * 0.75)
+        font.bold = bold
+        font.color.rgb = RGBColor.from_string(color)
+        font.name = family
+        rPr = run._r.get_or_add_rPr()  # noqa: SLF001 - python-pptx only writes a:latin
+        for tag in ("a:latin", "a:ea", "a:cs"):
+            node = rPr.find(qn(tag))
+            if node is None:
+                node = etree.SubElement(rPr, qn(tag))
+            node.set("typeface", family)
+
+    def handle_text(self, slide: Any, element: Any, style: SvgStyle) -> None:
+        name = element.get("id") or "Text"
+        x = parse_svg_length(element.get("x", 0), self.page + " text.x") + style.dx
+        baseline = parse_svg_length(element.get("y", 0), self.page + " text.y") + style.dy
+        size = style.font_size
+        bold = style.font_weight in ("bold", "bolder", "600", "700", "800", "900")
+        family = style.font_family
+        lines: List[Tuple[str, float]] = []
+        spans = [child for child in element if svg_local_name(child.tag) == "tspan"]
+        for child in element:
+            if svg_local_name(child.tag) != "tspan":
+                raise PresentationError(self.page + ": <text> " + name + " may only contain <tspan>")
+        if spans:
+            leading = (element.text or "").strip()
+            if leading:
+                lines.append((leading, baseline))
+            current = baseline
+            for span in spans:
+                if len(span):
+                    raise PresentationError(self.page + ": nested <tspan> is not supported in " + name)
+                if span.get("y") is not None:
+                    current = parse_svg_length(span.get("y"), self.page + " tspan.y") + style.dy
+                elif span.get("dy") is not None:
+                    current += parse_svg_length(span.get("dy"), self.page + " tspan.dy")
+                elif lines:
+                    current += size * 1.2
+                lines.append((" ".join((span.text or "").split()), current))
+        else:
+            lines.append((" ".join((element.text or "").split()), baseline))
+        lines = [(text, y) for text, y in lines if text]
+        if not lines:
+            return
+        declared_width = element.get("data-width")
+        width_limit = parse_svg_length(declared_width, self.page + " data-width") if declared_width else None
+        wrapped: List[str] = []
+        for text, _ in lines:
+            if width_limit:
+                wrapped.extend(self.measurer.wrap(text, family, bold, size, width_limit))
+            else:
+                wrapped.append(text)
+        widest = max(self.measurer.width(text, family, bold, size) for text in wrapped)
+        if width_limit and len(wrapped) > len(lines):
+            self.report.text_overflows.append(
+                {"slide": self.page, "element": name, "declared_width": width_limit, "needed_width": round(widest, 1), "wrapped_lines": len(wrapped), "declared_lines": len(lines)}
+            )
+        line_gap = (lines[1][1] - lines[0][1]) if len(lines) > 1 else size * 1.2
+        if line_gap <= 0:
+            line_gap = size * 1.2
+        box_width = width_limit if width_limit else widest + size * 0.4
+        ascent = size * 0.88
+        top = lines[0][1] - ascent
+        height = line_gap * (len(wrapped) - 1) + size * 1.25
+        if style.text_anchor == "middle":
+            left = x - box_width / 2
+            alignment = PP_ALIGN.CENTER
+        elif style.text_anchor == "end":
+            left = x - box_width
+            alignment = PP_ALIGN.RIGHT
+        else:
+            left = x
+            alignment = PP_ALIGN.LEFT
+        color = style.fill if style.fill and not style.fill.startswith("url(") else "000000"
+        box = slide.shapes.add_textbox(self.emu_x(left), self.emu_y(top), self.emu_x(box_width), self.emu_y(height))
+        box.name = name
+        frame = box.text_frame
+        frame.word_wrap = bool(width_limit)
+        frame.vertical_anchor = MSO_ANCHOR.TOP
+        frame.margin_left = frame.margin_right = frame.margin_top = frame.margin_bottom = 0
+        for index, text in enumerate(wrapped):
+            paragraph = frame.paragraphs[0] if index == 0 else frame.add_paragraph()
+            paragraph.alignment = alignment
+            paragraph.line_spacing = Pt(line_gap * 0.75)
+            run = paragraph.add_run()
+            run.text = text
+            self.apply_font(run, family, size, bold, color)
+        self.record_bounds(name, left, top, box_width, height)
+
+    def handle_image(self, slide: Any, element: Any, style: SvgStyle) -> None:
+        name = element.get("id") or "Picture"
+        for forbidden in ("href", XLINK_NS + "href"):
+            if element.get(forbidden) is not None:
+                raise PresentationError(self.page + ": <image> must reference an asset with data-asset, not href")
+        asset_id = (element.get("data-asset") or "").strip()
+        if not asset_id:
+            raise PresentationError(self.page + ": <image> " + name + " requires data-asset")
+        path = self.manifest.assets.get(asset_id)
+        if path is None:
+            raise PresentationError(self.page + ": data-asset '" + asset_id + "' is not declared in the manifest assets")
+        x = parse_svg_length(element.get("x", 0), self.page + " image.x") + style.dx
+        y = parse_svg_length(element.get("y", 0), self.page + " image.y") + style.dy
+        width = parse_svg_length(element.get("width"), self.page + " image.width")
+        height = parse_svg_length(element.get("height"), self.page + " image.height")
+        if width <= 0 or height <= 0:
+            raise PresentationError(self.page + ": image " + name + " must have positive width and height")
+        with Image.open(path) as image:
+            image_width, image_height = image.size
+        if image_width <= 0 or image_height <= 0:
+            raise PresentationError("Image has invalid dimensions: " + str(path))
+        image_ratio = image_width / image_height
+        frame_ratio = width / height
+        mode = (element.get("preserveAspectRatio") or "xMidYMid meet").strip().lower()
+        if mode == "none":
+            raise PresentationError(self.page + ": image " + name + " must keep its aspect ratio (meet or slice)")
+        if "slice" in mode:
+            picture = slide.shapes.add_picture(str(path), self.emu_x(x), self.emu_y(y), self.emu_x(width), self.emu_y(height))
+            if image_ratio > frame_ratio:
+                crop = (1.0 - frame_ratio / image_ratio) / 2.0
+                picture.crop_left = picture.crop_right = crop
+            elif image_ratio < frame_ratio:
+                crop = (1.0 - image_ratio / frame_ratio) / 2.0
+                picture.crop_top = picture.crop_bottom = crop
+            bounds = (x, y, width, height)
+        else:
+            if image_ratio >= frame_ratio:
+                fitted_width, fitted_height = width, width / image_ratio
+            else:
+                fitted_width, fitted_height = height * image_ratio, height
+            left = x + (width - fitted_width) / 2
+            top = y + (height - fitted_height) / 2
+            picture = slide.shapes.add_picture(str(path), self.emu_x(left), self.emu_y(top), self.emu_x(fitted_width), self.emu_y(fitted_height))
+            bounds = (left, top, fitted_width, fitted_height)
+        picture.name = name
+        self.record_bounds(name, *bounds)
+
+    def handle_chart(self, slide: Any, element: Any, name: str, x: float, y: float, width: float, height: float) -> None:
+        raw = element.get("data-chart")
+        if not raw:
+            raise PresentationError(self.page + ": chart " + name + " requires data-chart JSON")
+        try:
+            spec = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise PresentationError(self.page + ": chart " + name + " data-chart is not valid JSON: " + str(error)) from error
+        if not isinstance(spec, dict):
+            raise PresentationError(self.page + ": chart " + name + " data-chart must be an object")
+        chart_kind = str(spec.get("type", "column")).strip().lower()
+        if chart_kind not in CHART_TYPES_V3:
+            raise PresentationError(self.page + ": chart " + name + " type must be one of " + ", ".join(sorted(CHART_TYPES_V3)))
+        categories = spec.get("categories")
+        series_list = spec.get("series")
+        if not isinstance(categories, list) or not categories:
+            raise PresentationError(self.page + ": chart " + name + " requires categories")
+        if not isinstance(series_list, list) or not series_list:
+            raise PresentationError(self.page + ": chart " + name + " requires series")
+        data = ChartData()
+        data.categories = [str(item) for item in categories]
+        for series in series_list:
+            if not isinstance(series, dict) or "values" not in series:
+                raise PresentationError(self.page + ": chart " + name + " series entries need name and values")
+            values = series["values"]
+            if not isinstance(values, list) or len(values) != len(categories):
+                raise PresentationError(self.page + ": chart " + name + " series values must match the category count")
+            try:
+                numbers = [float(value) for value in values]
+            except (TypeError, ValueError) as error:
+                raise PresentationError(self.page + ": chart " + name + " series values must be numbers") from error
+            data.add_series(str(series.get("name", "Series")), numbers)
+        graphic = slide.shapes.add_chart(chart_type_value(chart_kind), self.emu_x(x), self.emu_y(y), self.emu_x(width), self.emu_y(height), data)
+        graphic.name = name
+        chart = graphic.chart
+        chart.has_legend = len(series_list) > 1 or chart_kind in ("pie", "doughnut")
+        if chart.has_legend:
+            chart.legend.position = XL_LEGEND_POSITION.TOP if chart_kind not in ("pie", "doughnut") else XL_LEGEND_POSITION.RIGHT
+            chart.legend.include_in_layout = False
+            chart.legend.font.size = Pt(10)
+        chart.font.name = self.manifest.fonts.body[0]
+        chart.font.size = Pt(10)
+        colors = spec.get("colors") or []
+        if chart_kind in ("pie", "doughnut"):
+            plot = chart.plots[0]
+            plot.has_data_labels = True
+            plot.data_labels.show_percentage = True
+            plot.data_labels.show_legend_key = False
+        else:
+            for index, series in enumerate(chart.series):
+                color = colors[index] if index < len(colors) else None
+                if color:
+                    series.format.fill.solid()
+                    series.format.fill.fore_color.rgb = RGBColor.from_string(parse_svg_color(str(color), self.page + " chart color") or "000000")
+            chart.value_axis.has_major_gridlines = True
+            chart.value_axis.major_gridlines.format.line.color.rgb = RGBColor.from_string("E5E9F0")
+            chart.value_axis.format.line.fill.background()
+        self.record_bounds(name, x, y, width, height)
+
+    # -- traversal -----------------------------------------------------------
+
+    def walk(self, slide: Any, element: Any, inherited: SvgStyle) -> None:
+        tag = svg_local_name(element.tag)
+        if not element.tag.startswith(SVG_NS) and element.tag != tag:
+            raise PresentationError(self.page + ": foreign namespace element <" + element.tag + "> is not supported")
+        if tag not in SUPPORTED_SVG_ELEMENTS:
+            raise PresentationError(self.page + ": unsupported SVG element <" + tag + ">")
+        self.count_element(tag)
+        style = inherited.inherit(element, self.page)
+        if tag == "defs":
+            self.handle_defs(element)
+        elif tag in ("svg", "g"):
+            for child in element:
+                self.walk(slide, child, style)
+        elif tag == "rect":
+            self.handle_rect(slide, element, style)
+        elif tag in ("circle", "ellipse"):
+            self.handle_ellipse(slide, element, style)
+        elif tag == "line":
+            self.handle_line(slide, element, style)
+        elif tag in ("path", "polygon"):
+            self.handle_path(slide, element, style)
+        elif tag == "text":
+            self.handle_text(slide, element, style)
+        elif tag == "image":
+            self.handle_image(slide, element, style)
+        elif tag in ("title", "desc", "linearGradient", "stop"):
+            return
+
+    def convert(self, slide: Any, svg_path: Path, slide_id: str) -> None:
+        self.page = slide_id
+        self.gradients = {}
+        self.element_count = 0
+        if svg_path.stat().st_size > MAX_SVG_BYTES:
+            raise PresentationError(slide_id + ": SVG exceeds " + str(MAX_SVG_BYTES // 1024) + " KiB")
+        raw = svg_path.read_bytes()
+        if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:
+            raise PresentationError(slide_id + ": DOCTYPE and entity declarations are not allowed")
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as error:
+            raise PresentationError(slide_id + ": SVG is not well-formed XML: " + str(error)) from error
+        if svg_local_name(root.tag) != "svg":
+            raise PresentationError(slide_id + ": root element must be <svg>")
+        view_box = [float(value) for value in re.split(r"[\s,]+", (root.get("viewBox") or "").strip()) if value]
+        if view_box != [0.0, 0.0, CANVAS_WIDTH, CANVAS_HEIGHT]:
+            raise PresentationError(slide_id + ": viewBox must be exactly '0 0 1280 720'")
+        self.walk(slide, root, SvgStyle(fill="000000"))
+        if self.manifest.stage == "plan":
+            self.check_plan_stage(root, slide_id)
+
+    def check_plan_stage(self, root: Any, slide_id: str) -> None:
+        for element in root.iter():
+            tag = svg_local_name(element.tag)
+            if tag == "linearGradient":
+                raise PresentationError(slide_id + ": stage=plan pages must not use gradients")
+            for attribute in ("fill", "stroke", "stop-color"):
+                value = element.get(attribute)
+                if not value or value.strip() in ("none", "transparent") or value.startswith("url("):
+                    continue
+                color = parse_svg_color(value, slide_id + " " + attribute)
+                if color is None:
+                    continue
+                r, g, b = int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16)
+                if max(r, g, b) - min(r, g, b) > 24:
+                    raise PresentationError(
+                        slide_id + ": stage=plan pages must use grayscale colors only, found #" + color + " on <" + tag + ">"
+                    )
+
+
+def open_deck_base(manifest: DeckManifest) -> Tuple[Any, Any, List[Dict[str, Any]], int]:
+    if manifest.template is not None:
+        try:
+            presentation = Presentation(str(manifest.template))
+        except Exception as error:
+            raise PresentationError("Failed to open template presentation: " + str(error)) from error
+        removed = remove_all_slides(presentation)
+        layout = blank_layout(presentation, str(manifest.style.get("layout") or "") or None)
+        protected = protected_regions_px(presentation, layout)
+        return presentation, layout, protected, removed
+    presentation = Presentation()
+    presentation.slide_width = Inches(SLIDE_WIDTH)
+    presentation.slide_height = Inches(SLIDE_HEIGHT)
+    strip_footer_placeholders(presentation)
+    layout = presentation.slide_layouts[6]
+    return presentation, layout, [], 0
+
+
+def fix_chart_axis_ids(presentation: Any) -> None:
+    """python-pptx emits random axId values that may be negative; OOXML requires UInt32."""
+    counter = 100_000_000
+    for slide in presentation.slides:
+        for shape in slide.shapes:
+            if not getattr(shape, "has_chart", False):
+                continue
+            chart_space = shape.chart._chartSpace  # noqa: SLF001
+            mapping: Dict[str, str] = {}
+            for node in chart_space.iter(qn("c:axId"), qn("c:crossAx")):
+                old = node.get("val")
+                if old not in mapping:
+                    counter += 1
+                    mapping[old] = str(counter)
+                node.set("val", mapping[old])
+
+
+def create_svg_deck(spec: Mapping[str, Any], spec_dir: Path) -> Tuple[Any, Dict[str, Any]]:
+    manifest = load_deck_manifest(spec, spec_dir)
+    presentation, layout, protected, removed = open_deck_base(manifest)
+    apply_metadata(presentation, {"metadata": manifest.metadata})
+    scale = (
+        float(presentation.slide_width) / (CANVAS_WIDTH * EMU_PER_PX),
+        float(presentation.slide_height) / (CANVAS_HEIGHT * EMU_PER_PX),
+    )
+    measurer = TextMeasurer()
+    report = ConversionReport()
+    converter = SvgSlideConverter(manifest, measurer, report, protected, scale)
+    slide_ids: List[str] = []
+    for entry in manifest.slides:
+        slide = presentation.slides.add_slide(layout)
+        converter.convert(slide, entry["svg"], entry["slide_id"])
+        slide.name = entry["slide_id"]
+        if entry.get("notes"):
+            apply_notes(slide, entry["notes"])
+        slide_ids.append(entry["slide_id"])
+    fix_chart_axis_ids(presentation)
+    report.missing_fonts = list(measurer.missing_fonts)
+    report.measured_with_fonts = measurer.measured_with_fonts
+    summary = {
+        "schema_version": DECK_SCHEMA_VERSION,
+        "mode": manifest.mode,
+        "stage": manifest.stage,
+        "template": str(manifest.template) if manifest.template else None,
+        "template_slides_removed": removed,
+        "layout": layout.name,
+        "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},
+        "slide_ids": slide_ids,
+        "protected_regions": protected,
+        "element_counts": report.element_counts,
+        "text_overflows": report.text_overflows,
+        "out_of_bounds": report.out_of_bounds,
+        "protected_collisions": report.protected_collisions,
+        "missing_fonts": report.missing_fonts,
+        "measured_with_fonts": report.measured_with_fonts,
+        "warnings": report.warnings,
+    }
+    return presentation, summary
+
+
+def is_svg_deck_spec(spec: Mapping[str, Any]) -> bool:
+    try:
+        return int(spec.get("schema_version", 1)) >= DECK_SCHEMA_VERSION
+    except (TypeError, ValueError):
+        return False
+
+
 def normalized_output_path(path_value: str, suffix: str) -> Path:
     path = Path(path_value).expanduser().resolve()
     if path.suffix.lower() != suffix:
@@ -1195,6 +2373,23 @@ def inspect_presentation(path: Path) -> Dict[str, Any]:
             }
         )
 
+    layouts: List[Dict[str, Any]] = []
+    for layout_index, layout in enumerate(presentation.slide_layouts):
+        placeholders = []
+        for shape in layout.placeholders:
+            try:
+                placeholders.append(str(shape.placeholder_format.type).split(".")[-1].split(" ")[0])
+            except Exception:
+                placeholders.append("unknown")
+        layouts.append({"index": layout_index, "name": layout.name, "placeholders": placeholders})
+    try:
+        base_layout = blank_layout(presentation)
+        protected = protected_regions_px(presentation, base_layout)
+        base_layout_name = base_layout.name
+    except PresentationError:
+        protected = []
+        base_layout_name = None
+
     return {
         "path": str(path.resolve()),
         "size_bytes": path.stat().st_size,
@@ -1211,6 +2406,14 @@ def inspect_presentation(path: Path) -> Dict[str, Any]:
         "missing_title_slides": [
             item["number"] for item in slides if not item["title"]
         ],
+        "template": {
+            "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},
+            "aspect_ratio": round(float(presentation.slide_width) / float(presentation.slide_height), 4),
+            "layouts": layouts,
+            "base_layout": base_layout_name,
+            "protected_regions": protected,
+            "theme": theme_summary(presentation),
+        },
         "visually_rendered": False,
     }
 
@@ -1304,12 +2507,52 @@ def render_pdf(input_path: Path, output_path: Path, force: bool) -> Dict[str, An
     }
 
 
+def apply_template_override(spec: Dict[str, Any], template: Optional[str]) -> Dict[str, Any]:
+    if not template:
+        return spec
+    if not is_svg_deck_spec(spec):
+        raise PresentationError("--template is only supported for schema_version 3 SVG deck manifests")
+    updated = dict(spec)
+    updated["mode"] = "template"
+    updated["template"] = str(Path(template).expanduser().resolve())
+    return updated
+
+
 def run_create(args: argparse.Namespace) -> Dict[str, Any]:
     spec, spec_path = load_json_object(args.spec)
     output_path = normalized_output_path(args.output, ".pptx")
+    spec = apply_template_override(spec, getattr(args, "template", None))
+    if is_svg_deck_spec(spec):
+        presentation, deck = create_svg_deck(spec, spec_path.parent)
+        atomic_save(presentation, output_path, args.force)
+        return {
+            "action": "created",
+            "deck": deck,
+            "presentation": inspect_presentation(output_path),
+        }
     presentation = create_presentation(spec, spec_path.parent)
     atomic_save(presentation, output_path, args.force)
     return {"action": "created", "presentation": inspect_presentation(output_path)}
+
+
+def run_validate(args: argparse.Namespace) -> Dict[str, Any]:
+    """Convert an SVG deck manifest in memory and report every issue without writing a file."""
+    spec, spec_path = load_json_object(args.spec)
+    spec = apply_template_override(spec, getattr(args, "template", None))
+    if not is_svg_deck_spec(spec):
+        raise PresentationError("validate requires a schema_version 3 SVG deck manifest")
+    _presentation, deck = create_svg_deck(spec, spec_path.parent)
+    issues = (
+        len(deck["text_overflows"])
+        + len(deck["out_of_bounds"])
+        + len(deck["protected_collisions"])
+    )
+    return {
+        "action": "validated",
+        "valid": True,
+        "issue_count": issues,
+        "deck": deck,
+    }
 
 
 def run_inspect(args: argparse.Namespace) -> Dict[str, Any]:
@@ -1337,9 +2580,20 @@ def build_parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--spec", required=True, help="UTF-8 JSON specification")
     create_parser.add_argument("--output", required=True, help="Destination .pptx path")
     create_parser.add_argument(
+        "--template",
+        help="Existing .pptx used as the base deck (masters, layouts, theme) for SVG deck manifests",
+    )
+    create_parser.add_argument(
         "--force", action="store_true", help="Overwrite the exact output path"
     )
     create_parser.set_defaults(handler=run_create)
+
+    validate_parser = subparsers.add_parser(
+        "validate", help="Convert an SVG deck manifest in memory and report layout issues"
+    )
+    validate_parser.add_argument("--spec", required=True, help="UTF-8 JSON deck manifest")
+    validate_parser.add_argument("--template", help="Existing .pptx used as the base deck")
+    validate_parser.set_defaults(handler=run_validate)
 
     inspect_parser = subparsers.add_parser(
         "inspect", help="Print a structural deck summary"

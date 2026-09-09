@@ -360,6 +360,11 @@ fn builtin_seed_installs_arcforge_office_skills_with_helpers() {
             assert!(skill_dir.join("references/example-patch.json").is_file());
             assert!(skill_dir.join("references/code-api.md").is_file());
         }
+        if name == "arcforge-slides" {
+            assert!(skill_dir.join("references/prompts.md").is_file());
+            assert!(skill_dir.join("references/example-cover.svg").is_file());
+            assert!(skill_dir.join("references/example-content.svg").is_file());
+        }
         assert!(skill_dir.join("scripts/requirements.txt").is_file());
         assert!(skill_dir.join("_arcforge_builtin.json").is_file());
 

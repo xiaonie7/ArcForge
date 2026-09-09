@@ -65,20 +65,31 @@ test("built-in spreadsheet skill is registered with deterministic helpers", () =
 
 test("built-in slides skill is registered with structural and visual verification paths", () => {
   assert.match(slidesSkill, /^---\r?\nname: arcforge-slides\r?\n/m);
-  assert.match(slidesSkill, /"OfficeRuntime" tool/);
+  assert.match(slidesSkill, /`OfficeRuntime` tool/);
   assert.match(slidesSkill, /action=create/);
   assert.match(slidesSkill, /action=inspect/);
+  assert.match(slidesSkill, /action=validate/);
   assert.match(slidesSkill, /action=render/);
+  assert.match(slidesSkill, /schema_version: 3/);
+  assert.match(slidesSkill, /mode: "template"/);
+  assert.match(slidesSkill, /data-asset/);
+  assert.match(slidesSkill, /references\/prompts\.md/);
   assert.doesNotMatch(slidesSkill, /python presentation\.py/);
-  assert.match(slidesSkill, /not visually rendered/);
+  assert.match(slidesSkill, /only a rendered preview counts as visual verification/);
   assert.match(presentationScript, /from pptx import Presentation/);
   assert.match(presentationScript, /def inspect_presentation/);
   assert.match(presentationScript, /def render_pdf/);
+  assert.match(presentationScript, /class SvgSlideConverter/);
+  assert.match(presentationScript, /def create_svg_deck/);
+  assert.match(presentationScript, /def run_validate/);
+  assert.match(presentationScript, /DECK_SCHEMA_VERSION = 3/);
   assert.match(builtinRegistrySource, /name: "arcforge-slides"/);
   assert.match(
     builtinRegistrySource,
     /prompt\/skills\/arcforge-slides\/scripts\/presentation\.py/,
   );
+  assert.match(builtinRegistrySource, /arcforge-slides\/references\/prompts\.md/);
+  assert.match(builtinRegistrySource, /arcforge-slides\/references\/example-cover\.svg/);
 });
 
 test("built-in document skill uses the controlled Word OfficeRuntime workflow", () => {

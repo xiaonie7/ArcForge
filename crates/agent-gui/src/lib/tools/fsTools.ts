@@ -83,7 +83,7 @@ type SystemListSkillFilesResponse = {
 };
 
 type ReadCommandResponse = {
-  kind: "text" | "image" | "pdf" | "notebook" | "word" | "spreadsheet" | "archive";
+  kind: "text" | "image" | "pdf" | "notebook" | "word" | "spreadsheet" | "presentation" | "archive";
   path: string;
   content?: string | null;
   truncated?: boolean | null;
@@ -992,20 +992,29 @@ export function createFsTools(params: {
       };
     }
 
-    if (res.kind === "word" || res.kind === "spreadsheet" || res.kind === "archive") {
+    if (
+      res.kind === "word" ||
+      res.kind === "spreadsheet" ||
+      res.kind === "presentation" ||
+      res.kind === "archive"
+    ) {
       const label =
         res.kind === "word"
           ? "Word document"
           : res.kind === "spreadsheet"
             ? "spreadsheet"
-            : "archive";
+            : res.kind === "presentation"
+              ? "PowerPoint presentation"
+              : "archive";
       const details: ReadDocumentResultDetails = {
         kind:
           res.kind === "word"
             ? "read_word"
             : res.kind === "spreadsheet"
               ? "read_spreadsheet"
-              : "read_archive",
+              : res.kind === "presentation"
+                ? "read_presentation"
+                : "read_archive",
         ...pathDetails(resolved, res.fileId),
         truncated: Boolean(res.truncated),
         mimeType: typeof res.mimeType === "string" ? res.mimeType : undefined,

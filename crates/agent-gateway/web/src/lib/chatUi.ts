@@ -130,6 +130,7 @@ const LIVE_UPLOADED_FILE_KINDS = new Set<string>([
   "notebook",
   "word",
   "spreadsheet",
+  "presentation",
   "archive",
 ]);
 

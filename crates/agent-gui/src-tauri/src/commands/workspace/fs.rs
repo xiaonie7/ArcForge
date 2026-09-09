@@ -832,7 +832,7 @@ fn is_spreadsheet_file(path: &Path) -> bool {
 fn is_presentation_file(path: &Path) -> bool {
     matches!(
         extension_lower(path).as_deref(),
-        Some("pptx") | Some("pptm") | Some("ppt") | Some("odp")
+        Some("pptx") | Some("pptm") | Some("potx") | Some("ppt") | Some("odp")
     )
 }
 
@@ -840,6 +840,13 @@ fn is_xlsx_extractable_file(path: &Path) -> bool {
     matches!(
         extension_lower(path).as_deref(),
         Some("xlsx") | Some("xlsm") | Some("xltx") | Some("xltm")
+    )
+}
+
+fn is_pptx_extractable_file(path: &Path) -> bool {
+    matches!(
+        extension_lower(path).as_deref(),
+        Some("pptx") | Some("pptm") | Some("potx")
     )
 }
 
@@ -901,6 +908,9 @@ fn office_mime_type(path: &Path) -> Option<&'static str> {
         Some("ods") => Some("application/vnd.oasis.opendocument.spreadsheet"),
         Some("pptx") => {
             Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        }
+        Some("potx") => {
+            Some("application/vnd.openxmlformats-officedocument.presentationml.template")
         }
         Some("pptm") => Some("application/vnd.ms-powerpoint.presentation.macroEnabled.12"),
         Some("ppt") => Some("application/vnd.ms-powerpoint"),
@@ -2019,6 +2029,50 @@ fn build_xlsx_window(bytes: &[u8]) -> Result<(String, bool), String> {
     Ok((content, truncated || byte_truncated))
 }
 
+fn build_pptx_window(bytes: &[u8]) -> Result<(String, bool), String> {
+    let mut archive = open_zip_archive(bytes, "PowerPoint presentation")?;
+    let mut slide_entries = archive
+        .file_names()
+        .filter_map(|name| {
+            name.strip_prefix("ppt/slides/slide")
+                .and_then(|rest| rest.strip_suffix(".xml"))
+                .and_then(|digits| digits.parse::<usize>().ok())
+                .map(|index| (index, name.to_string()))
+        })
+        .collect::<Vec<_>>();
+    slide_entries.sort_unstable();
+    if slide_entries.is_empty() {
+        return Err(
+            "PowerPoint presentation does not contain any ppt/slides/slideN.xml part".to_string(),
+        );
+    }
+    let total = slide_entries.len();
+    let mut out = format!("Slides: {total}\n");
+    let mut zip_truncated = false;
+    for (index, name) in slide_entries {
+        let Some((xml, entry_truncated)) =
+            read_zip_entry_text(&mut archive, &name, MAX_ZIP_XML_ENTRY_BYTES)?
+        else {
+            continue;
+        };
+        zip_truncated |= entry_truncated;
+        let text = extract_xml_text(&xml, true);
+        out.push_str(&format!("\n## Slide {index}\n"));
+        let trimmed = text.trim();
+        out.push_str(if trimmed.is_empty() {
+            "(no text)"
+        } else {
+            trimmed
+        });
+        out.push('\n');
+        if out.len() > READ_MAX_TEXT_BYTES {
+            break;
+        }
+    }
+    let (content, byte_truncated) = truncate_text_to_byte_limit(&out, READ_MAX_TEXT_BYTES);
+    Ok((content, zip_truncated || byte_truncated))
+}
+
 fn build_archive_window(path: &Path, bytes: &[u8]) -> Result<(String, bool), String> {
     if !is_zip_archive_file(path) {
         let label = extension_lower(path)
@@ -2768,6 +2822,28 @@ fn fs_read_text_impl(
         };
         return Ok(build_document_read_response(
             "spreadsheet",
+            logical_path,
+            content,
+            truncated,
+            mtime_ms,
+            content_hash,
+            office_mime_type(&target).map(str::to_string),
+            md.len() as usize,
+            file_id,
+        ));
+    }
+
+    if is_presentation_file(&target) {
+        let (content, truncated) = if is_pptx_extractable_file(&target) {
+            build_pptx_window(&bytes).map_err(FsError::Other)?
+        } else {
+            (
+                "Legacy or OpenDocument presentation recognized and uploaded.\nRead extracts slide text from .pptx/.pptm/.potx directly; use OfficeRuntime or an external converter when you need to inspect this format.".to_string(),
+                false,
+            )
+        };
+        return Ok(build_document_read_response(
+            "presentation",
             logical_path,
             content,
             truncated,
@@ -5276,6 +5352,54 @@ mod tests {
         let content = response.content.expect("docx content");
         assert!(content.contains("Hello Word"), "content={content}");
         assert!(content.contains("Second paragraph"), "content={content}");
+
+        let _ = fs::remove_dir_all(workdir);
+    }
+
+    #[test]
+    fn read_pptx_extracts_slide_text_in_slide_order() {
+        let workdir = unique_test_workdir("read-pptx");
+        fs::create_dir_all(&workdir).expect("create workdir");
+        let pptx = build_test_zip(&[
+            (
+                "ppt/slides/slide10.xml",
+                r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Tenth slide</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            ),
+            (
+                "ppt/slides/slide2.xml",
+                r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>分层架构</a:t></a:r></a:p><a:p><a:r><a:t>Second slide</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            ),
+            ("ppt/slides/_rels/slide2.xml.rels", "<Relationships/>"),
+        ]);
+        fs::write(workdir.join("deck.pptx"), pptx).expect("write pptx");
+
+        let response = fs_read_text_sync(
+            workdir.display().to_string(),
+            "deck.pptx".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("pptx should read");
+
+        assert_eq!(response.kind, "presentation");
+        assert_eq!(
+            response.mime_type.as_deref(),
+            Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
+        );
+        let content = response.content.expect("pptx content");
+        assert!(content.starts_with("Slides: 2"), "content={content}");
+        let second = content.find("## Slide 2").expect("slide 2 heading");
+        let tenth = content.find("## Slide 10").expect("slide 10 heading");
+        assert!(
+            second < tenth,
+            "slides must be ordered numerically: {content}"
+        );
+        assert!(content.contains("分层架构"), "content={content}");
+        assert!(content.contains("Tenth slide"), "content={content}");
 
         let _ = fs::remove_dir_all(workdir);
     }

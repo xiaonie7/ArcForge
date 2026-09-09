@@ -153,7 +153,7 @@ export type ReadNotebookResultDetails = {
 };
 
 export type ReadDocumentResultDetails = {
-  kind: "read_word" | "read_spreadsheet" | "read_archive";
+  kind: "read_word" | "read_spreadsheet" | "read_presentation" | "read_archive";
   path: string;
   scope?: PathScope;
   absolutePath?: string;

@@ -1,5 +1,27 @@
 # 更新日志
 
+## 未发布
+
+本次变更为 **功能版本**，重做 PPT 生成能力：模型用受限子集的 SVG 描述每一页，ArcForge 把它转换成原生可编辑的 PPTX 对象；支持以用户上传的 PPTX 作为品牌模板，并新增策划稿校验与逐页 PNG 预览。
+
+### 新功能
+
+- **SVG 页面描述转原生 PPTX（arcforge-slides v3）**：`presentation.py` 新增 `schema_version: 3` 清单（`mode`、`stage`、`template`、`assets`、`slides[].svg`）。矩形、圆、线段、多边形与 M/L/H/V/Z 路径转为形状，`text/tspan` 转为文本框（同时写入拉丁、东亚与复杂文种字体），`data-asset` 图片转为独立图片对象，`data-arcforge="chart"` 转为原生图表，线性渐变与透明度保留。文字宽度用 Pillow 真实字体度量，结果里报告 `text_overflows`、`out_of_bounds`、`protected_collisions` 与 `missing_fonts`。
+- **模板底稿模式**：`mode: template` 打开用户 PPTX，删除样例页并保留母版、版式与主题；`inspect` 新增 `template` 结构（版式、占位符、1280 画布坐标的禁区、主题色与字体）。OfficeRuntime 的 `presentation create/validate` 接受 `input_path` 作为模板。
+- **策划稿与设计稿两阶段**：`stage: plan` 只允许灰阶且禁止渐变；新增 `presentation validate` 动作，在内存中转换整份清单并报告问题而不写文件。
+- **PNG 预览**：`presentation render` 输出 `.png` 时改走 OfficeCLI 截图（强制 HTML 渲染），默认输出全部页面的联系表，`spec_path` 可传 `{"pages":"2"}` 选择页面；`.pdf` 仍走 LibreOffice。
+- **PPTX 上传与读取**：附件类型新增 `presentation`（pptx/pptm/potx/ppt），Read 工具按页提取幻灯片文字，桌面端与 Gateway Web 同步识别。
+- **Skill 更新**：`arcforge-slides` 改为调研、大纲、策划稿、设计稿五阶段工作流，新增 `references/prompts.md`（金字塔大纲、Bento 卡片线框、样式包设计、视觉审稿提示词）与示例 SVG 页面；`references/spec.md` 改为清单与 SVG 子集说明。
+
+### 安全
+
+- Rust 侧在运行时解析前拒绝含 `href`、`xlink`、`<use>`、`<style>`、`<script>`、`<foreignObject>`、data URI 或远程 URL 的 SVG 页面，并校验清单中素材、模板、页面文件均位于工作区内。
+
+### 其他
+
+- 新增 `office_runtime`、`fs`、`system`、`skills` 相关单元测试；旧版 `slides[]` 规格继续受支持。
+- 打包的 Office Runtime sidecar 需重新执行 `pnpm sidecar:build:office` 才会包含新的 `presentation.py`。
+
 ## v0.3.5
 
 本次发布为 **功能版本**，新增企微（WeCom）"客户端能力同步"机制，让远程会话的默认权限跟随桌面端当前启用的 Skill 与工具；同时将 Skill 脚本执行与 Skill 文件改动权限解耦，使只读 Skill 策略下也能运行已启用 Skill 的脚本。

@@ -70,9 +70,12 @@ const officeRuntimeTool: Tool = {
   name: OFFICE_RUNTIME_TOOL_NAME,
   description:
     "Create, patch, inspect, validate, or render Office deliverables with ArcForge's bundled local runtime. " +
-    "Use document=spreadsheet for XLSX create/patch/inspect and document=presentation for PPTX " +
-    "create/inspect or PDF render. Use document=word for DOCX create/patch/inspect/validate and " +
-    "HTML/PNG render. Paths must stay inside the current workspace.",
+    "Use document=spreadsheet for XLSX create/patch/inspect. Use document=presentation for PPTX " +
+    "create (a schema_version 3 SVG deck manifest, optionally with input_path as the template PPTX), " +
+    "validate (manifest layout check), inspect (structure, layouts, protected regions, theme), and render " +
+    "(.pdf via LibreOffice or .png page previews via OfficeCLI; spec_path may hold {\"pages\":\"2\"}). " +
+    "Use document=word for DOCX create/patch/inspect/validate and HTML/PNG render. " +
+    "Paths must stay inside the current workspace.",
   parameters: Type.Object(
     {
       document: Type.Union([
@@ -90,13 +93,13 @@ const officeRuntimeTool: Tool = {
       spec_path: Type.Optional(
         Type.String({
           description:
-            "Workspace JSON specification path for spreadsheet/presentation create or spreadsheet/word patch.",
+            "Workspace JSON specification path: spreadsheet/presentation create, presentation validate, spreadsheet/word patch, or optional presentation PNG render options.",
         }),
       ),
       input_path: Type.Optional(
         Type.String({
           description:
-            "Workspace XLSX, PPTX, or DOCX input path for patch, inspect, validate, or render.",
+            "Workspace XLSX, PPTX, or DOCX input path for patch, inspect, validate, or render; for presentation create/validate it is the optional template PPTX.",
         }),
       ),
       output_path: Type.Optional(
