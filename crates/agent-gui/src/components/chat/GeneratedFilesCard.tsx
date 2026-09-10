@@ -42,6 +42,8 @@ function getFileKindLabel(t: (key: string) => string, file: DisplayFileItemDetai
       return t("chat.generatedFiles.kind.pdf");
     case "document":
       return t("chat.generatedFiles.kind.document");
+    case "presentation":
+      return t("chat.generatedFiles.kind.presentation");
     case "image":
       return t("chat.generatedFiles.kind.image");
     case "markdown":

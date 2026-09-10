@@ -998,6 +998,7 @@ fn workspace_preview_kind(path: &Path, mime_type: &str) -> Option<&'static str> 
         Some("html") | Some("htm") => Some("html"),
         Some("md") | Some("mdx") => Some("markdown"),
         Some("doc") | Some("docx") | Some("rtf") => Some("document"),
+        Some("pptx") | Some("pptm") | Some("potx") => Some("presentation"),
         Some("csv") | Some("ods") | Some("tsv") | Some("xls") | Some("xlsm") | Some("xlsx")
         | Some("xltm") | Some("xltx") => Some("spreadsheet"),
         Some("flac") | Some("m4a") | Some("mp3") | Some("oga") | Some("ogg") | Some("wav") => {
@@ -5585,7 +5586,7 @@ mod tests {
     }
 
     #[test]
-    fn describe_workspace_artifacts_identifies_unpreviewed_presentations() {
+    fn describe_workspace_artifacts_marks_presentations_as_previewable() {
         let workdir = unique_test_workdir("describe-presentation-artifact");
         fs::create_dir_all(workdir.join("reports")).expect("create reports directory");
         fs::write(workdir.join("reports/deck.pptx"), b"pptx-placeholder")
@@ -5603,8 +5604,8 @@ mod tests {
             descriptor.mime_type.as_deref(),
             Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
         );
-        assert_eq!(descriptor.preview_kind, None);
-        assert!(!descriptor.preview_supported);
+        assert_eq!(descriptor.preview_kind.as_deref(), Some("presentation"));
+        assert!(descriptor.preview_supported);
 
         let _ = fs::remove_dir_all(workdir);
     }

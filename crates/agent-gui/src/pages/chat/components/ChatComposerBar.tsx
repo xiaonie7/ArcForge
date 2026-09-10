@@ -17,14 +17,17 @@ import {
   type MentionComposerSkill,
 } from "../../../components/chat/MentionComposer";
 import { GitBranchSelector } from "../../../components/git/GitBranchSelector";
+import { type SelectionContext, selectionTitle } from "../../../lib/artifactReview";
 import {
   Check,
   ChevronDown,
   ChevronUp,
   Clock3,
   FileText,
+  FolderOpen,
   Globe,
   GlobeOff,
+  ImageIcon,
   Lightbulb,
   LightbulbOff,
   Loader2,
@@ -150,10 +153,16 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
   onChatRuntimeControlsChange: (patch: Partial<ChatRuntimeControls>) => void;
   onPickReadableFiles: () => void;
   onPasteFiles: (files: File[]) => void;
+  /** Copies picked image/SVG/PPTX files into the project asset folder (no attachment). */
+  onImportAssetFiles?: () => void;
+  onImportAssetFolder?: () => void;
   /** Prompts previously sent in this conversation for ↑/↓ recall. */
   loadHistoryPrompts?: () => readonly string[];
   pendingUploadedFiles: PendingUploadedFile[];
   onRemovePendingUpload: (relativePath: string) => void;
+  /** Artifact review selection shown as a chip; sent with the next message. */
+  artifactSelection?: SelectionContext | null;
+  onClearArtifactSelection?: () => void;
   queuedTurns: ChatQueueTurnPreview[];
   onRunQueuedTurnNow: (id: string) => void;
   onMoveQueuedTurnUp: (id: string) => void;
@@ -191,9 +200,13 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
     onChatRuntimeControlsChange,
     onPickReadableFiles,
     onPasteFiles,
+    onImportAssetFiles,
+    onImportAssetFolder,
     loadHistoryPrompts,
     pendingUploadedFiles,
     onRemovePendingUpload,
+    artifactSelection,
+    onClearArtifactSelection,
     queuedTurns,
     onRunQueuedTurnNow,
     onMoveQueuedTurnUp,
@@ -535,6 +548,29 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
           isComposerExpanded && "flex min-h-0 flex-col justify-end",
         )}
       >
+        {artifactSelection ? (
+          <div className="mb-2 flex items-center gap-2 px-0.5">
+            <div
+              className="flex max-w-full items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-[calc(11.5px*var(--zone-font-scale,1))] text-foreground/90"
+              title={artifactSelection.artifact.path}
+            >
+              <span className="shrink-0 font-medium text-primary">
+                {t("chat.review.selectionLabel")}
+              </span>
+              <span className="truncate">{selectionTitle(artifactSelection)}</span>
+              <button
+                type="button"
+                disabled={isInputDisabled}
+                onClick={onClearArtifactSelection}
+                className="shrink-0 rounded-full p-0.5 text-muted-foreground/80 transition-colors hover:bg-foreground/10 hover:text-foreground disabled:pointer-events-none"
+                aria-label={t("chat.review.clearSelection")}
+                title={t("chat.review.clearSelection")}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          </div>
+        ) : null}
         {/* Pending uploaded files — above the composer card */}
         {pendingUploadedFiles.length > 0 && (
           <div className="upload-file-list mb-2.5 flex gap-2 overflow-x-auto px-0.5 pb-1">
@@ -831,6 +867,34 @@ export const ChatComposerBar = memo(function ChatComposerBar(props: {
                     </span>
                     <span className="min-w-0 flex-1 truncate">{t("chat.upload.button")}</span>
                   </DropdownMenuItem>
+                  {onImportAssetFiles ? (
+                    <DropdownMenuItem
+                      disabled={uploadDisabled}
+                      onSelect={onImportAssetFiles}
+                      className="gap-3 rounded-xl px-2.5 py-2.5"
+                    >
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                        <ImageIcon className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {t("chat.composer.importAssetFiles")}
+                      </span>
+                    </DropdownMenuItem>
+                  ) : null}
+                  {onImportAssetFolder ? (
+                    <DropdownMenuItem
+                      disabled={uploadDisabled}
+                      onSelect={onImportAssetFolder}
+                      className="gap-3 rounded-xl px-2.5 py-2.5"
+                    >
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+                        <FolderOpen className="h-4 w-4" />
+                      </span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {t("chat.composer.importAssetFolder")}
+                      </span>
+                    </DropdownMenuItem>
+                  ) : null}
                   <DropdownMenuItem
                     disabled={isInputDisabled || !isAgentMode || !workdir}
                     onSelect={() => openMentionPicker("file")}

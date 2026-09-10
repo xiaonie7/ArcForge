@@ -151,6 +151,7 @@ export type DisplayFilePreviewKind =
   | "image"
   | "markdown"
   | "pdf"
+  | "presentation"
   | "spreadsheet"
   | "text"
   | "video";

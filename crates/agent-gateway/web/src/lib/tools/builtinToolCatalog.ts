@@ -192,6 +192,15 @@ export const BUILTIN_TOOL_CATALOG: readonly BuiltinToolCatalogEntry[] = [
     runtimeScopes: CHAT_AND_CRON,
   },
   {
+    id: "visual_review",
+    toolName: "VisualReview",
+    icon: "image",
+    categoryId: "intelligence",
+    isReadOnly: true,
+    runtimeScopes: CHAT_AND_CRON,
+    conditional: true,
+  },
+  {
     id: "agent",
     toolName: "Agent",
     icon: "bot",

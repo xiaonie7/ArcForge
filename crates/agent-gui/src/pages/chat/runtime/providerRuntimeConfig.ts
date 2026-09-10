@@ -53,6 +53,35 @@ export function resolveConversationTitleModelSelection(
   };
 }
 
+/**
+ * The model that answers VisualReview calls. `configured` when the custom-settings slot
+ * names an enabled model, otherwise the current chat model (`current`).
+ */
+export function resolveVisualReviewModelSelection(
+  settings: AppSettings,
+  fallback: EffectiveChatModelSelection,
+): EffectiveChatModelSelection & { source: "configured" | "current" } {
+  const reviewModel = settings.customSettings.visualReviewModel;
+  if (!reviewModel) {
+    return { ...fallback, source: "current" };
+  }
+
+  const provider = settings.customProviders.find(
+    (item) => item.id === reviewModel.customProviderId,
+  );
+  if (!provider || !provider.activeModels.includes(reviewModel.model)) {
+    return { ...fallback, source: "current" };
+  }
+
+  return {
+    selectedModel: reviewModel,
+    provider,
+    providerId: provider.type,
+    model: reviewModel.model,
+    source: "configured",
+  };
+}
+
 export function buildProviderRuntimeConfig(
   provider: AppSettings["customProviders"][number],
   model: string,

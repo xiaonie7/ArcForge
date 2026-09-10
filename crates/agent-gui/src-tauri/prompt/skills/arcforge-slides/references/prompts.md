@@ -46,7 +46,7 @@ Allowed: rect (rx), circle, ellipse, line, polygon, path (M/L/H/V/Z), text/tspan
 Forbidden: color, gradients, curves, filters, masks, rotate, scale, foreignObject, href, base64.
 Grayscale only: #FFFFFF, #F2F2F2, #D9D9D9, #8C8C8C, #404040.
 Markers: <rect data-arcforge="background"/> for the page background; <rect data-arcforge="chart" data-chart='{...}'/> for a native chart; <image data-asset="id" preserveAspectRatio="xMidYMid meet"/> for pictures with text or drawings.
-Give every card and text an id. Output only the SVG.
+Give every semantic block a unique stable id and data-role="title|subtitle|text_block|image|chart|table|footer". Use a marked g when a card, chart, or table should be selected as one block, and leave decorations unmarked. Keep ids unchanged between planning, design, and later edits. Output only the SVG.
 ```
 
 ## C. Design page (stage 5)
@@ -58,7 +58,7 @@ Style pack: {{STYLE_PACK_JSON}} (palette, fonts, card radius and stroke, accent 
 Rules:
 - Use the accent color for exactly one focal element per page.
 - Titles 28–36 px, card headings 18–22 px, body 14–18 px, captions 11–12 px.
-- Icons are simple paths or circles in the accent color; never draw charts from rectangles.
+- Icons are SVG assets placed with <image data-asset="icon-…" data-fill="{{ACCENT}}" width="…" height="…"/>; draw them once (section E) and reuse the same ids. Never draw charts from rectangles.
 - Decorative circles or bars may bleed off the canvas on cover and section pages only.
 - Stay inside the same SVG subset as the wireframe; gradients are allowed on backgrounds and hero cards.
 Output only the SVG.
@@ -77,6 +77,22 @@ When a template is provided, build the style pack from the `inspect` result: `th
 ## D. Visual review (after each render)
 
 ```text
-Look at the rendered preview and report, per page: text cut off or overlapping, cards too dense, pictures cropped where text or drawings exist, inconsistent colors or fonts across pages, elements covering template logos or footers.
+Look at the rendered preview and report, per page: text cut off or overlapping, cards too dense, pictures cropped where text or drawings exist, inconsistent colors or fonts across pages, elements covering template logos or footers, icons that are not recognizable at a glance.
 For each problem name the page id and the element id, then redraw only those pages. Stop after two rounds and report what remains.
+```
+
+Use this text as the `question` of `VisualReview` when your own model cannot see the preview (the Read result says the image was omitted). Record the outcome per page in `deck/review.json`.
+
+## E. Icon and illustration assets (stage 5, before the design pages)
+
+```text
+Role: icon designer producing standalone SVG files for deck/assets/.
+Icon family for this deck: {{ICON_FAMILY}} (for example: 24×24 grid, 2 px round strokes, no fill, 2 px corner radius).
+For each icon the pages need:
+- One file, viewBox="0 0 24 24", drawn with stroke="currentColor" or fill="currentColor" so the page can recolor it with data-fill.
+- Simple silhouettes that read at 32 px: at most 3 or 4 strokes, no text, no tiny details.
+- Any static SVG is allowed (paths with curves and arcs, circles, transforms, <use>); no scripts, no external references, no filters.
+Illustrations (hero art, empty states) may use gradients and up to a few hundred paths; keep them in the palette of the style pack.
+After the manifest is validated, Read deck/.arcforge-assets/<asset id>/raster.png for every new asset and redraw anything that is not recognizable at a glance.
+Output one SVG file per asset.
 ```

@@ -159,6 +159,21 @@ function parseStoredChatContextMeta(
       typeof parsed.activeSegmentIndex === "number" ? parsed.activeSegmentIndex : 0,
     totalSegmentCount: typeof parsed.totalSegmentCount === "number" ? parsed.totalSegmentCount : 1,
     totalMessageCount: typeof parsed.totalMessageCount === "number" ? parsed.totalMessageCount : 0,
+    ...(parsed.review &&
+    typeof parsed.review === "object" &&
+    typeof parsed.review.artifactPath === "string" &&
+    typeof parsed.review.workdir === "string"
+      ? {
+          review: {
+            artifactPath: parsed.review.artifactPath,
+            workdir: parsed.review.workdir,
+            parentConversationId:
+              typeof parsed.review.parentConversationId === "string"
+                ? parsed.review.parentConversationId
+                : undefined,
+          },
+        }
+      : {}),
   };
 }
 

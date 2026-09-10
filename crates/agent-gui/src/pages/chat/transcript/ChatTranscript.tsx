@@ -49,12 +49,13 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
     liveTranscriptStore,
     isCompactionRunning,
     bottomReservePx = 0,
+    compact = false,
     onResendFromEdit,
     onBranchConversation,
     branchPendingMessageId,
     onOpenSettings,
   } = props;
-  const { locale } = useLocale();
+  const { locale, t } = useLocale();
   const showNoModelsState = !hasModels;
   const showStartChatState = hasModels && historyItems.length === 0 && !isSending;
   const shouldReserveTranscriptBottomSpace = !(showNoModelsState || showStartChatState);
@@ -220,16 +221,42 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
       onContextMenu={handleTranscriptContextMenu}
     >
       <ScrollArea ref={setScrollAreaRoot} viewportRef={setScrollViewport} className="h-full">
-        <div className="mx-auto w-full max-w-[768px] px-5 py-4">
+        <div className={cn("mx-auto w-full max-w-[768px]", compact ? "px-3 py-3" : "px-5 py-4")}>
           {showNoModelsState || showStartChatState ? (
-            <div className="flex min-h-[calc(100vh-220px)] flex-col items-center justify-center">
+            <div
+              className={cn(
+                "flex flex-col items-center justify-center",
+                compact ? "min-h-36 py-6" : "min-h-[calc(100vh-220px)]",
+              )}
+            >
               {/* Keyed per conversation so the hero entrance replays when
                   switching between empty conversations, not just on mount. */}
-              <ChatEmptyState
-                key={conversationId ?? "empty"}
-                variant={showNoModelsState ? "no-models" : "start-chat"}
-                onOpenSettings={onOpenSettings}
-              />
+              {compact ? (
+                <div className="text-center text-sm text-muted-foreground">
+                  <p>
+                    {showNoModelsState
+                      ? t("chat.noModelSelected")
+                      : locale === "en-US"
+                        ? "Discuss the current file and its selected content here."
+                        : "在这里讨论当前文件和选中的内容。"}
+                  </p>
+                  {showNoModelsState ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenSettings("providers")}
+                      className="mt-3 rounded-md px-3 py-1.5 text-foreground hover:bg-accent"
+                    >
+                      {t("chat.goToSettings")}
+                    </button>
+                  ) : null}
+                </div>
+              ) : (
+                <ChatEmptyState
+                  key={conversationId ?? "empty"}
+                  variant={showNoModelsState ? "no-models" : "start-chat"}
+                  onOpenSettings={onOpenSettings}
+                />
+              )}
             </div>
           ) : null}
 
@@ -267,7 +294,7 @@ export const ChatTranscript = memo(function ChatTranscript(props: ChatTranscript
           <div style={{ height: transcriptBottomReservePx }} />
         </div>
       </ScrollArea>
-      {!showNoModelsState && !showStartChatState && !isTranscriptSettling ? (
+      {!compact && !showNoModelsState && !showStartChatState && !isTranscriptSettling ? (
         <FloorNavRail
           conversationId={conversationId}
           floors={floors}

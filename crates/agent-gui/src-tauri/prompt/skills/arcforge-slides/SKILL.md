@@ -15,7 +15,7 @@ Work through five stages. Each stage writes one reviewable file into the workspa
 2. **Outline.** Apply the pyramid principle (`references/prompts.md`, section A) and write `deck/outline.json`: cover, table of contents, parts with pages, closing page. Give every page a stable `page_id`, one message, its key points, `evidence` sources, and a `visual_intent`. Show the page list to the user as a short sticky-note summary and continue unless they ask for changes.
 3. **Evidence.** Fill every key point with facts from the brief materials. Record the source path, query, or URL in `evidence`. Never place a number on a slide that has no source.
 4. **Planning draft.** For each page write a grayscale SVG into `deck/plan/<page_id>.svg` (section B of the prompts; `stage: plan` forbids color and gradients). Write `deck/plan.json` with `schema_version: 3` and `stage: "plan"`, then run `OfficeRuntime` `document=presentation`, `action=validate`, `spec_path=deck/plan.json`. Fix every reported error, create `deck/plan.pptx`, render `deck/plan-preview.png`, and look at it with `Read`. Adjust content and layout here; this is the cheap place to change structure.
-5. **Design.** Copy each plan page to `deck/design/<page_id>.svg` and apply the style pack (section C): colors, rounded cards, accents, icons, and decorations. Card positions must stay where the plan put them. Write `deck/deck.json` with `stage: "design"`, validate, then create the final PPTX, render the preview, and review it visually. Redraw only the pages with problems, at most two rounds, then report.
+5. **Design.** Copy each plan page to `deck/design/<page_id>.svg` and apply the style pack (section C): colors, rounded cards, accents, icons, and decorations. Card positions must stay where the plan put them. Icons and illustrations are SVG assets (section E of the prompts), not page-level drawings. Write `deck/deck.json` with `stage: "design"`, validate, then create the final PPTX, render the preview, and review it visually. Redraw only the pages with problems, at most two rounds, then report.
 
 ## Tool calls
 
@@ -34,6 +34,12 @@ Work through five stages. Each stage writes one reviewable file into the workspa
 
 User pictures must live inside the workspace. If an attachment path is outside the workspace, copy it into `deck/assets/` first, declare it in the manifest `assets` map, and reference it only through `data-asset` on an `<image>`. Screenshots, dimension drawings, diagrams, and anything with text must use `preserveAspectRatio="xMidYMid meet"` so nothing is cropped. Never embed base64 data or file paths inside an SVG.
 
+Icons, illustrations, and logos are **SVG assets** (see `references/spec.md`, *SVG assets*). Draw them yourself as standalone `.svg` files in `deck/assets/`, or use the user's SVG files, and place them with `<image data-asset="…">`. Inside an asset the full static SVG feature set is available (curves, arcs, transforms, `<use>`, `<style>`, text, gradients); scripts and external references are rejected. ArcForge converts each asset into native, recolorable shapes and falls back to a transparent PNG only when that is impossible. Rules:
+
+- Draw monochrome icons on a 24×24 `viewBox` with `currentColor`, and set `data-fill` on the placement so the style pack decides the color. Keep one icon family per deck: the same stroke width, corner style, and optical size; write those values into the style pack and reuse the same asset ids across pages.
+- After `validate`, look at `deck/.arcforge-assets/<asset id>/raster.png` with `Read` for every asset you drew. Redraw anything that is not immediately recognizable. Check `asset_renders` in the result to see which assets became shapes and which fell back to pictures.
+- Never build an icon or illustration from many tiny rectangles on the page; make it an asset.
+
 ## Quality bar
 
 - One message per page. Titles under roughly 60 characters. Split dense pages instead of shrinking text below the size ladder in `references/spec.md`.
@@ -41,6 +47,23 @@ User pictures must live inside the workspace. If an attachment path is outside t
 - Data charts and tables must be native (`data-arcforge="chart"`), never drawn from rectangles.
 - Give every important element an `id` so later single-page edits can address it.
 - Treat `validate` and `inspect` as structural checks; only a rendered preview counts as visual verification. Report `text_overflows`, `out_of_bounds`, and `protected_collisions` from the create result honestly.
+
+## Looking at previews
+
+- Read the preview PNG. When the Read result contains the picture, review it yourself with the checklist in section D of the prompts.
+- When the Read result says the image was omitted because the model does not support images, call `VisualReview` with the same paths and the section D checklist, naming the page ids the images show. Do the same for asset rasters you want checked.
+- Keep `deck/review.json` up to date: one entry per page with `page_id`, `rendered` (true/false), `visual_check` (`self`, `VisualReview:<model>`, or `none`), `round`, and `issues` (element ids and what is wrong). A page whose `visual_check` is `none` must be reported as not visually verified in the final summary; never describe it as checked.
+
+## Selection-scoped edits
+
+When a user message carries an "Artifact review selection" block, the user is looking at that unit in the review panel and the request is about it:
+
+- For a deck built from a manifest, the unit id is the page's `slide_id`. Edit only that page's SVG (plan or design file as appropriate), keep every other page file untouched, then run `create` for the whole manifest. The result's `changed_slide_ids` must contain only the pages you meant to change; if other ids appear, explain why.
+- Do not rebuild pages the user did not mention, do not renumber ids, and do not reorder slides unless asked.
+- If the deck was not produced by ArcForge (no manifest in the workspace), say that page-level edits require rebuilding it from a manifest and offer to do that.
+- When the selection names an element (title, subtitle, text_block, image, chart, table, footer), edit only the SVG node with that id and its children on that page: keep the id, keep every other element's position, then re-run `create`. If the request cannot be satisfied inside that element, say so instead of touching neighbours.
+- Give every semantic element a `data-role` (title, subtitle, text_block, image, chart, table, footer) and a unique `id`; the review overlay uses them, and `validate` rejects duplicate ids.
+- Reply with the page id and what changed in one or two sentences; the panel refreshes the changed pages automatically.
 
 ## Safety
 

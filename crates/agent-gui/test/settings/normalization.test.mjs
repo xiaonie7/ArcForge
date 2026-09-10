@@ -464,6 +464,45 @@ test("custom settings conversation title model only keeps enabled provider model
   assert.equal(cleared.customSettings.conversationTitleModel, undefined);
 });
 
+test("custom settings visual review model only keeps enabled provider models", () => {
+  const customProviders = [
+    {
+      id: "provider-1",
+      name: "Provider",
+      type: "codex",
+      baseUrl: "https://api.openai.com/v1",
+      apiKey: "key",
+      models: ["gpt-5", "qwen3-vl-plus"],
+      activeModels: ["qwen3-vl-plus"],
+    },
+  ];
+
+  const normalized = settings.normalizeSettings({
+    customProviders,
+    customSettings: {
+      visualReviewModel: { customProviderId: "provider-1", model: "qwen3-vl-plus" },
+    },
+  });
+  assert.deepEqual(normalized.customSettings.visualReviewModel, {
+    customProviderId: "provider-1",
+    model: "qwen3-vl-plus",
+  });
+  assert.equal(normalized.customSettings.conversationTitleModel, undefined);
+
+  const stale = settings.normalizeSettings({
+    customProviders,
+    customSettings: {
+      visualReviewModel: { customProviderId: "provider-1", model: "gpt-5" },
+    },
+  });
+  assert.equal(stale.customSettings.visualReviewModel, undefined);
+
+  const cleared = settings.updateCustomSettings(normalized, {
+    visualReviewModel: undefined,
+  });
+  assert.equal(cleared.customSettings.visualReviewModel, undefined);
+});
+
 test("chat runtime controls default and follow provider model reasoning support", () => {
   const defaults = settings.getDefaultSettings();
   assert.deepEqual(defaults.chatRuntimeControls, {

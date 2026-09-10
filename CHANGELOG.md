@@ -1,11 +1,17 @@
 # 更新日志
 
-## 未发布
+## v0.3.7
 
-本次变更为 **功能版本**，重做 PPT 生成能力：模型用受限子集的 SVG 描述每一页，ArcForge 把它转换成原生可编辑的 PPTX 对象；支持以用户上传的 PPTX 作为品牌模板，并新增策划稿校验与逐页 PNG 预览。
+本次发布为 **功能版本**，重做 PPT 生成能力：模型用受限子集的 SVG 描述每一页，ArcForge 把它转换成原生可编辑的 PPTX 对象；支持以用户上传的 PPTX 作为品牌模板，并新增策划稿校验与逐页 PNG 预览。
 
 ### 新功能
 
+- **SVG 矢量素材转原生形状（arcforge-slides）**：清单 `assets` 现在接受 `.svg`（图标、Logo、插画，模型自己画的或用户上传的）。Rust 侧用 usvg 规范化任意静态 SVG（曲线、圆弧、嵌套变换、`<use>`、`<style>`、文字轮廓、线性渐变），写入清单旁的 `.arcforge-assets/<id>/shapes.json` 与透明 `raster.png`；`presentation.py` 把 `<image data-asset>` 引用的 SVG 素材转成可编辑的原生形状组，`data-fill`/`data-stroke` 换色，`data-render="raster"` 或 `slice` 走 PNG，滤镜、蒙版、径向渐变、嵌入位图等自动回退为图片并在 `asset_renders` 与 `warnings` 中说明；策划稿阶段自动灰阶。填充路径的多段轮廓合并为单一带零面积桥接的轮廓并按嵌套深度重排方向，evenodd 图标在 PowerPoint/WPS 的非零环绕规则和 HTML 预览器下都能正确显示孔洞；二次贝塞尔统一提升为三次。
+- **视觉审稿模型与 VisualReview 工具**：设置 → 供应商 → 自定义设置新增"视觉审稿模型"槽位（桌面端与 Gateway Web 同步）。新内置工具 `VisualReview` 把工作区图片（页面预览、截图、素材 `raster.png`）交给该模型（未配置时用当前对话模型）并返回审稿意见；模型不支持图片输入时明确报告"未做视觉检查"而不是假装看过。`arcforge-slides` 要求每页在 `deck/review.json` 记录 `visual_check` 状态，提示词新增图标绘制章节（E）。
+- **应用内预览 PPTX**：生成文件卡片与右侧栏文件预览支持 `.pptx/.pptm/.potx`：Rust 新增 `presentation_preview_page` 命令，用 OfficeCLI 逐页截图并按文件路径、修改时间和页码缓存到临时目录，预览器提供上一页/下一页翻页。
+- **Artifact Review Framework（第一期，PPTX 适配器）**：新增通用的审稿抽象 `src/lib/artifactReview/`（ArtifactRef、ArtifactUnit、SelectionContext、ArtifactChange、Adapter 注册表、变更事件总线）。右侧栏对可审稿文件显示"导航 | 预览"面板：PPTX 适配器用 `presentation_units` 命令枚举幻灯片（按 presentation.xml 顺序，id 取 ArcForge 写入的 slide_id），缩略图与大图共用 `presentation_preview_page`，缓存键改为幻灯片内容指纹并支持宽度参数，重建 deck 后只有变化的页会重新渲染。选中单元后编辑器显示"审稿选区"胶囊，发送时把选区作为隐藏上下文附在用户消息上（历史里可读回 `arcForgeSelection`）；`presentation create` 结果新增 `changed_slide_ids`（对比清单旁的 `.arcforge-build.json` 指纹），OfficeRuntime 工具据此发出变更事件，面板只刷新受影响的页。`arcforge-slides` 新增"选区范围内修改"规则。
+- **Artifact Review 第二期：语义块选区与独立审稿会话**：新增 `presentation_elements` 命令，按页返回 title、subtitle、text_block、image、chart、table、footer 七类语义块的稳定 id（形状名即 SVG id）与 1280×720 画布 bbox；`presentation.py` 把 `data-role` 写入形状 alt text（`arcforge:role=…`），并在 validate 时拒绝同页重复 id。审稿面板在预览图上叠加可点击的元素框，选中后 selection 变成 `element`（slide_id + element_id + element_type），页面重建后 id 仍在则保留，元素消失则回退到整页，页面消失则清空。审稿会话是绑定到 artifact 的普通对话：`chat_history_find_review` 按会话元数据 `review` 查找，右侧栏内嵌复用 ChatTranscript 与 MentionComposer 的 Review 面板，每条消息自动附带当前选区，标题固定为"审稿 · 文件名"，主对话不受影响。
+- **素材批量导入项目**：编辑器"+"菜单新增"导入素材文件到项目"和"导入素材文件夹到项目"，Rust 命令 `system_import_workspace_assets` 把图片、SVG 与 PPTX 模板复制到工作区 `deck/assets/`（文件夹递归 4 层，单次最多 500 个，单文件 50 MiB，重名自动加后缀），导入结果以相对路径列表写入输入框，不占用 9 个附件的上限。
 - **SVG 页面描述转原生 PPTX（arcforge-slides v3）**：`presentation.py` 新增 `schema_version: 3` 清单（`mode`、`stage`、`template`、`assets`、`slides[].svg`）。矩形、圆、线段、多边形与 M/L/H/V/Z 路径转为形状，`text/tspan` 转为文本框（同时写入拉丁、东亚与复杂文种字体），`data-asset` 图片转为独立图片对象，`data-arcforge="chart"` 转为原生图表，线性渐变与透明度保留。文字宽度用 Pillow 真实字体度量，结果里报告 `text_overflows`、`out_of_bounds`、`protected_collisions` 与 `missing_fonts`。
 - **模板底稿模式**：`mode: template` 打开用户 PPTX，删除样例页并保留母版、版式与主题；`inspect` 新增 `template` 结构（版式、占位符、1280 画布坐标的禁区、主题色与字体）。OfficeRuntime 的 `presentation create/validate` 接受 `input_path` 作为模板。
 - **策划稿与设计稿两阶段**：`stage: plan` 只允许灰阶且禁止渐变；新增 `presentation validate` 动作，在内存中转换整份清单并报告问题而不写文件。
@@ -16,11 +22,16 @@
 ### 安全
 
 - Rust 侧在运行时解析前拒绝含 `href`、`xlink`、`<use>`、`<style>`、`<script>`、`<foreignObject>`、data URI 或远程 URL 的 SVG 页面，并校验清单中素材、模板、页面文件均位于工作区内。
+- SVG 素材只允许引用自身元素（`#id`）或内嵌 `data:image/` 数据，拒绝 `<script>`、`<foreignObject>`、DOCTYPE/实体声明、`@import` 与远程 URL；usvg 解析时禁用文件与网络引用，Python 运行时只消费 Rust 规范化后的结果，从不直接解析原始 SVG 素材。
 
 ### 其他
 
 - 新增 `office_runtime`、`fs`、`system`、`skills` 相关单元测试；旧版 `slides[]` 规格继续受支持。
+- 新增 `svg_assets` Rust 单元测试（曲线、`<use>`/CSS/渐变、滤镜回退、桥接与重绕、缓存复用）、`VisualReview` 工具测试、设置槽位规范化测试与系统提示词测试。
+- 依赖新增 `resvg`（含 usvg、tiny-skia）。
 - 打包的 Office Runtime sidecar 需重新执行 `pnpm sidecar:build:office` 才会包含新的 `presentation.py`。
+- 已知未验证：原生形状组在 PowerPoint 与 WPS 中的实际显示（本机均未安装）；OfficeCLI 的 HTML 预览器对单个 `a:path` 内多段子路径的处理有缺陷，转换器已通过桥接规避，带描边且带孔洞的填充路径仍可能在预览中出现桥接线。
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.7。
 
 ## v0.3.5
 

@@ -223,6 +223,19 @@ test("agent tool rules omit PresentFile delivery guidance when the tool is unava
   assert.doesNotMatch(suffix, /## Delivering Files/);
 });
 
+test("agent tool rules explain VisualReview only when the tool is registered", () => {
+  const withReview = agentRunnerModule.buildToolsSuffix("/workspace", [
+    "Read",
+    "VisualReview",
+  ]);
+  assert.match(withReview, /## Visual Review/);
+  assert.match(withReview, /a Read result saying the image was omitted means exactly that/);
+  assert.match(withReview, /say that visual verification was not performed/);
+
+  const withoutReview = agentRunnerModule.buildToolsSuffix("/workspace", ["Read", "Image"]);
+  assert.doesNotMatch(withoutReview, /## Visual Review/);
+});
+
 test("agent tool rules prefer one parallel Agent batch over sequential calls", () => {
   const suffix = agentRunnerModule.buildToolsSuffix("/workspace", [
     "Agent",

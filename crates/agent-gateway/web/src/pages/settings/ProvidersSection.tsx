@@ -1536,6 +1536,30 @@ function CustomSettingsDrawer(props: SettingsSectionProps & { onClose: () => voi
     );
   }
 
+  const visualReviewModel = settings.customSettings.visualReviewModel;
+  const visualReviewValue = visualReviewModel
+    ? toModelValue(visualReviewModel.customProviderId, visualReviewModel.model)
+    : "";
+  const visualReviewOptions =
+    visualReviewModel && !modelOptions.some((option) => option.value === visualReviewValue)
+      ? [
+          ...modelOptions,
+          {
+            value: visualReviewValue,
+            label: visualReviewModel.model,
+            providerName: visualReviewModel.customProviderId,
+          },
+        ]
+      : modelOptions;
+
+  function handleVisualReviewModelChange(value: string) {
+    setSettings((prev) =>
+      updateCustomSettings(prev, {
+        visualReviewModel: parseModelValue(value) ?? undefined,
+      }),
+    );
+  }
+
   return createPortal(
     <div
       className={`${
@@ -1611,6 +1635,25 @@ function CustomSettingsDrawer(props: SettingsSectionProps & { onClose: () => voi
                     {t("settings.customSettingsModelEmpty")}
                   </div>
                 ) : null}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-foreground/[0.06] bg-white/60 p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04),inset_0_1px_0_rgba(255,255,255,0.65)] backdrop-blur-xl dark:border-foreground/[0.08] dark:bg-foreground/[0.03] dark:shadow-none">
+              <div className="space-y-2">
+                <Label className="text-[12.5px] font-medium text-foreground/85">
+                  {t("settings.visualReviewModel")}
+                </Label>
+                <ModelPicker
+                  options={visualReviewOptions}
+                  value={visualReviewValue}
+                  onChange={handleVisualReviewModelChange}
+                  placeholder={t("settings.visualReviewModelFollowCurrent")}
+                  noneLabel={t("settings.visualReviewModelFollowCurrent")}
+                  ariaLabel={t("settings.visualReviewModel")}
+                  triggerClassName="h-9 rounded-lg border-foreground/10 bg-white/70 text-[13px] shadow-sm dark:bg-background/40"
+                />
+                <div className="text-[11.5px] leading-relaxed text-muted-foreground/90">
+                  {t("settings.visualReviewModelHint")}
+                </div>
               </div>
             </div>
           </section>

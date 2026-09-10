@@ -133,6 +133,8 @@ export type FontScaleSettings = {
 
 export type CustomSettings = {
   conversationTitleModel?: SelectedModel;
+  /** Vision-capable model that answers VisualReview calls; unset = current chat model. */
+  visualReviewModel?: SelectedModel;
   chatSidebar: ChatSidebarSettings;
   rightDock: RightDockSettings;
   fontScale: FontScaleSettings;
@@ -2109,6 +2111,10 @@ export function normalizeCustomSettings(
   return {
     conversationTitleModel: normalizeSelectedModelForProviders(
       normalizeSelectedModel(obj.conversationTitleModel),
+      customProviders,
+    ),
+    visualReviewModel: normalizeSelectedModelForProviders(
+      normalizeSelectedModel(obj.visualReviewModel),
       customProviders,
     ),
     chatSidebar: {

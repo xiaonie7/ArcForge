@@ -6,6 +6,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
   type RefObject,
+  type ReactNode,
   Suspense,
   useCallback,
   useEffect,
@@ -28,6 +29,8 @@ import type { TerminalClient, TerminalSession } from "../../lib/terminal/types";
 import type { WorkspaceActivityClient } from "../../lib/workspace-activity/types";
 import { Loader2, X } from "../icons";
 import { Button } from "../ui/button";
+import { isReviewableArtifactPath, type SelectionContext } from "../../lib/artifactReview";
+import { ArtifactReviewPanel } from "../artifact-review/ArtifactReviewPanel";
 import type { WorkspaceFilePreviewOpenRequest } from "../workspace-editor/WorkspaceFilePreviewOverlay";
 import type { GitCommitContextPayload, GitFileContextPayload } from "./git-review";
 import type { LocalTunnelClient } from "./LocalTunnelPanel";
@@ -94,6 +97,10 @@ type RightDockPanelProps = {
   onOpenFile?: (path: string, imagePaths?: string[]) => void;
   filePreviewRequest?: WorkspaceFilePreviewOpenRequest | null;
   onCloseFilePreview?: () => void;
+  /** Artifact review: the unit the user is looking at, mirrored into the composer. */
+  artifactSelection?: SelectionContext | null;
+  onArtifactSelect?: (selection: SelectionContext | null) => void;
+  reviewChat?: ReactNode;
   onInsertCodeReviewSkill?: () => void;
   onInsertCommitMention?: (commit: GitCommitContextPayload) => void;
   onInsertGitFileMention?: (file: GitFileContextPayload) => void;
@@ -376,6 +383,9 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
     onOpenFile,
     filePreviewRequest,
     onCloseFilePreview,
+    artifactSelection,
+    onArtifactSelect,
+    reviewChat,
     onInsertCodeReviewSkill,
     onInsertCommitMention,
     onInsertGitFileMention,
@@ -793,7 +803,15 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
                   )}
                 />
               </button>
-              {filePreviewRequest ? (
+              {filePreviewRequest && isReviewableArtifactPath(filePreviewRequest.path) ? (
+                <ArtifactReviewPanel
+                  request={filePreviewRequest}
+                  selection={artifactSelection ?? null}
+                  onSelect={onArtifactSelect ?? NOOP}
+                  onRequestClose={onCloseFilePreview ?? NOOP}
+                  reviewChat={reviewChat}
+                />
+              ) : filePreviewRequest ? (
                 <Suspense
                   fallback={
                     <div className="flex min-h-0 flex-1 items-center justify-center bg-background">

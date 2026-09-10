@@ -1295,6 +1295,10 @@ export const translations: Record<Locale, Record<string, string>> = {
       "让模型查阅、安装与管理技能（Skills），按需加载领域知识与工作流。需要在设置中启用技能功能后注册。",
     "settings.builtinTool.memory_manager.name": "记忆管理",
     "settings.builtinTool.memory_manager.desc": "读写长期记忆，跨会话保留信息",
+    "settings.builtinTool.visual_review.name": "视觉审稿",
+    "settings.builtinTool.visual_review.desc": "把预览图和素材交给视觉审稿模型检查",
+    "settings.builtinTool.visual_review.detail":
+      "将工作区内的图片（幻灯片预览、截图、图标位图）发送给设置中的视觉审稿模型并返回审稿意见。当前对话模型看不到图片时仍可完成视觉检查。只读操作。",
     "settings.builtinTool.memory_manager.detail":
       "维护跨会话的长期记忆：保存偏好、项目约定与关键结论，并在后续对话中检索使用。记忆内容可在设置的记忆面板中查看与整理。",
     "settings.builtinTool.agent.name": "子代理",
@@ -1468,6 +1472,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.conversationTitleModel": "标题生成模型",
     "settings.conversationTitleModelFollowCurrent": "使用当前对话模型",
     "settings.conversationTitleModelHint": "未选择时，标题生成会使用当前对话使用的模型。",
+    "settings.visualReviewModel": "视觉审稿模型",
+    "settings.visualReviewModelFollowCurrent": "使用当前对话模型",
+    "settings.visualReviewModelHint":
+      "VisualReview 工具用这个模型查看渲染预览和素材图片。未选择时使用当前对话模型；当前模型不支持图片输入时，请在这里配置一个支持视觉的模型。",
     "settings.customSettingsModelEmpty": "当前 Provider 未配置模型。",
 
     /* ── Settings Prompt ── */
@@ -3402,6 +3410,10 @@ export const translations: Record<Locale, Record<string, string>> = {
       "Lets the model browse, install and manage skills, loading domain knowledge and workflows on demand. Registered once the Skills feature is enabled in settings.",
     "settings.builtinTool.memory_manager.name": "Memory Manager",
     "settings.builtinTool.memory_manager.desc": "Read and write long-term memory across sessions",
+    "settings.builtinTool.visual_review.name": "Visual Review",
+    "settings.builtinTool.visual_review.desc": "Send previews and assets to the visual review model",
+    "settings.builtinTool.visual_review.detail":
+      "Sends workspace images (slide previews, screenshots, icon rasters) to the visual review model from Settings and returns its findings, so visual checks still happen when the chat model cannot see images. Read-only.",
     "settings.builtinTool.memory_manager.detail":
       "Maintains long-term memory across sessions: saving preferences, project conventions and key conclusions for later recall. Contents can be reviewed and organized in the Memory settings panel.",
     "settings.builtinTool.agent.name": "Subagent",
@@ -3581,6 +3593,10 @@ export const translations: Record<Locale, Record<string, string>> = {
     "settings.conversationTitleModelFollowCurrent": "Use current chat model",
     "settings.conversationTitleModelHint":
       "When unselected, title generation uses the model from the current chat.",
+    "settings.visualReviewModel": "Visual review model",
+    "settings.visualReviewModelFollowCurrent": "Use current chat model",
+    "settings.visualReviewModelHint":
+      "The VisualReview tool uses this model to look at rendered previews and asset images. When unselected the current chat model is used; pick a vision-capable model here when the chat model cannot accept images.",
     "settings.customSettingsModelEmpty":
       "No active models are configured for the current providers.",
 

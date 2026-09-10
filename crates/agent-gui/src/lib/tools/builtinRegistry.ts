@@ -39,6 +39,7 @@ import type { SystemToolId, SystemToolRuntimeScope } from "./systemToolOptions";
 import { createTerminalTools } from "./terminalTools";
 import { createTodoTools, type TodoToolState } from "./todoTools";
 import { createTunnelManagerTools, type TunnelManagerChange } from "./tunnelManagerTools";
+import { createVisualReviewTools, type VisualReviewModelConfig } from "./visualReviewTools";
 
 export type BuiltinToolRegistry = {
   tools: BuiltinToolBundle["tools"];
@@ -220,6 +221,8 @@ type BuildBuiltinBaseToolRegistryParams = {
   sshManagerRemoteAllowed?: boolean;
   /** Trusted identity for a channel run. Browser/local runs leave this empty. */
   principal?: PrincipalContext;
+  /** Model that answers VisualReview calls; the tool is registered only when this is set. */
+  visualReview?: VisualReviewModelConfig;
   onSshSessionsChanged?: (change: SshManagerSessionChange) => void | Promise<void>;
   onTunnelsChanged?: (change: TunnelManagerChange) => void | Promise<void>;
 };
@@ -260,6 +263,16 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
         workdir: params.workdir,
         skillAccessPolicy: params.skillAccessPolicy,
         onManagedSkillsChanged: params.onManagedSkillsChanged,
+      }),
+    );
+  }
+
+  if (workspaceAccess === "full" && params.visualReview) {
+    baseBundles.push(
+      createVisualReviewTools({
+        workdir: params.workdir,
+        review: params.visualReview,
+        resolveHomeDir,
       }),
     );
   }

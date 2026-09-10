@@ -73,6 +73,7 @@ import {
   type SubagentTemplate,
 } from "../../../lib/subagents";
 import { buildBuiltinToolRegistry } from "../../../lib/tools/builtinRegistry";
+import type { VisualReviewModelConfig } from "../../../lib/tools/visualReviewTools";
 import type { BuiltinToolExecutionContext } from "../../../lib/tools/builtinTypes";
 import { createFileToolState } from "../../../lib/tools/fileToolState";
 import type { SkillAccessPolicy } from "../../../lib/tools/skillAccessPolicy";
@@ -225,6 +226,8 @@ export type RunAgentConversationTurnParams = {
   /** Allows callers such as unattended runtimes to disable shared memory and extraction. */
   memoryEnabled?: boolean;
   principal?: PrincipalContext;
+  /** Model behind the VisualReview tool (configured review slot or the chat model). */
+  visualReview?: VisualReviewModelConfig;
   onManagedSkillsChanged?: (change: {
     action: "install" | "create";
     names: string[];
@@ -300,6 +303,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     skillAccessPolicy,
     memoryEnabled = true,
     principal,
+    visualReview,
     onManagedSkillsChanged,
     agentTemplates,
     selectedSystemToolIds,
@@ -435,6 +439,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     skillsRootDir,
     skillAccessPolicy,
     principal,
+    visualReview,
     onManagedSkillsChanged,
     runtimeScope: "chat",
     currentChatModel: selectedModel,

@@ -329,8 +329,8 @@ export function useChatTurnQueue(params: UseChatTurnQueueParams) {
     return true;
   }
 
-  function stopSending() {
-    const conversationId = currentConversationIdRef.current.trim();
+  function stopSending(conversationIdOverride?: string) {
+    const conversationId = (conversationIdOverride ?? currentConversationIdRef.current).trim();
     if (!conversationId) return;
     if (!stopConversation(conversationId)) {
       requestQueuedChatTurnProcessing(conversationId);

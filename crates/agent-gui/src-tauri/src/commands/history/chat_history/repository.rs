@@ -384,3 +384,55 @@ pub(crate) fn list_shared_chat_history_page_sync(
     let conn = open_db()?;
     list_shared_chat_history_sync(&conn, page, page_size)
 }
+/// Lexical normalization also works when an artifact was temporarily removed by a rebuild.
+fn review_path_key(path: &str) -> String {
+    let path = path.trim().replace('\\', "/");
+    let windows = path.as_bytes().get(1) == Some(&b':') || path.starts_with("//");
+    let prefix = if path.starts_with("//") { "//" } else if path.starts_with('/') { "/" } else { "" };
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|last: &&str| *last != ".." && !last.ends_with(':')) => { parts.pop(); }
+            ".." if !prefix.is_empty() || parts.last().is_some_and(|last: &&str| last.ends_with(':')) => {}
+            _ => parts.push(part),
+        }
+    }
+    let key = format!("{prefix}{}", parts.join("/"));
+    if windows { key.to_lowercase() } else { key }
+}
+
+fn review_binding_key(workdir: &str, artifact: &str) -> Option<(String, String)> {
+    if workdir.trim().is_empty() || artifact.trim().is_empty() {
+        return None;
+    }
+    let workspace = review_path_key(workdir);
+    let artifact = artifact.trim().replace('\\', "/");
+    let absolute = artifact.starts_with('/') || artifact.as_bytes().get(1) == Some(&b':');
+    let artifact = if absolute { artifact } else { format!("{workspace}/{artifact}") };
+    Some((workspace, review_path_key(&artifact)))
+}
+
+fn find_review_chat_history_sync(
+    conn: &Connection,
+    workdir: &str,
+    artifact_path: &str,
+) -> Result<Option<String>, String> {
+    let key = review_binding_key(workdir, artifact_path)
+        .ok_or_else(|| "workdir and artifactPath are required".to_string())?;
+    let mut statement = conn.prepare(
+        "SELECT id, context_meta_json FROM chatHistory WHERE archived_at IS NULL AND context_meta_json IS NOT NULL AND context_meta_json != '{}' ORDER BY updated_at DESC, id ASC",
+    ).map_err(|error| format!("Review conversation lookup failed: {error}"))?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| format!("Review conversation lookup failed: {error}"))?;
+    for row in rows {
+        let (id, metadata) = row.map_err(|error| format!("Review conversation read failed: {error}"))?;
+        let Ok(metadata) = serde_json::from_str::<Value>(&metadata) else { continue };
+        let Some(review) = metadata.get("review") else { continue };
+        let (Some(workdir), Some(artifact)) = (review.get("workdir").and_then(Value::as_str), review.get("artifactPath").and_then(Value::as_str)) else { continue };
+        if review_binding_key(workdir, artifact).as_ref() == Some(&key) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}

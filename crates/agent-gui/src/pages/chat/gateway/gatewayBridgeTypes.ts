@@ -141,6 +141,7 @@ export type SendChatAction = (overrides?: {
   composerDraftOverride?: MentionComposerDraft;
   uploadedFilesOverride?: PendingUploadedFile[];
   conversationIdOverride?: string;
+  artifactSelectionOverride?: import("../../../lib/artifactReview/types").SelectionContext | null;
   executionModeOverride?: ExecutionMode;
   workdirOverride?: string;
   allowEmptyWorkdirOverride?: boolean;

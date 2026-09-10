@@ -1344,6 +1344,200 @@ pub async fn system_create_project_folder(
         .map_err(|e| format!("system_create_project_folder join 失败：{e}"))?
 }
 
+
+// ---------------------------------------------------------------------------
+// Project asset import (deck/assets)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemImportWorkspaceAssetsResponse {
+    pub target_dir: String,
+    pub imported: Vec<SystemReadableFileEntry>,
+    pub skipped: Vec<String>,
+}
+
+const MAX_ASSET_IMPORT_FILES: usize = 500;
+const MAX_ASSET_IMPORT_BYTES: u64 = 50 * 1024 * 1024;
+const DEFAULT_ASSET_IMPORT_DIR: &str = "deck/assets";
+
+fn asset_import_kind(path: &Path) -> Option<&'static str> {
+    if let Some(kind) = infer_image_upload_kind(path) {
+        return Some(kind);
+    }
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("pptx") | Some("potx") => Some("presentation"),
+        _ => None,
+    }
+}
+
+/// Asset folders are always workspace-relative: no absolute paths, no `..`.
+fn sanitize_asset_target_dir(raw: Option<&str>) -> Result<PathBuf, String> {
+    let value = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_ASSET_IMPORT_DIR);
+    let mut out = PathBuf::new();
+    for segment in value.replace('\\', "/").split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." || segment.contains(':') {
+            return Err(format!("素材目录必须是工作区内的相对路径：{value}"));
+        }
+        out.push(segment);
+    }
+    if out.as_os_str().is_empty() {
+        return Err("素材目录不能为空".to_string());
+    }
+    Ok(out)
+}
+
+fn collect_asset_sources(selected: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for path in selected {
+        if path.is_dir() {
+            for entry in walkdir::WalkDir::new(&path)
+                .max_depth(4)
+                .follow_links(false)
+                .sort_by_file_name()
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if entry.file_type().is_file() {
+                    files.push(entry.into_path());
+                }
+                if files.len() > MAX_ASSET_IMPORT_FILES {
+                    return files;
+                }
+            }
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+pub(crate) fn system_import_workspace_assets_sync(
+    workdir: String,
+    target_dir: Option<String>,
+    paths: Option<Vec<String>>,
+    pick: Option<String>,
+) -> Result<SystemImportWorkspaceAssetsResponse, String> {
+    let workdir = canonicalize_upload_workdir(&workdir)?;
+    let target_rel = sanitize_asset_target_dir(target_dir.as_deref())?;
+    let target_abs = workdir.join(&target_rel);
+    fs::create_dir_all(&target_abs)
+        .map_err(|e| format!("创建素材目录失败 {}: {e}", target_abs.display()))?;
+    let target_canonical = fs::canonicalize(&target_abs)
+        .map_err(|e| format!("素材目录不可用 {}: {e}", target_abs.display()))?;
+    if !target_canonical.starts_with(&workdir) {
+        return Err("素材目录必须位于工作区内".to_string());
+    }
+    let target_display = target_rel.to_string_lossy().replace('\\', "/");
+
+    let selected: Vec<PathBuf> = match paths {
+        Some(list) if !list.is_empty() => list
+            .iter()
+            .map(|raw| expand_tilde_path(raw.trim()))
+            .collect(),
+        _ => {
+            let dialog = FileDialog::new().set_directory(&workdir);
+            match pick.as_deref().map(str::trim) {
+                Some("folder") => dialog
+                    .pick_folder()
+                    .map(|folder| vec![folder])
+                    .unwrap_or_default(),
+                _ => dialog.pick_files().unwrap_or_default(),
+            }
+        }
+    };
+
+    let mut skipped = Vec::new();
+    let mut imported = Vec::new();
+    for source in collect_asset_sources(selected) {
+        if imported.len() >= MAX_ASSET_IMPORT_FILES {
+            skipped.push(format!(
+                "已达到单次导入上限 {MAX_ASSET_IMPORT_FILES} 个文件"
+            ));
+            break;
+        }
+        let Some(kind) = asset_import_kind(&source) else {
+            skipped.push(format!("{}: 不是图片、SVG 或 PPTX 模板", source.display()));
+            continue;
+        };
+        let metadata = match fs::metadata(&source) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(_) => {
+                skipped.push(format!("{}: 仅支持普通文件", source.display()));
+                continue;
+            }
+            Err(error) => {
+                skipped.push(format!("{}: {error}", source.display()));
+                continue;
+            }
+        };
+        if metadata.len() > MAX_ASSET_IMPORT_BYTES {
+            skipped.push(format!("{}: 超过 50 MiB", source.display()));
+            continue;
+        }
+        let canonical_source = fs::canonicalize(&source).unwrap_or_else(|_| source.clone());
+        if canonical_source.starts_with(&target_canonical) {
+            imported.push(build_readable_file_entry(
+                &workdir,
+                &canonical_source,
+                kind,
+                metadata.len(),
+            )?);
+            continue;
+        }
+        let source_name = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("asset");
+        let destination =
+            unique_path_for_copy(target_canonical.join(sanitize_uploaded_file_name(source_name)));
+        fs::copy(&source, &destination).map_err(|e| {
+            format!(
+                "复制素材失败 {} -> {}: {e}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        imported.push(build_readable_file_entry(
+            &workdir,
+            &destination,
+            kind,
+            metadata.len(),
+        )?);
+    }
+
+    Ok(SystemImportWorkspaceAssetsResponse {
+        target_dir: target_display,
+        imported,
+        skipped,
+    })
+}
+
+#[tauri::command(rename_all = "snake_case")]
+pub async fn system_import_workspace_assets(
+    workdir: String,
+    target_dir: Option<String>,
+    paths: Option<Vec<String>>,
+    pick: Option<String>,
+) -> Result<SystemImportWorkspaceAssetsResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        system_import_workspace_assets_sync(workdir, target_dir, paths, pick)
+    })
+    .await
+    .map_err(|e| format!("system_import_workspace_assets join failed: {e}"))?
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub async fn system_pick_readable_files(
     workdir: String,
@@ -1698,6 +1892,69 @@ mod tests {
         .expect_err("reject missing parent");
 
         assert!(error.contains("父目录不存在"));
+    }
+
+    #[test]
+    fn import_workspace_assets_copies_images_and_svg_into_the_project() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "arcforge-asset-import-test-{}-{unique}",
+            std::process::id()
+        ));
+        let workdir = root.join("project");
+        let source = root.join("icons");
+        fs::create_dir_all(&workdir).expect("workdir");
+        fs::create_dir_all(source.join("nested")).expect("source");
+        fs::write(
+            source.join("check.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .expect("svg");
+        fs::write(source.join("nested/photo.png"), b"\x89PNG\r\n\x1a\n").expect("png");
+        fs::write(source.join("notes.txt"), "not an asset").expect("txt");
+
+        let response = system_import_workspace_assets_sync(
+            workdir.to_string_lossy().into_owned(),
+            None,
+            Some(vec![source.to_string_lossy().into_owned()]),
+            None,
+        )
+        .expect("import assets");
+        assert_eq!(response.target_dir, "deck/assets");
+        let mut imported: Vec<String> = response
+            .imported
+            .iter()
+            .map(|entry| entry.relative_path.clone())
+            .collect();
+        imported.sort();
+        assert_eq!(
+            imported,
+            vec!["deck/assets/check.svg", "deck/assets/photo.png"]
+        );
+        assert!(workdir.join("deck/assets/check.svg").is_file());
+        assert_eq!(response.skipped.len(), 1, "{:?}", response.skipped);
+        assert!(response.skipped[0].contains("notes.txt"));
+
+        // Importing again keeps the originals and adds suffixed copies instead of overwriting.
+        let again = system_import_workspace_assets_sync(
+            workdir.to_string_lossy().into_owned(),
+            Some("deck/assets".to_string()),
+            Some(vec![source.join("check.svg").to_string_lossy().into_owned()]),
+            None,
+        )
+        .expect("import again");
+        assert_eq!(again.imported.len(), 1);
+        assert_ne!(again.imported[0].relative_path, "deck/assets/check.svg");
+        assert!(again.imported[0]
+            .relative_path
+            .starts_with("deck/assets/check"));
+
+        assert!(sanitize_asset_target_dir(Some("../outside")).is_err());
+        assert!(sanitize_asset_target_dir(Some("C:/abs")).is_err());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

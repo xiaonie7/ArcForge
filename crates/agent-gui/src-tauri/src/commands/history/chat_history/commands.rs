@@ -1,4 +1,16 @@
 #[tauri::command]
+pub async fn chat_history_find_review(
+    workdir: String,
+    artifact_path: String,
+) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        find_review_chat_history_sync(&open_db()?, &workdir, &artifact_path)
+    })
+    .await
+    .map_err(|error| format!("chat_history_find_review join failed: {error}"))?
+}
+
+#[tauri::command]
 pub async fn chat_history_list(
     page: i64,
     page_size: i64,

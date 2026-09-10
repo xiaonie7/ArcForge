@@ -73,6 +73,9 @@ test("built-in slides skill is registered with structural and visual verificatio
   assert.match(slidesSkill, /schema_version: 3/);
   assert.match(slidesSkill, /mode: "template"/);
   assert.match(slidesSkill, /data-asset/);
+  assert.match(slidesSkill, /SVG assets/);
+  assert.match(slidesSkill, /data-fill/);
+  assert.match(slidesSkill, /\.arcforge-assets\/<asset id>\/raster\.png/);
   assert.match(slidesSkill, /references\/prompts\.md/);
   assert.doesNotMatch(slidesSkill, /python presentation\.py/);
   assert.match(slidesSkill, /only a rendered preview counts as visual verification/);
@@ -82,6 +85,8 @@ test("built-in slides skill is registered with structural and visual verificatio
   assert.match(presentationScript, /class SvgSlideConverter/);
   assert.match(presentationScript, /def create_svg_deck/);
   assert.match(presentationScript, /def run_validate/);
+  assert.match(presentationScript, /def place_vector_shapes/);
+  assert.match(presentationScript, /"--asset-cache"/);
   assert.match(presentationScript, /DECK_SCHEMA_VERSION = 3/);
   assert.match(builtinRegistrySource, /name: "arcforge-slides"/);
   assert.match(

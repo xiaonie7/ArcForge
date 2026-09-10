@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
@@ -14,6 +15,7 @@ use tauri::State;
 use super::document_artifacts::{
     prepare_office_runtime_artifacts, DocumentArtifactSummary, OfficeArtifactRecordInput,
 };
+use super::svg_assets;
 
 const SIDECAR_STEM: &str = "arcforge-office-runtime";
 const OFFICECLI_STEM: &str = "arcforge-officecli";
@@ -436,11 +438,25 @@ fn reject_unsafe_svg_markup(svg: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn is_valid_asset_id(asset_id: &str) -> bool {
+    !asset_id.is_empty()
+        && asset_id.len() <= 64
+        && asset_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        && asset_id != "."
+        && asset_id != ".."
+}
+
+/// Validate a schema_version 3 manifest. SVG assets are normalized into
+/// `<manifest dir>/.arcforge-assets/` on the way; the cache directory is returned so it can be
+/// handed to the runtime with `--asset-cache`.
 fn validate_svg_deck_manifest(
     value: &serde_json::Value,
     spec_dir: &Path,
     workspace: &Path,
-) -> Result<(), String> {
+) -> Result<Option<PathBuf>, String> {
+    let mut asset_cache: Option<PathBuf> = None;
     if let Some(mode) = value.get("mode").and_then(serde_json::Value::as_str) {
         if !matches!(mode, "blank" | "template") {
             return Err("specPath mode must be blank or template".to_string());
@@ -472,25 +488,32 @@ fn validate_svg_deck_manifest(
         for (asset_id, raw) in assets {
             let Some(raw) = raw.as_str() else {
                 return Err(format!(
-                    "specPath assets.{asset_id} must be a workspace image path"
+                    "specPath assets.{asset_id} must be a workspace image or SVG path"
                 ));
             };
             let extension = Path::new(raw)
                 .extension()
                 .and_then(OsStr::to_str)
                 .unwrap_or_default();
+            let label = format!("specPath assets.{asset_id}");
+            if extension.eq_ignore_ascii_case("svg") {
+                if !is_valid_asset_id(asset_id) {
+                    return Err(format!(
+                        "{label}: asset ids must use letters, digits, '_', '-' or '.' (max 64 chars)"
+                    ));
+                }
+                let path = resolve_existing_path(workspace, spec_dir, raw, extension, &label)?;
+                let cache_root = spec_dir.join(svg_assets::ASSET_CACHE_DIR_NAME);
+                svg_assets::prepare_svg_asset(asset_id, &path, &cache_root, &label)?;
+                asset_cache = Some(cache_root);
+                continue;
+            }
             if !is_image_asset_extension(extension) {
                 return Err(format!(
-                    "specPath assets.{asset_id} must point to a PNG, JPEG, GIF, BMP, or WebP image"
+                    "{label} must point to a PNG, JPEG, GIF, BMP, WebP, or SVG file"
                 ));
             }
-            resolve_existing_path(
-                workspace,
-                spec_dir,
-                raw,
-                extension,
-                &format!("specPath assets.{asset_id}"),
-            )?;
+            resolve_existing_path(workspace, spec_dir, raw, extension, &label)?;
         }
     }
     let Some(slides) = value.get("slides").and_then(serde_json::Value::as_array) else {
@@ -521,10 +544,13 @@ fn validate_svg_deck_manifest(
             .map_err(|error| format!("{label} must be UTF-8 text: {error}"))?;
         reject_unsafe_svg_markup(&svg_text, &label)?;
     }
-    Ok(())
+    Ok(asset_cache)
 }
 
-fn validate_presentation_assets(spec_path: &Path, workspace: &Path) -> Result<(), String> {
+fn validate_presentation_assets(
+    spec_path: &Path,
+    workspace: &Path,
+) -> Result<Option<PathBuf>, String> {
     let raw = std::fs::read_to_string(spec_path)
         .map_err(|error| format!("specPath could not be read: {error}"))?;
     let value: serde_json::Value = serde_json::from_str(&raw)
@@ -538,7 +564,7 @@ fn validate_presentation_assets(spec_path: &Path, workspace: &Path) -> Result<()
         return validate_svg_deck_manifest(&value, spec_dir, workspace);
     }
     let Some(slides) = value.get("slides").and_then(serde_json::Value::as_array) else {
-        return Ok(());
+        return Ok(None);
     };
     for (index, slide) in slides.iter().enumerate() {
         let Some(image) = slide.get("image").and_then(serde_json::Value::as_str) else {
@@ -555,7 +581,7 @@ fn validate_presentation_assets(spec_path: &Path, workspace: &Path) -> Result<()
             &format!("slides[{index}].image"),
         )?;
     }
-    Ok(())
+    Ok(None)
 }
 
 fn presentation_spec_is_svg_deck(spec_path: &Path) -> bool {
@@ -967,7 +993,7 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                 "json",
                 "specPath",
             )?;
-            validate_presentation_assets(&spec, &workspace)?;
+            let asset_cache = validate_presentation_assets(&spec, &workspace)?;
             let output = resolve_output_path(
                 &workspace,
                 required_path(&input.output_path, "outputPath")?,
@@ -976,6 +1002,9 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
             )?;
             push_path_argument(&mut arguments, "--spec", spec.clone());
             push_path_argument(&mut arguments, "--output", output);
+            if let Some(asset_cache) = asset_cache {
+                push_path_argument(&mut arguments, "--asset-cache", asset_cache);
+            }
             if let Some(raw_template) = input
                 .input_path
                 .as_deref()
@@ -1018,8 +1047,11 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                         .to_string(),
                 );
             }
-            validate_presentation_assets(&spec, &workspace)?;
+            let asset_cache = validate_presentation_assets(&spec, &workspace)?;
             push_path_argument(&mut arguments, "--spec", spec);
+            if let Some(asset_cache) = asset_cache {
+                push_path_argument(&mut arguments, "--asset-cache", asset_cache);
+            }
             if let Some(raw_template) = input
                 .input_path
                 .as_deref()
@@ -1923,9 +1955,801 @@ pub fn office_runtime_cancel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Slide previews for the workspace file viewer
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationPreviewPageResponse {
+    path: String,
+    slide_count: usize,
+    page: usize,
+    mime_type: String,
+    data: String,
+    size_bytes: u64,
+    cached: bool,
+}
+
+const PRESENTATION_PREVIEW_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn presentation_preview_cache_dir() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("arcforge-presentation-preview");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Failed to create the slide preview cache: {error}"))?;
+    Ok(dir)
+}
+
+/// Render one slide of a workspace PPTX to PNG through OfficeCLI. Results are cached in the
+/// temp directory keyed by file path, modification time, size, and page.
+fn presentation_preview_page_sync(
+    workdir: String,
+    path: String,
+    page: Option<usize>,
+    width: Option<u32>,
+) -> Result<PresentationPreviewPageResponse, String> {
+    let (file, display) = resolve_presentation_for_review(&workdir, &path)?;
+    let parts = pptx_slide_parts(&file)?;
+    let slide_count = parts.len();
+    let page = page.unwrap_or(1).clamp(1, slide_count);
+    let width = width.unwrap_or(1600).clamp(160, 3200);
+    let workspace = file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // The cache key follows the slide content, not the file: re-creating a deck only
+    // invalidates the slides whose XML (or shared masters/media) actually changed.
+    let mut hasher = Sha256::new();
+    hasher.update(parts[page - 1].fingerprint.as_bytes());
+    hasher.update((page as u64).to_le_bytes());
+    hasher.update(u64::from(width).to_le_bytes());
+    let key: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let cache_dir = presentation_preview_cache_dir()?;
+    let target = cache_dir.join(format!("{key}.png"));
+    let mut cached = true;
+
+    if !target.is_file() {
+        cached = false;
+        let runtime = resolve_officecli_program()?;
+        let temp = cache_dir.join(format!("{key}.{}.tmp.png", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
+        let mut command = Command::new(&runtime.program);
+        command
+            .args(&runtime.prefix_arguments)
+            .arg("view")
+            .arg(&file)
+            .arg("screenshot")
+            .arg("--render")
+            .arg("html")
+            .arg("--page")
+            .arg(page.to_string())
+            .arg("--screenshot-width")
+            .arg(width.to_string())
+            .arg("-o")
+            .arg(&temp)
+            .arg("--json")
+            .current_dir(&workspace)
+            .env("OFFICECLI_NO_AUTO_INSTALL", "1")
+            .env("OFFICECLI_SKIP_UPDATE", "1")
+            .env("OFFICECLI_NO_AUTO_RESIDENT", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("Failed to start OfficeCLI: {error}"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to capture OfficeCLI stdout".to_string())?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "Failed to capture OfficeCLI stderr".to_string())?;
+        let stdout_reader = thread::spawn(move || read_capped(stdout, STDOUT_LIMIT_BYTES));
+        let stderr_reader = thread::spawn(move || read_capped(stderr, STDERR_LIMIT_BYTES));
+        let cancelled = AtomicBool::new(false);
+        let (status, timed_out, _) =
+            wait_for_child(&mut child, PRESENTATION_PREVIEW_TIMEOUT, &cancelled)?;
+        let _ = stdout_reader.join();
+        let stderr_text = stderr_reader
+            .join()
+            .map(|captured| captured.text)
+            .unwrap_or_default();
+        if timed_out {
+            let _ = std::fs::remove_file(&temp);
+            return Err("Rendering the slide preview timed out".to_string());
+        }
+        if !status.success() || !temp.is_file() {
+            let _ = std::fs::remove_file(&temp);
+            let detail = stderr_text.trim();
+            return Err(if detail.is_empty() {
+                "OfficeCLI could not render the slide".to_string()
+            } else {
+                format!("OfficeCLI could not render the slide: {detail}")
+            });
+        }
+        if std::fs::rename(&temp, &target).is_err() {
+            // A concurrent render already produced the same page.
+            let _ = std::fs::remove_file(&temp);
+            if !target.is_file() {
+                return Err("Failed to store the slide preview".to_string());
+            }
+        }
+    }
+
+    let bytes = std::fs::read(&target)
+        .map_err(|error| format!("Failed to read the slide preview: {error}"))?;
+    Ok(PresentationPreviewPageResponse {
+        path: display,
+        slide_count,
+        page,
+        mime_type: "image/png".to_string(),
+        size_bytes: bytes.len() as u64,
+        data: BASE64_STANDARD.encode(&bytes),
+        cached,
+    })
+}
+
+
+// ---------------------------------------------------------------------------
+// Artifact review: slide enumeration for the workspace review panel
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationUnit {
+    /// 1-based position in presentation order.
+    index: usize,
+    /// Stable id: the slide name written by ArcForge (`slide_id`) or `slide-N`.
+    id: String,
+    name: String,
+    title: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationUnitsResponse {
+    path: String,
+    slide_count: usize,
+    units: Vec<PresentationUnit>,
+}
+
+struct SlidePart {
+    index: usize,
+    entry_name: String,
+    unit: PresentationUnit,
+    /// Fingerprint of everything that renders this slide: its XML, its rels, and the shared
+    /// parts (masters, layouts, theme, media).
+    fingerprint: String,
+}
+
+fn xml_attribute(tag: &str, name: &str) -> Option<String> {
+    let pattern = format!(r#"(?i)\b{name}\s*=\s*"([^"]*)""#);
+    regex::Regex::new(&pattern)
+        .ok()?
+        .captures(tag)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_string())
+}
+
+fn unescape_xml_text(value: &str) -> String {
+    quick_xml::escape::unescape(value)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn read_zip_entry(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<Vec<u8>> {
+    let mut entry = archive.by_name(name).ok()?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// Enumerate slides in presentation order with stable ids and render fingerprints.
+fn pptx_slide_parts(path: &Path) -> Result<Vec<SlidePart>, String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("path could not be opened: {error}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("path is not a valid PPTX package: {error}"))?;
+
+    // Shared parts digest: every entry that is not a slide or slide rels.
+    let mut shared = Sha256::new();
+    let mut names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    names.sort();
+    for name in &names {
+        let is_slide_part = name.starts_with("ppt/slides/slide") && name.ends_with(".xml");
+        let is_slide_rels = name.starts_with("ppt/slides/_rels/slide") && name.ends_with(".rels");
+        if is_slide_part || is_slide_rels {
+            continue;
+        }
+        if let Ok(entry) = archive.by_name(name) {
+            shared.update(name.as_bytes());
+            shared.update(entry.crc32().to_le_bytes());
+            shared.update(entry.size().to_le_bytes());
+        }
+    }
+    let shared_digest = shared.finalize();
+
+    let presentation_xml = read_zip_entry(&mut archive, "ppt/presentation.xml")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .ok_or_else(|| "path does not contain ppt/presentation.xml".to_string())?;
+    let rels_xml = read_zip_entry(&mut archive, "ppt/_rels/presentation.xml.rels")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+
+    let relationship_tag = regex::Regex::new(r"(?is)<Relationship\b[^>]*>").expect("static regex");
+    let mut targets_by_id: HashMap<String, String> = HashMap::new();
+    for tag in relationship_tag.find_iter(&rels_xml) {
+        let tag = tag.as_str();
+        if let (Some(id), Some(target)) = (xml_attribute(tag, "Id"), xml_attribute(tag, "Target"))
+        {
+            let target = target.trim_start_matches("/ppt/").trim_start_matches('/').to_string();
+            targets_by_id.insert(id, target);
+        }
+    }
+
+    let slide_id_tag = regex::Regex::new(r"(?is)<p:sldId\b[^>]*>").expect("static regex");
+    let mut slide_entries: Vec<String> = slide_id_tag
+        .find_iter(&presentation_xml)
+        .filter_map(|tag| xml_attribute(tag.as_str(), "r:id"))
+        .filter_map(|rid| targets_by_id.get(&rid).cloned())
+        .map(|target| {
+            if target.starts_with("ppt/") {
+                target
+            } else {
+                format!("ppt/{target}")
+            }
+        })
+        .collect();
+    if slide_entries.is_empty() {
+        // Fall back to numeric order for packages without a usable sldIdLst.
+        let mut numbered: Vec<(usize, String)> = names
+            .iter()
+            .filter_map(|name| {
+                name.strip_prefix("ppt/slides/slide")
+                    .and_then(|rest| rest.strip_suffix(".xml"))
+                    .and_then(|digits| digits.parse::<usize>().ok())
+                    .map(|number| (number, name.clone()))
+            })
+            .collect();
+        numbered.sort();
+        slide_entries = numbered.into_iter().map(|(_, name)| name).collect();
+    }
+    if slide_entries.is_empty() {
+        return Err("path does not contain any slides".to_string());
+    }
+
+    let name_tag = regex::Regex::new(r"(?is)<p:cSld\b[^>]*>").expect("static regex");
+    let text_run = regex::Regex::new(r"(?is)<a:t>([^<]*)</a:t>").expect("static regex");
+    let mut parts = Vec::with_capacity(slide_entries.len());
+    for (position, entry_name) in slide_entries.iter().enumerate() {
+        let index = position + 1;
+        let xml_bytes = read_zip_entry(&mut archive, entry_name)
+            .ok_or_else(|| format!("slide part {entry_name} is missing"))?;
+        let xml = String::from_utf8_lossy(&xml_bytes).into_owned();
+        let rels_name = entry_name
+            .rsplit_once('/')
+            .map(|(dir, file)| format!("{dir}/_rels/{file}.rels"))
+            .unwrap_or_default();
+        let rels_bytes = read_zip_entry(&mut archive, &rels_name).unwrap_or_default();
+
+        let name = name_tag
+            .find(&xml)
+            .and_then(|tag| xml_attribute(tag.as_str(), "name"))
+            .map(|value| unescape_xml_text(&value))
+            .unwrap_or_default();
+        let title = text_run
+            .captures_iter(&xml)
+            .map(|captures| unescape_xml_text(captures.get(1).map_or("", |m| m.as_str())))
+            .map(|text| text.trim().to_string())
+            .find(|text| !text.is_empty())
+            .map(|text| text.chars().take(80).collect::<String>())
+            .unwrap_or_default();
+        let id = if !name.trim().is_empty() {
+            name.trim().to_string()
+        } else {
+            format!("slide-{index}")
+        };
+
+        let mut hasher = Sha256::new();
+        hasher.update(&xml_bytes);
+        hasher.update(&rels_bytes);
+        hasher.update(shared_digest);
+        let fingerprint: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        parts.push(SlidePart {
+            index,
+            entry_name: entry_name.clone(),
+            unit: PresentationUnit {
+                index,
+                id,
+                name,
+                title,
+            },
+            fingerprint,
+        });
+    }
+    Ok(parts)
+}
+
+fn resolve_presentation_for_review(workdir: &str, path: &str) -> Result<(PathBuf, String), String> {
+    let workdir_raw = workdir.trim();
+    if workdir_raw.is_empty() {
+        return Err("workdir is required".to_string());
+    }
+    let workspace = std::fs::canonicalize(workdir_raw)
+        .map_err(|error| format!("workdir cannot be opened: {error}"))?;
+    let raw = path.trim();
+    let extension = Path::new(raw)
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !matches!(extension.as_str(), "pptx" | "pptm" | "potx") {
+        return Err("Only .pptx, .pptm, and .potx files can be previewed as slides".to_string());
+    }
+    let file = resolve_existing_path(&workspace, &workspace, raw, &extension, "path")?;
+    Ok((file, raw.replace('\\', "/")))
+}
+
+fn presentation_units_sync(workdir: String, path: String) -> Result<PresentationUnitsResponse, String> {
+    let (file, display) = resolve_presentation_for_review(&workdir, &path)?;
+    let parts = pptx_slide_parts(&file)?;
+    Ok(PresentationUnitsResponse {
+        path: display,
+        slide_count: parts.len(),
+        units: parts.into_iter().map(|part| part.unit).collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn presentation_units(
+    workdir: String,
+    path: String,
+) -> Result<PresentationUnitsResponse, String> {
+    tokio::task::spawn_blocking(move || presentation_units_sync(workdir, path))
+        .await
+        .map_err(|error| format!("Slide enumeration worker failed: {error}"))?
+}
+
+
+// ---------------------------------------------------------------------------
+// Artifact review: semantic blocks inside one slide (overlay hit-testing)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationElement {
+    /// Unique SVG/shape name, or an id based on DrawingML cNvPr id for unnamed/duplicate shapes.
+    id: String,
+    /// title | subtitle | text_block | image | chart | table | footer
+    element_type: String,
+    label: String,
+    /// x, y, width, height in the 1280×720 review canvas.
+    bbox: [f64; 4],
+    /// Underlying DrawingML node: sp | pic | graphicFrame | grpSp
+    kind: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationElementsResponse {
+    path: String,
+    page: usize,
+    slide_id: String,
+    canvas: [f64; 2],
+    elements: Vec<PresentationElement>,
+}
+
+const REVIEW_CANVAS_WIDTH: f64 = 1280.0;
+const REVIEW_CANVAS_HEIGHT: f64 = 720.0;
+const SEMANTIC_ELEMENT_TYPES: [&str; 7] = [
+    "title",
+    "subtitle",
+    "text_block",
+    "image",
+    "chart",
+    "table",
+    "footer",
+];
+
+fn presentation_slide_size(archive: &mut zip::ZipArchive<std::fs::File>) -> (f64, f64) {
+    let xml = read_zip_entry(archive, "ppt/presentation.xml")
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default();
+    let tag = regex::Regex::new(r"(?is)<p:sldSz\b[^>]*>").expect("static regex");
+    let size = tag
+        .find(&xml)
+        .map(|found| found.as_str().to_string())
+        .unwrap_or_default();
+    let cx = xml_attribute(&size, "cx")
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(12_192_000.0);
+    let cy = xml_attribute(&size, "cy")
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(6_858_000.0);
+    (cx, cy)
+}
+
+/// Split `<p:spTree>` into its direct children (sp, pic, graphicFrame, grpSp, cxnSp) with
+/// their full XML, ignoring nested group members.
+fn top_level_shape_bodies(slide_xml: &str) -> Vec<(String, String)> {
+    let tree_start = match slide_xml.find("<p:spTree") {
+        Some(index) => index,
+        None => return Vec::new(),
+    };
+    let tree = &slide_xml[tree_start..];
+    let tree = tree.split("</p:spTree>").next().unwrap_or(tree);
+    let tag = regex::Regex::new(r"(?s)<(/?)(p:sp|p:pic|p:graphicFrame|p:grpSp|p:cxnSp)\b[^>]*?(/?)>")
+        .expect("static regex");
+    let mut bodies = Vec::new();
+    let mut depth = 0usize;
+    let mut open_at: Option<(usize, String)> = None;
+    for capture in tag.captures_iter(tree) {
+        let whole = capture.get(0).unwrap();
+        let closing = capture.get(1).map_or(false, |m| m.as_str() == "/");
+        let name = capture.get(2).map_or("", |m| m.as_str()).to_string();
+        let self_closing = capture.get(3).map_or(false, |m| m.as_str() == "/");
+        if !closing && self_closing {
+            if depth == 0 {
+                bodies.push((name, whole.as_str().to_string()));
+            }
+            continue;
+        }
+        if !closing {
+            if depth == 0 {
+                open_at = Some((whole.start(), name));
+            }
+            depth += 1;
+        } else {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                if let Some((start, open_name)) = open_at.take() {
+                    bodies.push((open_name, tree[start..whole.end()].to_string()));
+                }
+            }
+        }
+    }
+    bodies
+}
+
+fn first_tag(body: &str, pattern: &str) -> Option<String> {
+    regex::Regex::new(pattern)
+        .ok()?
+        .find(body)
+        .map(|found| found.as_str().to_string())
+}
+
+fn classify_element(kind: &str, name: &str, descr: &str, placeholder: &str, body: &str, bbox: [f64; 4]) -> Option<&'static str> {
+    if let Some(role) = descr
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("arcforge:role="))
+    {
+        let role = role.trim();
+        if let Some(found) = SEMANTIC_ELEMENT_TYPES.iter().find(|candidate| **candidate == role) {
+            return Some(found);
+        }
+    }
+    let lowered_name = name.to_ascii_lowercase();
+    let has_text = regex::Regex::new(r"(?s)<a:t>[^<]*\S[^<]*</a:t>")
+        .map(|re| re.is_match(body))
+        .unwrap_or(false);
+    let graphic_uri = first_tag(body, r#"(?is)<a:graphicData\b[^>]*>"#)
+        .and_then(|tag| xml_attribute(&tag, "uri"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match kind {
+        "p:pic" => return Some("image"),
+        "p:grpSp" => return Some("image"),
+        "p:graphicFrame" => {
+            if graphic_uri.contains("/chart") {
+                return Some("chart");
+            }
+            if graphic_uri.contains("/table") {
+                return Some("table");
+            }
+            if graphic_uri.contains("/picture") {
+                return Some("image");
+            }
+            return None;
+        }
+        "p:cxnSp" => return None,
+        _ => {}
+    }
+    match placeholder {
+        "title" | "ctrTitle" => return Some("title"),
+        "subTitle" => return Some("subtitle"),
+        "ftr" => return Some("footer"),
+        "pic" => return Some("image"),
+        "chart" => return Some("chart"),
+        "tbl" => return Some("table"),
+        "sldNum" | "dt" => return None,
+        _ => {}
+    }
+    if !has_text {
+        return None;
+    }
+    if lowered_name.starts_with("title") || lowered_name == "heading" {
+        return Some("title");
+    }
+    if lowered_name.starts_with("subtitle") || lowered_name.starts_with("sub-title") {
+        return Some("subtitle");
+    }
+    let bottom = bbox[1] + bbox[3];
+    if lowered_name.contains("footer") || (bottom > REVIEW_CANVAS_HEIGHT * 0.92 && bbox[3] < REVIEW_CANVAS_HEIGHT * 0.1) {
+        return Some("footer");
+    }
+    Some("text_block")
+}
+
+fn presentation_elements_from_xml(
+    slide_xml: &str,
+    slide_cx: f64,
+    slide_cy: f64,
+    inherited_shapes: &[(String, String)],
+) -> Vec<PresentationElement> {
+    let scale_x = REVIEW_CANVAS_WIDTH / slide_cx;
+    let scale_y = REVIEW_CANVAS_HEIGHT / slide_cy;
+    let text_run = regex::Regex::new(r"(?is)<a:t>([^<]*)</a:t>").expect("static regex");
+    let mut elements = Vec::new();
+    let shapes = top_level_shape_bodies(slide_xml);
+    let shape_name = |body: &str| {
+        first_tag(body, r"(?is)<p:cNvPr\b[^>]*>")
+            .and_then(|tag| xml_attribute(&tag, "name"))
+            .map(|name| unescape_xml_text(&name).trim().to_string())
+            .unwrap_or_default()
+    };
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for (_, body) in &shapes {
+        *name_counts.entry(shape_name(body)).or_default() += 1;
+    }
+    let mut used_ids = std::collections::HashSet::new();
+    let default_name = regex::Regex::new(r"(?i)^(?:Text|Rect|Oval|Freeform|Line|Picture|TextBox|Group)(?: \d+)?$").expect("static regex");
+    for (kind, body) in shapes {
+        let cnv = first_tag(&body, r"(?is)<p:cNvPr\b[^>]*>").unwrap_or_default();
+        let raw_name = xml_attribute(&cnv, "name")
+            .map(|value| unescape_xml_text(&value))
+            .unwrap_or_default();
+        let descr = xml_attribute(&cnv, "descr")
+            .map(|value| unescape_xml_text(&value))
+            .unwrap_or_default();
+        let placeholder_tag = first_tag(&body, r"(?is)<p:ph\b[^>]*>");
+        let placeholder = placeholder_tag.as_deref()
+            .and_then(|tag| xml_attribute(tag, "type"))
+            .unwrap_or_else(|| {
+                if body.contains("<p:ph") {
+                    "body".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let inherited = placeholder_tag.as_deref().and_then(|tag| {
+            let index = xml_attribute(tag, "idx").unwrap_or_else(|| "0".to_string());
+            inherited_shapes.iter().find(|(_, candidate)| {
+                first_tag(candidate, r"(?is)<p:ph\b[^>]*>").is_some_and(|candidate| {
+                    xml_attribute(&candidate, "idx").unwrap_or_else(|| "0".to_string()) == index
+                }) && shape_transform(&kind, candidate).is_some()
+            })
+        });
+        let Some(xfrm) = shape_transform(&kind, &body)
+            .or_else(|| inherited.and_then(|(_, body)| shape_transform(&kind, body))) else {
+            continue;
+        };
+        let off = first_tag(&xfrm, r"(?is)<a:off\b[^>]*>").unwrap_or_default();
+        let ext = first_tag(&xfrm, r"(?is)<a:ext\b[^>]*>").unwrap_or_default();
+        let read = |tag: &str, attribute: &str| {
+            xml_attribute(tag, attribute)
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0)
+        };
+        let mut bbox = [
+            (read(&off, "x") * scale_x * 10.0).round() / 10.0,
+            (read(&off, "y") * scale_y * 10.0).round() / 10.0,
+            (read(&ext, "cx") * scale_x * 10.0).round() / 10.0,
+            (read(&ext, "cy") * scale_y * 10.0).round() / 10.0,
+        ];
+        if bbox[2] <= 0.0 || bbox[3] <= 0.0 {
+            continue;
+        }
+        // The preview is an axis-aligned overlay even for an imported rotated shape.
+        let rotation = read(&xfrm, "rot") / 60000.0;
+        if rotation != 0.0 {
+            let (sin, cos) = rotation.to_radians().sin_cos();
+            let width = bbox[2] * cos.abs() + bbox[3] * sin.abs() * scale_x / scale_y;
+            let height = bbox[2] * sin.abs() * scale_y / scale_x + bbox[3] * cos.abs();
+            bbox[0] += (bbox[2] - width) / 2.0;
+            bbox[1] += (bbox[3] - height) / 2.0;
+            bbox[2] = width;
+            bbox[3] = height;
+        }
+        let Some(element_type) = classify_element(&kind, &raw_name, &descr, &placeholder, &body, bbox)
+        else {
+            continue;
+        };
+        let name = raw_name.trim();
+        let mut id = name.to_string();
+        if name.is_empty() || name_counts.get(name).copied().unwrap_or(0) > 1
+            || (descr.is_empty() && default_name.is_match(name)) {
+            let Some(shape_id) = xml_attribute(&cnv, "id").filter(|id| !id.is_empty()) else { continue };
+            id = format!("shape-{shape_id}");
+            // Explicit SVG names win, even if one happens to look like our fallback id.
+            while name_counts.contains_key(&id) {
+                id = format!("shape-{id}");
+            }
+        }
+        if !used_ids.insert(id.clone()) {
+            continue;
+        }
+        let label = text_run
+            .captures_iter(&body)
+            .map(|captures| unescape_xml_text(captures.get(1).map_or("", |m| m.as_str())))
+            .map(|text| text.trim().to_string())
+            .find(|text| !text.is_empty())
+            .map(|text| text.chars().take(60).collect::<String>())
+            .unwrap_or_else(|| id.clone());
+        elements.push(PresentationElement {
+            id,
+            element_type: element_type.to_string(),
+            label,
+            bbox,
+            kind: kind.trim_start_matches("p:").to_string(),
+        });
+    }
+
+    elements
+}
+
+fn shape_transform(kind: &str, body: &str) -> Option<String> {
+    let (properties, transform) = match kind {
+        "p:graphicFrame" => return first_tag(body, r"(?is)<p:xfrm\b[^>]*>.*?</p:xfrm>"),
+        "p:grpSp" => (r"(?is)<p:grpSpPr\b[^>]*>.*?</p:grpSpPr>", r"(?is)<a:xfrm\b[^>]*>.*?</a:xfrm>"),
+        _ => (r"(?is)<p:spPr\b[^>]*>.*?</p:spPr>", r"(?is)<a:xfrm\b[^>]*>.*?</a:xfrm>"),
+    };
+    first_tag(body, properties).and_then(|properties| first_tag(&properties, transform))
+}
+
+fn presentation_layout_shapes(archive: &mut zip::ZipArchive<std::fs::File>, slide_part: &str) -> Vec<(String, String)> {
+    let Some((directory, filename)) = slide_part.rsplit_once('/') else { return Vec::new() };
+    let Some(rels) = read_zip_entry(archive, &format!("{directory}/_rels/{filename}.rels")) else { return Vec::new() };
+    let rels = String::from_utf8_lossy(&rels);
+    let relation = regex::Regex::new(r"(?is)<Relationship\b[^>]*>").expect("static regex");
+    let target = relation.find_iter(&rels).find_map(|tag| {
+        let tag = tag.as_str();
+        if !xml_attribute(tag, "Type")?.ends_with("/slideLayout") || xml_attribute(tag, "TargetMode").as_deref() == Some("External") { return None }
+        xml_attribute(tag, "Target")
+    });
+    let Some(target) = target else { return Vec::new() };
+    let path = if target.starts_with('/') { target.trim_start_matches('/').to_string() } else { format!("{directory}/{target}") };
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component { ".." => { components.pop(); }, "." | "" => {}, _ => components.push(component) }
+    }
+    read_zip_entry(archive, &components.join("/"))
+        .map(|xml| top_level_shape_bodies(&String::from_utf8_lossy(&xml)))
+        .unwrap_or_default()
+}
+
+fn presentation_elements_sync(workdir: String, path: String, page: usize) -> Result<PresentationElementsResponse, String> {
+    let (file, display) = resolve_presentation_for_review(&workdir, &path)?;
+    let parts = pptx_slide_parts(&file)?;
+    if page == 0 || page > parts.len() {
+        return Err(format!("page must be between 1 and {}", parts.len()));
+    }
+    let part = &parts[page - 1];
+    let handle = std::fs::File::open(&file).map_err(|error| format!("path could not be opened: {error}"))?;
+    let mut archive = zip::ZipArchive::new(handle).map_err(|error| format!("path is not a valid PPTX package: {error}"))?;
+    let (slide_cx, slide_cy) = presentation_slide_size(&mut archive);
+    let slide_xml = read_zip_entry(&mut archive, &part.entry_name)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).ok_or_else(|| "slide part is missing".to_string())?;
+    let inherited = presentation_layout_shapes(&mut archive, &part.entry_name);
+    let elements = presentation_elements_from_xml(&slide_xml, slide_cx, slide_cy, &inherited);
+    Ok(PresentationElementsResponse {
+        path: display,
+        page,
+        slide_id: part.unit.id.clone(),
+        canvas: [REVIEW_CANVAS_WIDTH, REVIEW_CANVAS_HEIGHT],
+        elements,
+    })
+}
+
+#[tauri::command]
+pub async fn presentation_elements(
+    workdir: String,
+    path: String,
+    page: usize,
+) -> Result<PresentationElementsResponse, String> {
+    tokio::task::spawn_blocking(move || presentation_elements_sync(workdir, path, page))
+        .await
+        .map_err(|error| format!("Slide element worker failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn presentation_preview_page(
+    workdir: String,
+    path: String,
+    page: Option<usize>,
+    width: Option<u32>,
+) -> Result<PresentationPreviewPageResponse, String> {
+    tokio::task::spawn_blocking(move || presentation_preview_page_sync(workdir, path, page, width))
+        .await
+        .map_err(|error| format!("Slide preview worker failed: {error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn review_shape(id: usize, name: &str, role: &str, content: &str) -> String {
+        format!(r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{name}" descr="{role}"/></p:nvSpPr><p:spPr><a:xfrm><a:off x="100" y="80"/><a:ext cx="200" cy="50"/></a:xfrm></p:spPr>{content}</p:sp>"#)
+    }
+
+    #[test]
+    fn presentation_elements_exposes_seven_roles_and_keeps_groups_atomic() {
+        let mut shapes = SEMANTIC_ELEMENT_TYPES.iter().enumerate().map(|(index, role)| {
+            review_shape(index + 1, role, &format!("arcforge:role={role}"), "")
+        }).collect::<String>();
+        let child = review_shape(20, "icon/1", "arcforge:role=title", "<p:txBody><a:t>child</a:t></p:txBody>");
+        shapes.push_str(&format!(r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="19" name="icon"/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="400" y="200"/><a:ext cx="80" cy="80"/><a:chOff x="0" y="0"/><a:chExt cx="24" cy="24"/></a:xfrm></p:grpSpPr>{child}</p:grpSp>"#));
+        shapes.push_str(&review_shape(21, "decoration", "", ""));
+        let elements = presentation_elements_from_xml(&format!("<p:spTree>{shapes}</p:spTree>"), 1280.0, 720.0, &[]);
+        assert_eq!(elements.len(), 8);
+        assert_eq!(elements.iter().take(7).map(|element| element.element_type.as_str()).collect::<Vec<_>>(), SEMANTIC_ELEMENT_TYPES);
+        assert_eq!(elements[0].bbox, [100.0, 80.0, 200.0, 50.0]);
+        assert_eq!(elements[7].id, "icon");
+        assert_eq!(elements[7].bbox, [400.0, 200.0, 80.0, 80.0]);
+        assert!(!elements.iter().any(|element| element.id == "icon/1"));
+    }
+
+    #[test]
+    fn presentation_elements_duplicate_and_default_names_use_stable_shape_ids() {
+        let text = "<p:txBody><a:t>Hello &amp; world</a:t></p:txBody>";
+        let a = review_shape(10, "Text", "", text);
+        let b = review_shape(11, "Text", "", text);
+        let explicit = review_shape(12, "shape-10", "arcforge:role=title", text);
+        let read = |shapes: String| presentation_elements_from_xml(&format!("<p:spTree>{shapes}</p:spTree>"), 1280.0, 720.0, &[]);
+        let first = read(format!("{a}{b}{explicit}"));
+        let second = read(format!("{b}{a}{explicit}"));
+        assert_eq!(first[0].id, "shape-shape-10");
+        assert_eq!(first[1].id, "shape-11");
+        assert_eq!(first[2].id, "shape-10");
+        assert_eq!(first[0].id, second[1].id);
+        assert_eq!(first[1].id, second[0].id);
+        assert_eq!(read(b)[0].id, "shape-11");
+        assert_eq!(first[0].label, "Hello & world");
+    }
+
+    #[test]
+    fn presentation_elements_reads_native_media_and_inherited_placeholder_boxes() {
+        let transform = r#"<a:off x="10" y="20"/><a:ext cx="100" cy="50"/>"#;
+        let picture = format!(r#"<p:pic><p:nvPicPr><p:cNvPr id="1" name="hero"/></p:nvPicPr><p:spPr><a:xfrm rot="5400000">{transform}</a:xfrm></p:spPr></p:pic>"#);
+        let graphic = |id, kind| format!(r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="{kind}"/></p:nvGraphicFramePr><p:xfrm>{transform}</p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/{kind}"/></a:graphic></p:graphicFrame>"#);
+        let placeholder = r#"<p:sp><p:nvSpPr><p:cNvPr id="4" name="Heading"/><p:nvPr><p:ph type="title" idx="2"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:t>Title</a:t></p:txBody></p:sp>"#;
+        let layout = placeholder.replace("<p:spPr/>", &format!("<p:spPr><a:xfrm>{transform}</a:xfrm></p:spPr>"));
+        let xml = format!("<p:spTree>{picture}{}{}{placeholder}</p:spTree>", graphic(2, "chart"), graphic(3, "table"));
+        let elements = presentation_elements_from_xml(&xml, 1280.0, 720.0, &[("p:sp".to_string(), layout)]);
+        assert_eq!(elements.len(), 4);
+        assert_eq!(elements.iter().map(|element| element.element_type.as_str()).collect::<Vec<_>>(), ["image", "chart", "table", "title"]);
+        assert!((elements[0].bbox[2] - 50.0).abs() < 0.01);
+        assert!((elements[0].bbox[3] - 100.0).abs() < 0.01);
+        assert_eq!(elements[3].bbox, [10.0, 20.0, 100.0, 50.0]);
+    }
 
     fn word_request(workspace: &Path, action: &str) -> OfficeRuntimeRequest {
         OfficeRuntimeRequest {
@@ -2461,6 +3285,218 @@ mod tests {
             error.contains("must not contain '..'"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn svg_assets_in_the_manifest_are_prepared_and_passed_to_the_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("deck/pages")).expect("pages dir");
+        std::fs::create_dir_all(temp.path().join("deck/assets")).expect("assets dir");
+        std::fs::write(
+            temp.path().join("deck/assets/icon.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>"##,
+        )
+        .expect("write icon");
+        std::fs::write(
+            temp.path().join("deck/pages/p-01.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720"><image id="icon-check" data-asset="icon" data-fill="#2563EB" x="60" y="60" width="96" height="96"/></svg>"##,
+        )
+        .expect("write page");
+        std::fs::write(
+            temp.path().join("deck/deck.json"),
+            r#"{"schema_version":3,"stage":"design","assets":{"icon":"assets/icon.svg"},"slides":[{"slide_id":"p-01","svg":"pages/p-01.svg"}]}"#,
+        )
+        .expect("write manifest");
+
+        let mut request = presentation_request(temp.path(), "create");
+        request.spec_path = Some("deck/deck.json".to_string());
+        request.output_path = Some("deck/out.pptx".to_string());
+        let invocation = prepare_invocation(request).expect("prepare presentation create");
+        let arguments = argument_strings(&invocation);
+        let cache_index = arguments
+            .iter()
+            .position(|value| value == "--asset-cache")
+            .expect("asset cache argument");
+        let cache_dir = PathBuf::from(&arguments[cache_index + 1]);
+        assert!(cache_dir.ends_with(".arcforge-assets"), "{}", cache_dir.display());
+        let shapes = std::fs::read_to_string(cache_dir.join("icon/shapes.json"))
+            .expect("normalized shapes.json");
+        assert!(shapes.contains("\"mode\":\"shapes\""), "{shapes}");
+        assert!(cache_dir.join("icon/raster.png").is_file());
+
+        std::fs::write(
+            temp.path().join("deck/assets/icon.svg"),
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///C:/secret.png" width="1" height="1"/></svg>"##,
+        )
+        .expect("rewrite icon");
+        let mut request = presentation_request(temp.path(), "validate");
+        request.spec_path = Some("deck/deck.json".to_string());
+        let error = prepare_invocation(request).expect_err("external href must be rejected");
+        assert!(error.contains("assets.icon"), "{error}");
+    }
+
+    /// Manual probe helper: `ARCFORGE_SVG_ASSET_PROBE_SPEC=<manifest> cargo test -- --ignored
+    /// probe_prepare_manifest_assets_from_env` normalizes the SVG assets of a real manifest so the
+    /// Python runtime can be exercised outside the desktop app.
+    #[test]
+    #[ignore]
+    fn probe_prepare_manifest_assets_from_env() {
+        let Some(spec) = std::env::var_os("ARCFORGE_SVG_ASSET_PROBE_SPEC") else {
+            return;
+        };
+        let spec = std::fs::canonicalize(PathBuf::from(spec)).expect("manifest path");
+        let workspace = spec
+            .parent()
+            .and_then(Path::parent)
+            .expect("manifest inside <workspace>/<deck>/")
+            .to_path_buf();
+        let cache = validate_presentation_assets(&spec, &workspace).expect("prepare assets");
+        println!("asset cache: {:?}", cache);
+    }
+
+    fn write_review_pptx(path: &Path) {
+        use std::io::Write as _;
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(path).expect("create pptx"));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        let mut put = |name: &str, body: &str| {
+            writer.start_file(name, options).expect("start entry");
+            writer.write_all(body.as_bytes()).expect("write entry");
+        };
+        put("[Content_Types].xml", "<Types/>");
+        // sldIdLst lists the second part first, so presentation order must win over numbering.
+        put(
+            "ppt/presentation.xml",
+            r#"<p:presentation xmlns:p="p" xmlns:r="r"><p:sldIdLst><p:sldId id="256" r:id="rId3"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst></p:presentation>"#,
+        );
+        put(
+            "ppt/_rels/presentation.xml.rels",
+            r#"<Relationships><Relationship Id="rId2" Type="slide" Target="slides/slide1.xml"/><Relationship Target="slides/slide2.xml" Type="slide" Id="rId3"/><Relationship Id="rId1" Type="theme" Target="theme/theme1.xml"/></Relationships>"#,
+        );
+        put(
+            "ppt/slides/slide1.xml",
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld name="p-01"><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>封面 &amp; 标题</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+        );
+        put(
+            "ppt/slides/slide2.xml",
+            r#"<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree/></p:cSld></p:sld>"#,
+        );
+        put("ppt/slides/_rels/slide1.xml.rels", "<Relationships/>");
+        put("ppt/theme/theme1.xml", "<a:theme/>");
+        writer.finish().expect("finish pptx");
+    }
+
+    #[test]
+    fn presentation_units_follow_presentation_order_and_expose_stable_ids() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_review_pptx(&temp.path().join("deck.pptx"));
+        let response = presentation_units_sync(
+            temp.path().to_string_lossy().into_owned(),
+            "deck.pptx".to_string(),
+        )
+        .expect("units");
+        assert_eq!(response.slide_count, 2);
+        // slide2.xml comes first in sldIdLst and has no name → positional id.
+        assert_eq!(response.units[0].index, 1);
+        assert_eq!(response.units[0].id, "slide-1");
+        assert_eq!(response.units[0].title, "");
+        assert_eq!(response.units[1].index, 2);
+        assert_eq!(response.units[1].id, "p-01");
+        assert_eq!(response.units[1].name, "p-01");
+        assert_eq!(response.units[1].title, "封面 & 标题");
+
+        let parts = pptx_slide_parts(&temp.path().join("deck.pptx")).expect("parts");
+        let before: Vec<String> = parts.iter().map(|part| part.fingerprint.clone()).collect();
+        // Rewriting one slide changes only that slide's fingerprint.
+        {
+            use std::io::Write as _;
+            let mut writer =
+                zip::ZipWriter::new(std::fs::File::create(temp.path().join("deck2.pptx")).unwrap());
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            let source = std::fs::File::open(temp.path().join("deck.pptx")).unwrap();
+            let mut archive = zip::ZipArchive::new(source).unwrap();
+            let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+            for name in names {
+                let mut entry = archive.by_name(&name).unwrap();
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                writer.start_file(&name, options).unwrap();
+                if name == "ppt/slides/slide1.xml" {
+                    writer
+                        .write_all(bytes.as_slice())
+                        .and_then(|_| writer.write_all(b"<!-- edited -->"))
+                        .unwrap();
+                } else {
+                    writer.write_all(&bytes).unwrap();
+                }
+            }
+            writer.finish().unwrap();
+        }
+        let after: Vec<String> = pptx_slide_parts(&temp.path().join("deck2.pptx"))
+            .expect("parts")
+            .iter()
+            .map(|part| part.fingerprint.clone())
+            .collect();
+        assert_eq!(before[0], after[0], "untouched slide keeps its fingerprint");
+        assert_ne!(before[1], after[1], "edited slide gets a new fingerprint");
+    }
+
+    #[test]
+    fn presentation_preview_rejects_non_pptx_and_missing_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("notes.txt"), "x").expect("write");
+        let error = presentation_preview_page_sync(
+            temp.path().to_string_lossy().into_owned(),
+            "notes.txt".to_string(),
+            None,
+            None,
+        )
+        .expect_err("txt must be rejected");
+        assert!(error.contains(".pptx"), "{error}");
+        let error = presentation_preview_page_sync(
+            temp.path().to_string_lossy().into_owned(),
+            "missing.pptx".to_string(),
+            Some(2),
+            None,
+        )
+        .expect_err("missing file must be rejected");
+        assert!(error.contains("does not exist"), "{error}");
+    }
+
+    /// Manual probe: `ARCFORGE_PPTX_PREVIEW_PROBE=<workspace>/<deck.pptx> cargo test -- --ignored
+    /// probe_presentation_preview_from_env` renders page 1 through OfficeCLI and writes it next
+    /// to the deck as `<deck>.preview-page1.png`.
+    #[test]
+    #[ignore]
+    fn probe_presentation_preview_from_env() {
+        let Some(raw) = std::env::var_os("ARCFORGE_PPTX_PREVIEW_PROBE") else {
+            return;
+        };
+        let file = std::fs::canonicalize(PathBuf::from(raw)).expect("deck path");
+        let workspace = file.parent().expect("workspace").to_path_buf();
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        let first = presentation_preview_page_sync(
+            workspace.to_string_lossy().into_owned(),
+            name.clone(),
+            Some(1),
+            None,
+        )
+        .expect("render page 1");
+        assert_eq!(first.mime_type, "image/png");
+        assert!(first.slide_count >= 1);
+        let bytes = BASE64_STANDARD.decode(&first.data).expect("base64");
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        std::fs::write(file.with_extension("preview-page1.png"), &bytes).expect("write png");
+        let second = presentation_preview_page_sync(
+            workspace.to_string_lossy().into_owned(),
+            name,
+            Some(1),
+            None,
+        )
+        .expect("render again");
+        assert!(second.cached, "second render must come from the cache");
+        println!("slides={} bytes={} cached_first={}", first.slide_count, bytes.len(), first.cached);
     }
 
     #[test]

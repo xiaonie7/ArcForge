@@ -35,3 +35,4 @@ crates/agent-gui/src-tauri/binaries/arcforge-office-runtime-*
 crates/agent-gui/src-tauri/binaries/arcforge-officecli-*
 crates/agent-gui/src-tauri/binaries/arcforge-gateway-*
 crates/agent-gui/src-tauri/binaries/arcforge-wecom-connector-*
+crates/agent-gui/conversation.txt

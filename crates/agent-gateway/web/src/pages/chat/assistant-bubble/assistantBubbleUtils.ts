@@ -362,6 +362,7 @@ export function isBuiltinShareToolName(name: string) {
     "SshManager",
     "TodoWrite",
     "TunnelManager",
+    "VisualReview",
     "Write",
   ].includes(trimmed);
 }

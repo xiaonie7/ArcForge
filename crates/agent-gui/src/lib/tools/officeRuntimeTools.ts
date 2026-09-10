@@ -2,6 +2,7 @@ import type { Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { invoke } from "@tauri-apps/api/core";
 import { Type } from "typebox";
 
+import { emitArtifactChange } from "../artifactReview/events";
 import {
   type BuiltinToolBundle,
   createBuiltinMetadataMap,
@@ -48,6 +49,18 @@ type DescribeWorkspaceArtifactsResponse = {
 };
 
 const OFFICE_RUNTIME_TOOL_NAME = "OfficeRuntime";
+
+/** `deck.changed_slide_ids` from a presentation create result → review units. */
+function extractChangedUnits(parsedOutput: unknown): { type: string; id: string }[] | undefined {
+  if (!parsedOutput || typeof parsedOutput !== "object") return undefined;
+  const deck = (parsedOutput as { deck?: unknown }).deck;
+  if (!deck || typeof deck !== "object") return undefined;
+  const ids = (deck as { changed_slide_ids?: unknown }).changed_slide_ids;
+  if (!Array.isArray(ids)) return undefined;
+  return ids
+    .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+    .map((id) => ({ type: "slide", id }));
+}
 const SPREADSHEET_CODE_TOOL_NAME = "SpreadsheetCode";
 const OFFICE_RUNTIME_ARGUMENTS = new Set([
   "document",
@@ -71,8 +84,9 @@ const officeRuntimeTool: Tool = {
   description:
     "Create, patch, inspect, validate, or render Office deliverables with ArcForge's bundled local runtime. " +
     "Use document=spreadsheet for XLSX create/patch/inspect. Use document=presentation for PPTX " +
-    "create (a schema_version 3 SVG deck manifest, optionally with input_path as the template PPTX), " +
-    "validate (manifest layout check), inspect (structure, layouts, protected regions, theme), and render " +
+    "create (a schema_version 3 SVG deck manifest, optionally with input_path as the template PPTX; " +
+    "manifest assets may be raster pictures or SVG icons/logos that become native shapes), " +
+    "validate (manifest layout check, also normalizes SVG assets into .arcforge-assets/), inspect (structure, layouts, protected regions, theme), and render " +
     "(.pdf via LibreOffice or .png page previews via OfficeCLI; spec_path may hold {\"pages\":\"2\"}). " +
     "Use document=word for DOCX create/patch/inspect/validate and HTML/PNG render. " +
     "Paths must stay inside the current workspace.",
@@ -361,6 +375,21 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
       const generatedFileWithArtifact = result.artifact
         ? { ...generatedFile, artifact: result.artifact }
         : generatedFile;
+      const changedUnits = extractChangedUnits(parsedOutput);
+      if (
+        result.success &&
+        args.document === "presentation" &&
+        args.action === "create" &&
+        typeof args.output_path === "string" &&
+        args.output_path.trim()
+      ) {
+        emitArtifactChange({
+          workdir: params.workdir,
+          path: args.output_path.trim(),
+          artifactType: "pptx",
+          changedUnits: changedUnits ?? "all",
+        });
+      }
       return {
         role: "toolResult",
         toolCallId: toolCall.id,
@@ -370,10 +399,11 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
           ? {
               ...result,
               parsedOutput,
+              changedUnits,
               kind: "display_file",
               files: [generatedFileWithArtifact],
             }
-          : { ...result, parsedOutput, previewError },
+          : { ...result, parsedOutput, changedUnits, previewError },
         isError: !result.success,
         timestamp,
       };

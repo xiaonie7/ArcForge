@@ -73,6 +73,8 @@ export type StoredChatContextMeta = {
   activeSegmentIndex: number;
   totalSegmentCount: number;
   totalMessageCount: number;
+  /** Present when this conversation is a review thread bound to one artifact. */
+  review?: { artifactPath: string; workdir: string; parentConversationId?: string };
 };
 
 export type StoredContextSegment = {
@@ -371,6 +373,7 @@ function countMessages(segments: StoredContextSegment[]) {
 function buildConversationMeta(params: {
   systemPrompt?: string;
   tools?: Context["tools"];
+  review?: StoredChatContextMeta["review"];
   segments: StoredContextSegment[];
   activeSegmentIndex?: number;
 }): StoredChatContextMeta {
@@ -386,6 +389,7 @@ function buildConversationMeta(params: {
     activeSegmentIndex,
     totalSegmentCount: params.segments.length,
     totalMessageCount: countMessages(params.segments),
+    ...(params.review ? { review: params.review } : {}),
   };
 }
 
@@ -871,6 +875,7 @@ export function normalizeConversationState(input: {
   const meta = buildConversationMeta({
     systemPrompt: input.meta.systemPrompt,
     tools: input.meta.tools,
+    review: input.meta.review,
     segments,
     activeSegmentIndex,
   });
@@ -984,6 +989,7 @@ export function appendMessagesToConversation(
   const meta = buildConversationMeta({
     systemPrompt: state.meta.systemPrompt,
     tools: state.meta.tools,
+    review: state.meta.review,
     segments: normalizedSegments,
     activeSegmentIndex,
   });
@@ -1095,6 +1101,7 @@ export function truncateConversationFromMessage(
     systemPrompt: state.meta.systemPrompt,
     tools: state.meta.tools,
     segments: normalizedSegments,
+    review: state.meta.review,
     activeSegmentIndex,
   });
 
@@ -1137,6 +1144,7 @@ export function replaceActiveSegmentMessages(
     systemPrompt: state.meta.systemPrompt,
     tools: state.meta.tools,
     segments: normalizedSegments,
+    review: state.meta.review,
     activeSegmentIndex: state.activeSegmentIndex,
   });
 

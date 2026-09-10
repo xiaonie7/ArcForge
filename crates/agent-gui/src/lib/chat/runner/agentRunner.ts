@@ -363,6 +363,17 @@ export function buildToolsSuffix(
     );
   }
 
+  if (has("VisualReview")) {
+    sections.push(
+      [
+        "## Visual Review",
+        "- VisualReview sends local images (rendered previews, screenshots, icon rasters) to the configured visual review model and returns its findings. Use it whenever a workflow asks for a visual check and you cannot see the image yourself — a Read result saying the image was omitted means exactly that.",
+        "- Pass the exact image paths plus a precise question or checklist, and name the page or element ids the images belong to so findings can be acted on.",
+        "- If VisualReview reports that no vision-capable model is available, do not claim the visuals were checked: say that visual verification was not performed and why.",
+      ].join("\n"),
+    );
+  }
+
   if (has("PresentFile")) {
     sections.push(
       [

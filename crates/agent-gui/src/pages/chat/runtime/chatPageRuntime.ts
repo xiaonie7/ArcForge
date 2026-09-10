@@ -76,6 +76,25 @@ function createEmptyAssistantUsage(): AssistantMessage["usage"] {
   };
 }
 
+const runtimeListeners = new WeakMap<Map<string, ConversationRuntimeEntry>, Map<string, Set<() => void>>>();
+
+/** Subscribe another view (such as Review) to the same conversation runtime. */
+export function subscribeConversationRuntime(
+  cache: Map<string, ConversationRuntimeEntry>,
+  conversationId: string,
+  listener: () => void,
+) {
+  let byId = runtimeListeners.get(cache);
+  if (!byId) runtimeListeners.set(cache, (byId = new Map()));
+  let listeners = byId.get(conversationId);
+  if (!listeners) byId.set(conversationId, (listeners = new Set()));
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (!listeners.size) byId.delete(conversationId);
+  };
+}
+
 export function setConversationRuntimeCacheEntry(
   cache: Map<string, ConversationRuntimeEntry>,
   conversationId: string,
@@ -87,6 +106,7 @@ export function setConversationRuntimeCacheEntry(
     cache.delete(key);
   }
   cache.set(key, entry);
+  runtimeListeners.get(cache)?.get(key)?.forEach((listener) => listener());
 }
 
 export function pruneIdleConversationRuntimeCaches(params: {
@@ -115,6 +135,7 @@ export function pruneIdleConversationRuntimeCaches(params: {
 
   const isProtected = (conversationId: string, entry?: ConversationRuntimeEntry) =>
     keepIds.has(conversationId) ||
+    Boolean(runtimeListeners.get(runtimeCache)?.get(conversationId)?.size) ||
     Boolean(entry?.isSending) ||
     Boolean(isConversationRunning?.(conversationId));
 

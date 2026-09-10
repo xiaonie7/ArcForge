@@ -1,4 +1,5 @@
 import { renderAsync } from "docx-preview";
+import { invoke } from "@tauri-apps/api/core";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { read, utils } from "xlsx";
 import { useLocale } from "../../i18n";
@@ -57,6 +58,19 @@ type LoadedPreview = ReadWorkspacePreviewResponse & {
   bytes: Uint8Array;
   kind: WorkspacePreviewKind;
   text: string | null;
+  /** Slide previews: 1-based page currently shown and total page count. */
+  slidePage?: number;
+  slideCount?: number;
+};
+
+type PresentationPreviewPageResponse = {
+  path: string;
+  slideCount: number;
+  page: number;
+  mimeType: string;
+  data: string;
+  sizeBytes: number;
+  cached: boolean;
 };
 
 type SpreadsheetTable = {
@@ -250,6 +264,8 @@ function getPreviewIcon(kind: WorkspacePreviewKind): FileTypeIconComponent {
       return getFileTypeIcon("preview.md", "file");
     case "pdf":
       return getFileTypeIcon("preview.pdf", "file");
+    case "presentation":
+      return getFileTypeIcon("preview.pptx", "file");
     case "spreadsheet":
       return getFileTypeIcon("preview.xlsx", "file");
     case "video":
@@ -426,6 +442,30 @@ export function WorkspaceFilePreviewOverlay(props: WorkspaceFilePreviewOverlayPr
         replacePreview(null);
       }
       try {
+        if (getWorkspacePreviewKind(request.path) === "presentation") {
+          const slide = await invoke<PresentationPreviewPageResponse>(
+            "presentation_preview_page",
+            { workdir: request.workdir, path: request.path, page: 1 },
+          );
+          if (loadSequenceRef.current !== sequence) return;
+          const slideBytes = base64ToBytes(slide.data);
+          const slideBlob = new Blob([bytesToArrayBuffer(slideBytes)], { type: slide.mimeType });
+          replacePreview({
+            path: slide.path || request.path,
+            mimeType: slide.mimeType,
+            data: slide.data,
+            sizeBytes: slide.sizeBytes,
+            mtimeMs: 0,
+            contentHash: `${slide.path}:${slide.page}`,
+            blobUrl: URL.createObjectURL(slideBlob),
+            bytes: slideBytes,
+            kind: "presentation",
+            text: null,
+            slidePage: slide.page,
+            slideCount: slide.slideCount,
+          });
+          return;
+        }
         const response = await invokeFs<ReadWorkspacePreviewResponse>("fs_read_workspace_image", {
           workdir: request.workdir,
           path: request.path,
@@ -500,6 +540,48 @@ export function WorkspaceFilePreviewOverlay(props: WorkspaceFilePreviewOverlayPr
       void loadPreview({ ...activePreviewRequest, path }, transitionDirection);
     },
     [activePath, activePreviewRequest, loadPreview],
+  );
+
+  const openSlidePage = useCallback(
+    async (page: number) => {
+      const current = previewRef.current;
+      if (!activePreviewRequest || !current || current.kind !== "presentation") return;
+      const total = current.slideCount ?? 1;
+      const target = Math.min(Math.max(page, 1), total);
+      if (target === current.slidePage) return;
+      const sequence = loadSequenceRef.current + 1;
+      loadSequenceRef.current = sequence;
+      setLoading(true);
+      setError(null);
+      try {
+        const slide = await invoke<PresentationPreviewPageResponse>("presentation_preview_page", {
+          workdir: activePreviewRequest.workdir,
+          path: activePreviewRequest.path,
+          page: target,
+        });
+        if (loadSequenceRef.current !== sequence) return;
+        const slideBytes = base64ToBytes(slide.data);
+        const slideBlob = new Blob([bytesToArrayBuffer(slideBytes)], { type: slide.mimeType });
+        replacePreview({
+          ...current,
+          data: slide.data,
+          sizeBytes: slide.sizeBytes,
+          contentHash: `${slide.path}:${slide.page}`,
+          blobUrl: URL.createObjectURL(slideBlob),
+          bytes: slideBytes,
+          slidePage: slide.page,
+          slideCount: slide.slideCount,
+        });
+      } catch (loadError) {
+        if (loadSequenceRef.current !== sequence) return;
+        setError(toMessage(loadError, t("workspaceFilePreview.openFailed")));
+      } finally {
+        if (loadSequenceRef.current === sequence) {
+          setLoading(false);
+        }
+      }
+    },
+    [activePreviewRequest, replacePreview, t],
   );
 
   const openExternal = useCallback(async () => {
@@ -612,12 +694,13 @@ export function WorkspaceFilePreviewOverlay(props: WorkspaceFilePreviewOverlayPr
             activePath={activePath}
             imagePaths={imagePaths}
             imageTransitionDirection={imageTransitionDirection}
-            isSwitchingImage={loading && preview.kind === "image"}
+            isSwitchingImage={loading && (preview.kind === "image" || preview.kind === "presentation")}
             spreadsheet={spreadsheet}
             activeSheetName={activeSheetName}
             onOpenImagePath={openImagePath}
             onActiveSheetNameChange={setActiveSheetName}
             onRenderError={setRenderError}
+            onOpenSlidePage={(page) => void openSlidePage(page)}
           />
         ) : loading ? (
           <div className="flex h-full items-center justify-center">
@@ -655,6 +738,7 @@ function PreviewBody(props: {
   onOpenImagePath: (path: string, direction?: ImagePreviewTransitionDirection) => void;
   onActiveSheetNameChange: (sheetName: string) => void;
   onRenderError: (message: string | null) => void;
+  onOpenSlidePage: (page: number) => void;
 }) {
   const {
     preview,
@@ -668,6 +752,7 @@ function PreviewBody(props: {
     onOpenImagePath,
     onActiveSheetNameChange,
     onRenderError,
+    onOpenSlidePage,
   } = props;
   const { t } = useLocale();
   const docxContainerRef = useRef<HTMLDivElement | null>(null);
@@ -695,6 +780,54 @@ function PreviewBody(props: {
       container.innerHTML = "";
     };
   }, [onRenderError, preview, t]);
+
+  if (preview.kind === "presentation") {
+    const page = preview.slidePage ?? 1;
+    const total = preview.slideCount ?? 1;
+    return (
+      <div className="flex h-full flex-col">
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4">
+          <img
+            key={preview.contentHash}
+            src={preview.blobUrl}
+            alt={`${basename(preview.path)} ${page}/${total}`}
+            className={cn(
+              "max-h-full max-w-full rounded-md border border-border/60 bg-white object-contain shadow-sm transition-opacity",
+              isSwitchingImage && "opacity-60",
+            )}
+            draggable={false}
+          />
+        </div>
+        <div className="flex h-10 shrink-0 items-center justify-center gap-2 border-t border-border bg-muted/35 text-xs text-muted-foreground">
+          <button
+            type="button"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            title={t("workspaceFilePreview.prevSlide")}
+            aria-label={t("workspaceFilePreview.prevSlide")}
+            disabled={page <= 1 || isSwitchingImage}
+            onClick={() => onOpenSlidePage(page - 1)}
+          >
+            <ChevronRight className="h-4 w-4 rotate-180" />
+          </button>
+          <span className="min-w-[5rem] text-center tabular-nums">
+            {t("workspaceFilePreview.slidePage")
+              .replace("{current}", String(page))
+              .replace("{total}", String(total))}
+          </span>
+          <button
+            type="button"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+            title={t("workspaceFilePreview.nextSlide")}
+            aria-label={t("workspaceFilePreview.nextSlide")}
+            disabled={page >= total || isSwitchingImage}
+            onClick={() => onOpenSlidePage(page + 1)}
+          >
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (preview.kind === "image") {
     return (

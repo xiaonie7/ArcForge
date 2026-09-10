@@ -11,6 +11,7 @@ Two deck specifications are supported:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -1169,6 +1170,9 @@ SUPPORTED_SVG_ATTRIBUTES = frozenset(
         "data-asset",
         "data-chart",
         "data-width",
+        "data-fill",
+        "data-stroke",
+        "data-render",
         "data-role",
         "role",
         "lang",
@@ -1415,6 +1419,7 @@ class ConversionReport:
     missing_fonts: List[str] = field(default_factory=list)
     measured_with_fonts: bool = True
     element_counts: Dict[str, int] = field(default_factory=dict)
+    asset_renders: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1428,9 +1433,16 @@ class DeckManifest:
     slides: List[Dict[str, Any]]
     metadata: Dict[str, Any]
     fonts: DeckFonts
+    asset_cache: Optional[Path] = None
 
 
-def load_deck_manifest(spec: Mapping[str, Any], spec_dir: Path) -> DeckManifest:
+VECTOR_ASSET_SCHEMA = 2
+PLAN_STAGE_GRAY = "8C8C8C"
+
+
+def load_deck_manifest(
+    spec: Mapping[str, Any], spec_dir: Path, asset_cache: Optional[Path] = None
+) -> DeckManifest:
     if int(spec.get("schema_version", 1)) != DECK_SCHEMA_VERSION:
         raise PresentationError("schema_version must be " + str(DECK_SCHEMA_VERSION) + " for an SVG deck manifest")
     mode = str(spec.get("mode", "blank")).strip().lower()
@@ -1463,6 +1475,11 @@ def load_deck_manifest(spec: Mapping[str, Any], spec_dir: Path) -> DeckManifest:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(asset_id)):
             raise PresentationError("asset id '" + str(asset_id) + "' must use letters, digits, '_', '-' or '.'")
         assets[str(asset_id)] = resolve_asset_path(raw_path, spec_dir)
+        if assets[str(asset_id)].suffix.lower() == ".svg" and asset_cache is None:
+            raise PresentationError(
+                "asset '" + str(asset_id) + "' is an SVG; SVG assets are normalized by ArcForge before conversion, "
+                "run create or validate through the OfficeRuntime tool"
+            )
 
     slides_raw = spec.get("slides")
     if not isinstance(slides_raw, list) or not slides_raw:
@@ -1524,6 +1541,7 @@ def load_deck_manifest(spec: Mapping[str, Any], spec_dir: Path) -> DeckManifest:
         slides=slides,
         metadata=metadata,
         fonts=fonts,
+        asset_cache=asset_cache,
     )
 
 
@@ -1667,8 +1685,10 @@ class SvgSlideConverter:
         self.protected = list(protected)
         self.scale_x, self.scale_y = scale
         self.gradients: Dict[str, Dict[str, Any]] = {}
+        self.vector_assets: Dict[str, Dict[str, Any]] = {}
         self.page = ""
         self.element_count = 0
+        self.page_ids: set[str] = set()
 
     # -- geometry helpers ---------------------------------------------------
 
@@ -1714,17 +1734,7 @@ class SvgSlideConverter:
                 raise PresentationError(self.page + ": unknown gradient " + match.group(1))
             fill.gradient()
             fill.gradient_angle = gradient["angle"]
-            gs_lst = fill._fill._gradFill.gsLst  # noqa: SLF001 - python-pptx exposes no stop API
-            for gs in list(gs_lst):
-                gs_lst.remove(gs)
-            for offset, color, opacity in gradient["stops"]:
-                gs = etree.SubElement(gs_lst, qn("a:gs"))
-                gs.set("pos", str(int(round(offset * 100000))))
-                srgb = etree.SubElement(gs, qn("a:srgbClr"))
-                srgb.set("val", color)
-                if opacity < 1.0:
-                    alpha = etree.SubElement(srgb, qn("a:alpha"))
-                    alpha.set("val", str(int(round(opacity * 100000))))
+            self.write_gradient_stops(fill, gradient["stops"])
             return
         fill.solid()
         fill.fore_color.rgb = RGBColor.from_string(fill_value)
@@ -1732,6 +1742,19 @@ class SvgSlideConverter:
             srgb = fill._xPr.find(qn("a:solidFill")).find(qn("a:srgbClr"))  # noqa: SLF001
             alpha = etree.SubElement(srgb, qn("a:alpha"))
             alpha.set("val", str(int(round(style.fill_opacity * 100000))))
+
+    def write_gradient_stops(self, fill: Any, stops: Sequence[Tuple[float, str, float]]) -> None:
+        gs_lst = fill._fill._gradFill.gsLst  # noqa: SLF001 - python-pptx exposes no stop API
+        for gs in list(gs_lst):
+            gs_lst.remove(gs)
+        for offset, color, opacity in stops:
+            gs = etree.SubElement(gs_lst, qn("a:gs"))
+            gs.set("pos", str(int(round(offset * 100000))))
+            srgb = etree.SubElement(gs, qn("a:srgbClr"))
+            srgb.set("val", color)
+            if opacity < 1.0:
+                alpha = etree.SubElement(srgb, qn("a:alpha"))
+                alpha.set("val", str(int(round(opacity * 100000))))
 
     def apply_line(self, shape: Any, style: SvgStyle) -> None:
         if style.stroke is None:
@@ -1748,6 +1771,48 @@ class SvgSlideConverter:
         self.apply_line(shape, style)
         self.record_bounds(name, x, y, width, height)
         return shape
+
+
+    # -- semantic roles --------------------------------------------------------
+
+    SEMANTIC_ROLES = ("title", "subtitle", "text_block", "image", "chart", "table", "footer")
+
+    def tag_role(self, shape: Any, element: Any) -> None:
+        """Persist data-role as alt text so the review overlay can classify the shape."""
+        role = (element.get("data-role") or "").strip().lower()
+        if not role:
+            return
+        if role not in self.SEMANTIC_ROLES:
+            raise PresentationError(
+                self.page + ": data-role must be one of " + ", ".join(self.SEMANTIC_ROLES) + ", got " + role
+            )
+        for nv in ("nvSpPr", "nvPicPr", "nvGraphicFramePr", "nvGrpSpPr", "nvCxnSpPr"):
+            container = shape._element.find(qn("p:" + nv))  # noqa: SLF001
+            if container is not None:
+                container.find(qn("p:cNvPr")).set("descr", "arcforge:role=" + role)
+                return
+        raise PresentationError(self.page + ": cannot persist data-role on " + shape.name)
+
+    def register_element_id(self, element: Any) -> None:
+        """Every explicit id on a page must be unique; the review panel addresses shapes by it."""
+        element_id = (element.get("id") or "").strip()
+        role = element.get("data-role")
+        if role is not None:
+            if role.strip().lower() not in self.SEMANTIC_ROLES:
+                raise PresentationError(self.page + ": data-role must be one of " + ", ".join(self.SEMANTIC_ROLES))
+            if svg_local_name(element.tag) not in ("g", "rect", "circle", "ellipse", "line", "polygon", "path", "text", "image"):
+                raise PresentationError(self.page + ": data-role requires a rendered element or group")
+            if (element.get("data-arcforge") or "").strip().lower() == "background":
+                raise PresentationError(self.page + ": a slide background cannot be a semantic element")
+        if not element_id:
+            if role is not None:
+                raise PresentationError(self.page + ": elements with data-role must also have an id")
+            return
+        if element.get("id") != element_id or any(character.isspace() for character in element_id):
+            raise PresentationError(self.page + ": element ids must not contain whitespace")
+        if element_id in self.page_ids:
+            raise PresentationError(self.page + ": duplicate element id '" + element_id + "'")
+        self.page_ids.add(element_id)
 
     # -- element handlers ----------------------------------------------------
 
@@ -1807,8 +1872,10 @@ class SvgSlideConverter:
         if radius > 0:
             shape = self.add_autoshape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, x, y, width, height, style, style.fill, name)
             shape.adjustments[0] = max(0.0, min(0.5, radius / min(width, height)))
+            self.tag_role(shape, element)
         else:
-            self.add_autoshape(slide, MSO_SHAPE.RECTANGLE, x, y, width, height, style, style.fill, name)
+            shape = self.add_autoshape(slide, MSO_SHAPE.RECTANGLE, x, y, width, height, style, style.fill, name)
+            self.tag_role(shape, element)
 
     def handle_ellipse(self, slide: Any, element: Any, style: SvgStyle) -> None:
         name = element.get("id") or "Oval"
@@ -1821,7 +1888,8 @@ class SvgSlideConverter:
             ry = parse_svg_length(element.get("ry"), self.page + " ry")
         if rx <= 0 or ry <= 0:
             raise PresentationError(self.page + ": " + name + " must have a positive radius")
-        self.add_autoshape(slide, MSO_SHAPE.OVAL, cx - rx, cy - ry, 2 * rx, 2 * ry, style, style.fill, name)
+        shape = self.add_autoshape(slide, MSO_SHAPE.OVAL, cx - rx, cy - ry, 2 * rx, 2 * ry, style, style.fill, name)
+        self.tag_role(shape, element)
 
     def handle_line(self, slide: Any, element: Any, style: SvgStyle) -> None:
         name = element.get("id") or "Line"
@@ -1831,6 +1899,7 @@ class SvgSlideConverter:
         y2 = parse_svg_length(element.get("y2", 0), self.page + " y2") + style.dy
         connector = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, self.emu_x(x1), self.emu_y(y1), self.emu_x(x2), self.emu_y(y2))
         connector.name = name
+        self.tag_role(connector, element)
         if style.stroke is None:
             connector.line.fill.background()
         else:
@@ -1906,6 +1975,7 @@ class SvgSlideConverter:
         shape = builder.convert_to_shape()
         shape.name = name
         shape.shadow.inherit = False
+        self.tag_role(shape, element)
         self.apply_fill(shape, style, style.fill if closed else None)
         self.apply_line(shape, style)
         self.record_bounds(name, min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys))
@@ -1987,6 +2057,7 @@ class SvgSlideConverter:
         color = style.fill if style.fill and not style.fill.startswith("url(") else "000000"
         box = slide.shapes.add_textbox(self.emu_x(left), self.emu_y(top), self.emu_x(box_width), self.emu_y(height))
         box.name = name
+        self.tag_role(box, element)
         frame = box.text_frame
         frame.word_wrap = bool(width_limit)
         frame.vertical_anchor = MSO_ANCHOR.TOP
@@ -2017,15 +2088,37 @@ class SvgSlideConverter:
         height = parse_svg_length(element.get("height"), self.page + " image.height")
         if width <= 0 or height <= 0:
             raise PresentationError(self.page + ": image " + name + " must have positive width and height")
+        mode = (element.get("preserveAspectRatio") or "xMidYMid meet").strip().lower()
+        if mode == "none":
+            raise PresentationError(self.page + ": image " + name + " must keep its aspect ratio (meet or slice)")
+        if path.suffix.lower() == ".svg":
+            self.handle_vector_asset(slide, element, name, asset_id, path, x, y, width, height, mode)
+            return
+        for attribute in ("data-fill", "data-stroke", "data-render"):
+            if element.get(attribute) is not None:
+                raise PresentationError(
+                    self.page + ": " + attribute + " on image " + name + " is only valid for SVG assets"
+                )
+        self.place_picture(slide, name, path, x, y, width, height, mode, element)
+
+    def place_picture(
+        self,
+        slide: Any,
+        name: str,
+        path: Path,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        mode: str,
+        element: Any = None,
+    ) -> None:
         with Image.open(path) as image:
             image_width, image_height = image.size
         if image_width <= 0 or image_height <= 0:
             raise PresentationError("Image has invalid dimensions: " + str(path))
         image_ratio = image_width / image_height
         frame_ratio = width / height
-        mode = (element.get("preserveAspectRatio") or "xMidYMid meet").strip().lower()
-        if mode == "none":
-            raise PresentationError(self.page + ": image " + name + " must keep its aspect ratio (meet or slice)")
         if "slice" in mode:
             picture = slide.shapes.add_picture(str(path), self.emu_x(x), self.emu_y(y), self.emu_x(width), self.emu_y(height))
             if image_ratio > frame_ratio:
@@ -2046,6 +2139,241 @@ class SvgSlideConverter:
             bounds = (left, top, fitted_width, fitted_height)
         picture.name = name
         self.record_bounds(name, *bounds)
+        if element is not None:
+            self.tag_role(picture, element)
+
+    # -- vector assets (SVG normalized by ArcForge) ----------------------------
+
+    def load_vector_asset(self, asset_id: str, source: Path) -> Dict[str, Any]:
+        cached = self.vector_assets.get(asset_id)
+        if cached is not None:
+            return cached
+        cache_root = self.manifest.asset_cache
+        if cache_root is None:
+            raise PresentationError(
+                self.page + ": asset '" + asset_id + "' is an SVG; run create or validate through the OfficeRuntime tool so ArcForge can normalize it"
+            )
+        entry = cache_root / asset_id / "shapes.json"
+        if not entry.is_file():
+            raise PresentationError(
+                self.page + ": asset '" + asset_id + "' has no prepared entry in " + str(cache_root) + "; run validate again"
+            )
+        try:
+            data = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise PresentationError(self.page + ": asset '" + asset_id + "' cache is unreadable: " + str(error)) from error
+        if not isinstance(data, dict) or data.get("schema") != VECTOR_ASSET_SCHEMA:
+            raise PresentationError(self.page + ": asset '" + asset_id + "' cache uses an unsupported schema")
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        if data.get("source_sha256") != digest:
+            raise PresentationError(
+                self.page + ": asset '" + asset_id + "' changed after it was prepared; run validate again"
+            )
+        data["_directory"] = entry.parent
+        self.vector_assets[asset_id] = data
+        return data
+
+    def handle_vector_asset(
+        self,
+        slide: Any,
+        element: Any,
+        name: str,
+        asset_id: str,
+        source: Path,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        mode: str,
+    ) -> None:
+        asset = self.load_vector_asset(asset_id, source)
+        render = (element.get("data-render") or "auto").strip().lower()
+        if render not in ("auto", "shapes", "raster"):
+            raise PresentationError(self.page + ": data-render on " + name + " must be auto, shapes, or raster")
+        fill_override = parse_svg_color(element.get("data-fill"), self.page + " data-fill")
+        stroke_override = parse_svg_color(element.get("data-stroke"), self.page + " data-stroke")
+        if stroke_override is None:
+            # data-fill is "the icon color": monochrome stroke icons pick it up too unless
+            # data-stroke says otherwise.
+            stroke_override = fill_override
+        if self.manifest.stage == "plan":
+            fill_override = PLAN_STAGE_GRAY
+            stroke_override = PLAN_STAGE_GRAY
+        reasons = [str(reason) for reason in asset.get("reasons", [])]
+        if "slice" in mode:
+            reasons = reasons + ["preserveAspectRatio slice needs a picture"]
+        native_possible = asset.get("mode") == "shapes" and "slice" not in mode
+        if render == "shapes" and not native_possible:
+            raise PresentationError(
+                self.page + ": asset '" + asset_id + "' cannot become native shapes (" + ", ".join(reasons) + "); remove data-render=\"shapes\" or simplify the SVG"
+            )
+        use_raster = render == "raster" or not native_possible
+        directory: Path = asset["_directory"]
+        record: Dict[str, Any] = {"slide": self.page, "element": name, "asset": asset_id}
+        if use_raster:
+            raster = directory / str(asset.get("raster") or "raster.png")
+            if not raster.is_file():
+                raise PresentationError(self.page + ": asset '" + asset_id + "' has no raster fallback; run validate again")
+            if self.manifest.stage == "plan":
+                raster = self.grayscale_copy(raster)
+            self.place_picture(slide, name, raster, x, y, width, height, mode, element)
+            record.update({"mode": "raster", "reasons": reasons if render != "raster" else ["data-render=raster"]})
+            if render != "raster" and reasons:
+                self.report.warnings.append(
+                    self.page + ": asset '" + asset_id + "' was placed as a picture because of " + ", ".join(reasons)
+                )
+        else:
+            count = self.place_vector_shapes(slide, name, asset, x, y, width, height, fill_override, stroke_override, element)
+            record.update({"mode": "shapes", "shapes": count})
+        self.report.asset_renders.append(record)
+        self.record_bounds(name, x, y, width, height)
+
+    def grayscale_copy(self, raster: Path) -> Path:
+        target = raster.with_name(raster.stem + "-plan.png")
+        if not target.is_file() or target.stat().st_mtime < raster.stat().st_mtime:
+            with Image.open(raster) as image:
+                image.convert("LA").save(target, format="PNG")
+        return target
+
+    def place_vector_shapes(
+        self,
+        slide: Any,
+        name: str,
+        asset: Mapping[str, Any],
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        fill_override: Optional[str],
+        stroke_override: Optional[str],
+        element: Any = None,
+    ) -> int:
+        view_width = float(asset.get("width") or 0)
+        view_height = float(asset.get("height") or 0)
+        if view_width <= 0 or view_height <= 0:
+            raise PresentationError(self.page + ": asset '" + str(asset.get("asset_id")) + "' has an empty view box")
+        scale = min(width / view_width, height / view_height)
+        origin_x = x + (width - view_width * scale) / 2.0
+        origin_y = y + (height - view_height * scale) / 2.0
+        group = slide.shapes.add_group_shape()
+        group.name = name
+        if element is not None:
+            self.tag_role(group, element)
+        group_tree = group.shapes._spTree  # noqa: SLF001 - python-pptx has no public curve API
+        count = 0
+        for index, spec in enumerate(asset.get("paths", []), start=1):
+            fill_spec = spec.get("fill")
+            stroke_spec = spec.get("stroke")
+            frame = spec.get("stroke_bbox") if stroke_spec else spec.get("bbox")
+            if not isinstance(frame, list) or len(frame) != 4:
+                raise PresentationError(self.page + ": vector path " + str(index) + " has no bounding box")
+            frame_x, frame_y, frame_w, frame_h = (float(value) for value in frame)
+            left = origin_x + frame_x * scale
+            top = origin_y + frame_y * scale
+            extent_x = max(1, int(round(frame_w * scale * self.scale_x * EMU_PER_PX)))
+            extent_y = max(1, int(round(frame_h * scale * self.scale_y * EMU_PER_PX)))
+            sp = group_tree.add_freeform_sp(self.emu_x(left), self.emu_y(top), Emu(extent_x), Emu(extent_y))
+            path = sp.add_path(w=Emu(extent_x), h=Emu(extent_y))
+
+            def local_x(value: float) -> int:
+                return int(round((origin_x + value * scale - left) * self.scale_x * EMU_PER_PX))
+
+            def local_y(value: float) -> int:
+                return int(round((origin_y + value * scale - top) * self.scale_y * EMU_PER_PX))
+
+            for segment in spec.get("segments", []):
+                command = segment[0]
+                if command == "M":
+                    path.add_moveTo(Emu(local_x(segment[1])), Emu(local_y(segment[2])))
+                elif command == "L":
+                    path.add_lnTo(Emu(local_x(segment[1])), Emu(local_y(segment[2])))
+                elif command == "Q":
+                    node = etree.SubElement(path, qn("a:quadBezTo"))
+                    for px, py in ((segment[1], segment[2]), (segment[3], segment[4])):
+                        point = etree.SubElement(node, qn("a:pt"))
+                        point.set("x", str(local_x(px)))
+                        point.set("y", str(local_y(py)))
+                elif command == "C":
+                    node = etree.SubElement(path, qn("a:cubicBezTo"))
+                    for px, py in ((segment[1], segment[2]), (segment[3], segment[4]), (segment[5], segment[6])):
+                        point = etree.SubElement(node, qn("a:pt"))
+                        point.set("x", str(local_x(px)))
+                        point.set("y", str(local_y(py)))
+                elif command == "Z":
+                    path.add_close()
+                else:
+                    raise PresentationError(self.page + ": vector path uses unknown command " + str(command))
+            shape = group.shapes._shape_factory(sp)  # noqa: SLF001
+            shape.name = name + "/" + str(index)
+            shape.shadow.inherit = False
+            self.apply_vector_fill(shape, fill_spec, fill_override)
+            self.apply_vector_stroke(shape, stroke_spec, scale, stroke_override)
+            count += 1
+        if count == 0:
+            group._element.getparent().remove(group._element)  # noqa: SLF001
+            self.report.warnings.append(self.page + ": vector asset " + name + " produced no shapes")
+            return 0
+        group._element.recalculate_extents()  # noqa: SLF001
+        self.report.element_counts["vector_shapes"] = self.report.element_counts.get("vector_shapes", 0) + count
+        return count
+
+    def apply_vector_fill(self, shape: Any, spec: Optional[Mapping[str, Any]], override: Optional[str]) -> None:
+        fill = shape.fill
+        if not spec:
+            fill.background()
+            return
+        opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
+        if spec.get("type") == "linear" and override is None:
+            stops = [
+                (
+                    max(0.0, min(1.0, float(stop.get("offset", 0.0)))),
+                    normalize_color(str(stop.get("color", "000000")), "gradient stop"),
+                    max(0.0, min(1.0, float(stop.get("opacity", 1.0)))),
+                )
+                for stop in spec.get("stops", [])
+            ]
+            if len(stops) >= 2:
+                fill.gradient()
+                fill.gradient_angle = float(spec.get("angle", 0.0))
+                self.write_gradient_stops(fill, stops)
+                return
+            color = stops[0][1] if stops else "000000"
+        else:
+            color = override or normalize_color(str(spec.get("color", "000000")), "vector fill")
+        fill.solid()
+        fill.fore_color.rgb = RGBColor.from_string(color)
+        if opacity < 1.0:
+            srgb = fill._xPr.find(qn("a:solidFill")).find(qn("a:srgbClr"))  # noqa: SLF001
+            alpha = etree.SubElement(srgb, qn("a:alpha"))
+            alpha.set("val", str(int(round(opacity * 100000))))
+
+    def apply_vector_stroke(
+        self, shape: Any, spec: Optional[Mapping[str, Any]], scale: float, override: Optional[str]
+    ) -> None:
+        line = shape.line
+        if not spec:
+            line.fill.background()
+            return
+        color = override or normalize_color(str(spec.get("color", "000000")), "vector stroke")
+        line.color.rgb = RGBColor.from_string(color)
+        width_px = float(spec.get("width", 1.0)) * scale
+        line.width = Emu(max(1, int(round(width_px * self.scale_x * EMU_PER_PX))))
+        ln = line._get_or_add_ln()  # noqa: SLF001 - caps and joins have no public API
+        ln.set("cap", {"round": "rnd", "square": "sq"}.get(str(spec.get("linecap", "butt")), "flat"))
+        opacity = max(0.0, min(1.0, float(spec.get("opacity", 1.0))))
+        if opacity < 1.0:
+            srgb = ln.find(qn("a:solidFill")).find(qn("a:srgbClr"))
+            alpha = etree.SubElement(srgb, qn("a:alpha"))
+            alpha.set("val", str(int(round(opacity * 100000))))
+        if spec.get("dash"):
+            etree.SubElement(ln, qn("a:prstDash")).set("val", "dash")
+        join = str(spec.get("linejoin", "miter"))
+        if join == "round":
+            etree.SubElement(ln, qn("a:round"))
+        elif join == "bevel":
+            etree.SubElement(ln, qn("a:bevel"))
+        else:
+            etree.SubElement(ln, qn("a:miter")).set("lim", "800000")
 
     def handle_chart(self, slide: Any, element: Any, name: str, x: float, y: float, width: float, height: float) -> None:
         raw = element.get("data-chart")
@@ -2081,6 +2409,7 @@ class SvgSlideConverter:
             data.add_series(str(series.get("name", "Series")), numbers)
         graphic = slide.shapes.add_chart(chart_type_value(chart_kind), self.emu_x(x), self.emu_y(y), self.emu_x(width), self.emu_y(height), data)
         graphic.name = name
+        self.tag_role(graphic, element)
         chart = graphic.chart
         chart.has_legend = len(series_list) > 1 or chart_kind in ("pie", "doughnut")
         if chart.has_legend:
@@ -2119,8 +2448,16 @@ class SvgSlideConverter:
         if tag == "defs":
             self.handle_defs(element)
         elif tag in ("svg", "g"):
+            first_shape = len(slide.shapes)
             for child in element:
                 self.walk(slide, child, style)
+            if tag == "g" and element.get("data-role") is not None:
+                children = list(slide.shapes)[first_shape:]
+                if not children:
+                    raise PresentationError(self.page + ": semantic group '" + element.get("id") + "' has no rendered elements")
+                group = slide.shapes.add_group_shape(children)
+                group.name = element.get("id")
+                self.tag_role(group, element)
         elif tag == "rect":
             self.handle_rect(slide, element, style)
         elif tag in ("circle", "ellipse"):
@@ -2140,6 +2477,7 @@ class SvgSlideConverter:
         self.page = slide_id
         self.gradients = {}
         self.element_count = 0
+        self.page_ids = set()
         if svg_path.stat().st_size > MAX_SVG_BYTES:
             raise PresentationError(slide_id + ": SVG exceeds " + str(MAX_SVG_BYTES // 1024) + " KiB")
         raw = svg_path.read_bytes()
@@ -2154,6 +2492,10 @@ class SvgSlideConverter:
         view_box = [float(value) for value in re.split(r"[\s,]+", (root.get("viewBox") or "").strip()) if value]
         if view_box != [0.0, 0.0, CANVAS_WIDTH, CANVAS_HEIGHT]:
             raise PresentationError(slide_id + ": viewBox must be exactly '0 0 1280 720'")
+        # Validate the entire source tree, including groups, gradients, and tspan nodes
+        # that the renderer handles without going through walk().
+        for element in root.iter():
+            self.register_element_id(element)
         self.walk(slide, root, SvgStyle(fill="000000"))
         if self.manifest.stage == "plan":
             self.check_plan_stage(root, slide_id)
@@ -2212,8 +2554,10 @@ def fix_chart_axis_ids(presentation: Any) -> None:
                 node.set("val", mapping[old])
 
 
-def create_svg_deck(spec: Mapping[str, Any], spec_dir: Path) -> Tuple[Any, Dict[str, Any]]:
-    manifest = load_deck_manifest(spec, spec_dir)
+def create_svg_deck(
+    spec: Mapping[str, Any], spec_dir: Path, asset_cache: Optional[Path] = None
+) -> Tuple[Any, Dict[str, Any]]:
+    manifest = load_deck_manifest(spec, spec_dir, asset_cache)
     presentation, layout, protected, removed = open_deck_base(manifest)
     apply_metadata(presentation, {"metadata": manifest.metadata})
     scale = (
@@ -2234,6 +2578,12 @@ def create_svg_deck(spec: Mapping[str, Any], spec_dir: Path) -> Tuple[Any, Dict[
     fix_chart_axis_ids(presentation)
     report.missing_fonts = list(measurer.missing_fonts)
     report.measured_with_fonts = measurer.measured_with_fonts
+    fingerprints = deck_slide_fingerprints(manifest)
+    previous = read_build_stamp(spec_dir)
+    changed_slide_ids = [
+        slide_id for slide_id in slide_ids if previous.get(slide_id) != fingerprints.get(slide_id)
+    ]
+    removed_slide_ids = [slide_id for slide_id in previous if slide_id not in fingerprints]
     summary = {
         "schema_version": DECK_SCHEMA_VERSION,
         "mode": manifest.mode,
@@ -2250,9 +2600,69 @@ def create_svg_deck(spec: Mapping[str, Any], spec_dir: Path) -> Tuple[Any, Dict[
         "protected_collisions": report.protected_collisions,
         "missing_fonts": report.missing_fonts,
         "measured_with_fonts": report.measured_with_fonts,
+        "asset_renders": report.asset_renders,
+        "changed_slide_ids": changed_slide_ids,
+        "removed_slide_ids": removed_slide_ids,
+        "slide_fingerprints": fingerprints,
         "warnings": report.warnings,
     }
     return presentation, summary
+
+
+BUILD_STAMP_NAME = ".arcforge-build.json"
+
+
+def deck_slide_fingerprints(manifest: DeckManifest) -> Dict[str, str]:
+    """One hash per page covering its SVG, notes, and the deck-level inputs that change rendering."""
+    shared = hashlib.sha256()
+    shared.update(manifest.mode.encode("utf-8"))
+    shared.update(manifest.stage.encode("utf-8"))
+    if manifest.template is not None:
+        try:
+            shared.update(manifest.template.read_bytes())
+        except OSError:
+            shared.update(str(manifest.template).encode("utf-8"))
+    for asset_id in sorted(manifest.assets):
+        try:
+            shared.update(asset_id.encode("utf-8"))
+            shared.update(manifest.assets[asset_id].read_bytes())
+        except OSError:
+            continue
+    shared.update(json.dumps(manifest.style, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+    shared_digest = shared.digest()
+    fingerprints: Dict[str, str] = {}
+    for entry in manifest.slides:
+        digest = hashlib.sha256()
+        digest.update(shared_digest)
+        try:
+            digest.update(Path(entry["svg"]).read_bytes())
+        except OSError:
+            digest.update(str(entry["svg"]).encode("utf-8"))
+        digest.update(json.dumps(entry.get("notes") or "", ensure_ascii=False).encode("utf-8"))
+        digest.update(json.dumps(entry.get("layout") or "", ensure_ascii=False).encode("utf-8"))
+        fingerprints[entry["slide_id"]] = digest.hexdigest()
+    return fingerprints
+
+
+def read_build_stamp(spec_dir: Path) -> Dict[str, str]:
+    stamp = spec_dir / BUILD_STAMP_NAME
+    try:
+        data = json.loads(stamp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    slides = data.get("slides") if isinstance(data, dict) else None
+    if not isinstance(slides, dict):
+        return {}
+    return {str(key): str(value) for key, value in slides.items()}
+
+
+def write_build_stamp(spec_dir: Path, fingerprints: Mapping[str, str], output_path: Path) -> None:
+    stamp = spec_dir / BUILD_STAMP_NAME
+    payload = {"schema": 1, "output": str(output_path), "slides": dict(fingerprints)}
+    try:
+        stamp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def is_svg_deck_spec(spec: Mapping[str, Any]) -> bool:
@@ -2518,13 +2928,24 @@ def apply_template_override(spec: Dict[str, Any], template: Optional[str]) -> Di
     return updated
 
 
+def resolve_asset_cache(args: argparse.Namespace) -> Optional[Path]:
+    raw = getattr(args, "asset_cache", None)
+    if not raw:
+        return None
+    cache = Path(str(raw)).expanduser().resolve()
+    if not cache.is_dir():
+        raise PresentationError("--asset-cache must be an existing directory: " + str(cache))
+    return cache
+
+
 def run_create(args: argparse.Namespace) -> Dict[str, Any]:
     spec, spec_path = load_json_object(args.spec)
     output_path = normalized_output_path(args.output, ".pptx")
     spec = apply_template_override(spec, getattr(args, "template", None))
     if is_svg_deck_spec(spec):
-        presentation, deck = create_svg_deck(spec, spec_path.parent)
+        presentation, deck = create_svg_deck(spec, spec_path.parent, resolve_asset_cache(args))
         atomic_save(presentation, output_path, args.force)
+        write_build_stamp(spec_path.parent, deck.pop("slide_fingerprints", {}), output_path)
         return {
             "action": "created",
             "deck": deck,
@@ -2541,7 +2962,8 @@ def run_validate(args: argparse.Namespace) -> Dict[str, Any]:
     spec = apply_template_override(spec, getattr(args, "template", None))
     if not is_svg_deck_spec(spec):
         raise PresentationError("validate requires a schema_version 3 SVG deck manifest")
-    _presentation, deck = create_svg_deck(spec, spec_path.parent)
+    _presentation, deck = create_svg_deck(spec, spec_path.parent, resolve_asset_cache(args))
+    deck.pop("slide_fingerprints", None)
     issues = (
         len(deck["text_overflows"])
         + len(deck["out_of_bounds"])
@@ -2584,6 +3006,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Existing .pptx used as the base deck (masters, layouts, theme) for SVG deck manifests",
     )
     create_parser.add_argument(
+        "--asset-cache",
+        help="Directory with SVG assets normalized by ArcForge (.arcforge-assets next to the manifest)",
+    )
+    create_parser.add_argument(
         "--force", action="store_true", help="Overwrite the exact output path"
     )
     create_parser.set_defaults(handler=run_create)
@@ -2593,6 +3019,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--spec", required=True, help="UTF-8 JSON deck manifest")
     validate_parser.add_argument("--template", help="Existing .pptx used as the base deck")
+    validate_parser.add_argument(
+        "--asset-cache",
+        help="Directory with SVG assets normalized by ArcForge (.arcforge-assets next to the manifest)",
+    )
     validate_parser.set_defaults(handler=run_validate)
 
     inspect_parser = subparsers.add_parser(

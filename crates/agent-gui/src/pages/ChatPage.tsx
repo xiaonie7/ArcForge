@@ -1,4 +1,5 @@
 import type { Context } from "@earendil-works/pi-ai";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   type CSSProperties,
@@ -8,6 +9,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   type ChangedFilesActions,
@@ -19,6 +21,13 @@ import {
 } from "../components/chat/GeneratedFilesCard";
 import { HistoryShareModal } from "../components/chat/HistoryShareModal";
 import type { MentionComposerHandle } from "../components/chat/MentionComposer";
+import { ReviewChatPanel } from "../components/artifact-review/ReviewChatPanel";
+import { useReviewThread } from "../lib/artifactReview/useReviewThread";
+import {
+  createReviewSessionStore,
+  isReviewableArtifactPath,
+  type ArtifactRef,
+} from "../lib/artifactReview";
 import { NotifyToast } from "../components/chat/NotifyToast";
 import { SharedHistoryManagerModal } from "../components/chat/SharedHistoryManagerModal";
 import { PanelRightClose, PanelRightOpen } from "../components/icons";
@@ -243,6 +252,9 @@ export function ChatPage(props: ChatPageProps) {
     "chat",
   );
   const [rightDockOpen, setRightDockOpen] = useState(false);
+  const reviewSession = useMemo(() => createReviewSessionStore(), []);
+  const artifactSelection = useSyncExternalStore(reviewSession.subscribe, reviewSession.getSnapshot);
+  const setArtifactSelection = reviewSession.setSelection;
   const [rightDockFilePreviewRequest, setRightDockFilePreviewRequest] =
     useState<WorkspaceFilePreviewOpenRequest | null>(null);
   const rightDockFilePreviewNonceRef = useRef(0);
@@ -745,8 +757,26 @@ export function ChatPage(props: ChatPageProps) {
       return nextOpen;
     });
   }, []);
+  const reviewArtifact = useMemo<ArtifactRef | null>(() => {
+    const request = rightDockFilePreviewRequest;
+    return request && isReviewableArtifactPath(request.path)
+      ? { artifactType: "pptx", workdir: request.workdir, path: request.path }
+      : null;
+  }, [rightDockFilePreviewRequest]);
+  const activeReviewThread = useReviewThread(reviewArtifact ? {
+    artifact: reviewArtifact,
+    parentConversationId: currentConversationId,
+    systemPrompt: conversationState.meta.systemPrompt,
+    selectedModel: activeSelectedModel,
+    titlePrefix: t("chat.review.threadTitlePrefix"),
+    runtimeCache: conversationRuntimeCacheRef.current,
+    persistedStateCache: persistedConversationStateRef.current,
+    onHistory: (summary) => sidebarStore.upsertLocal(summary),
+  } : null);
+
   const handleCloseGeneratedFilePreview = useCallback(() => {
     setRightDockFilePreviewRequest(null);
+    setArtifactSelection(null);
   }, []);
   // Local runner running-state → sidebar store: diff transitions so sidebar
   // dots (and running workdir keys) include local runs immediately; remote
@@ -795,6 +825,51 @@ export function ChatPage(props: ChatPageProps) {
     setErrorMessage,
     addNotify,
   });
+  const importWorkspaceAssets = useCallback(
+    async (pick: "files" | "folder") => {
+      const targetWorkdir = displayedConversationWorkdir.trim();
+      if (!targetWorkdir) return;
+      try {
+        const response = await invoke<{
+          targetDir: string;
+          imported: { relativePath: string; fileName: string; kind: string; sizeBytes: number }[];
+          skipped: string[];
+        }>("system_import_workspace_assets", { workdir: targetWorkdir, pick });
+        if (response.imported.length === 0) {
+          addNotify("warning", t("chat.assets.importedNone"));
+          return;
+        }
+        const shown = response.imported.slice(0, 40).map((file) => `- ${file.relativePath}`);
+        const remaining = response.imported.length - shown.length;
+        const lines = [
+          t("chat.assets.importedNote")
+            .replace("{count}", String(response.imported.length))
+            .replace("{dir}", response.targetDir),
+          ...shown,
+        ];
+        if (remaining > 0) {
+          lines.push(t("chat.assets.importedMore").replace("{count}", String(remaining)));
+        }
+        const composer = composerRef.current;
+        if (composer) {
+          const existing = composer.getText();
+          composer.setText(
+            `${existing.trimEnd()}${existing.trim() ? "\n\n" : ""}${lines.join("\n")}\n`,
+          );
+          composer.focus();
+        }
+        if (response.skipped.length > 0) {
+          addNotify(
+            "warning",
+            t("chat.assets.importedSkipped").replace("{count}", String(response.skipped.length)),
+          );
+        }
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+      }
+    },
+    [addNotify, displayedConversationWorkdir, t],
+  );
   const [composerOverlayHeight, setComposerOverlayHeight] = useState(0);
   function resetVisibleTransientState(targetConversationId = currentConversationIdRef.current) {
     if (currentConversationIdRef.current !== targetConversationId) {
@@ -1871,6 +1946,8 @@ export function ChatPage(props: ChatPageProps) {
                 onChatRuntimeControlsChange={handleChatRuntimeControlsChange}
                 onPickReadableFiles={pickReadableFiles}
                 onPasteFiles={importReadableFiles}
+                onImportAssetFiles={() => void importWorkspaceAssets("files")}
+                onImportAssetFolder={() => void importWorkspaceAssets("folder")}
                 loadHistoryPrompts={loadComposerHistoryPrompts}
                 pendingUploadedFiles={pendingUploadedFiles}
                 onRemovePendingUpload={removePendingUpload}
@@ -1942,6 +2019,42 @@ export function ChatPage(props: ChatPageProps) {
         onInsertGitFileMention={handleRightDockInsertGitFileMention}
         filePreviewRequest={rightDockFilePreviewRequest}
         onCloseFilePreview={handleCloseGeneratedFilePreview}
+        artifactSelection={artifactSelection}
+        onArtifactSelect={setArtifactSelection}
+        reviewChat={reviewArtifact ? (
+          <ReviewChatPanel
+            key={activeReviewThread.threadId ?? `${reviewArtifact.workdir}::${reviewArtifact.path}`}
+            threadId={activeReviewThread.threadId}
+            artifact={reviewArtifact}
+            selection={artifactSelection}
+            runtime={activeReviewThread.runtime}
+            liveTranscriptStore={getConversationLiveTranscriptStore(activeReviewThread.threadId ?? "review-loading")}
+            hasModels={hasModels}
+            isAgentMode={isAgentMode}
+            enabledSkills={enabledComposerSkills}
+            loading={activeReviewThread.loading}
+            errorMessage={activeReviewThread.errorMessage}
+            onRetry={activeReviewThread.retry}
+            onOpenSettings={onOpenSettings}
+            onStop={() => { if (activeReviewThread.threadId) stopSending(activeReviewThread.threadId); }}
+            onSend={(draft) => {
+              const conversationId = activeReviewThread.threadId;
+              if (!conversationId) return Promise.resolve(false);
+              const current = reviewSession.getSnapshot();
+              const selection = current?.artifact.path === reviewArtifact.path && current.artifact.workdir === reviewArtifact.workdir
+                ? current : { artifact: reviewArtifact, selection: { type: "artifact", id: reviewArtifact.path, label: reviewArtifact.path } };
+              return send({
+                conversationIdOverride: conversationId,
+                composerDraftOverride: draft,
+                uploadedFilesOverride: [],
+                artifactSelectionOverride: selection,
+                workdirOverride: reviewArtifact.workdir,
+                allowEmptyWorkdirOverride: false,
+                preserveComposerOnStart: true,
+              });
+            }}
+          />
+        ) : null}
       />
     </div>
   );

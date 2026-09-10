@@ -1,5 +1,11 @@
 import type { Message, UserMessage } from "@earendil-works/pi-ai";
 
+import {
+  buildSelectionInstruction,
+  isSelectionContext,
+  SELECTION_FIELD,
+  type SelectionContext,
+} from "../../artifactReview/types";
 import { createUuid } from "../../shared/id";
 
 export type UploadedReadableFileKind =
@@ -56,6 +62,7 @@ export type UploadedUserMessage = UserMessage & {
   id: string;
   [DISPLAY_CONTENT_FIELD]?: string;
   [ATTACHMENTS_FIELD]?: PendingUploadedFile[];
+  [SELECTION_FIELD]?: SelectionContext;
 };
 
 export function mergePendingUploadedFiles(
@@ -128,24 +135,34 @@ export function buildUploadedFilesInstruction(files: PendingUploadedFile[]) {
   ].join("\n");
 }
 
-export function buildUserMessageContentWithUploads(userText: string, files: PendingUploadedFile[]) {
+export function buildUserMessageContentWithUploads(
+  userText: string,
+  files: PendingUploadedFile[],
+  selection?: SelectionContext | null,
+) {
   const normalizedText = userText.trim();
-  if (files.length === 0) return normalizedText;
+  const selectionInstruction = selection ? buildSelectionInstruction(selection) : "";
+  if (files.length === 0) {
+    if (!normalizedText) return selectionInstruction ? "" : normalizedText;
+    return selectionInstruction ? `${normalizedText}\n\n${selectionInstruction}` : normalizedText;
+  }
 
   const instruction = buildUploadedFilesInstruction(files);
-  if (!instruction) return normalizedText;
+  const trailing = [instruction, selectionInstruction].filter(Boolean).join("\n\n");
+  if (!trailing) return normalizedText;
   if (!normalizedText) {
-    return `Please inspect the selected files first.\n\n${instruction}`;
+    return `Please inspect the selected files first.\n\n${trailing}`;
   }
-  return `${normalizedText}\n\n${instruction}`;
+  return `${normalizedText}\n\n${trailing}`;
 }
 
 export function createUserMessageWithUploads(
   userText: string,
   files: PendingUploadedFile[],
   timestamp = Date.now(),
+  selection?: SelectionContext | null,
 ): UploadedUserMessage | null {
-  const content = buildUserMessageContentWithUploads(userText, files);
+  const content = buildUserMessageContentWithUploads(userText, files, selection);
   if (!content.trim()) return null;
 
   const message: UploadedUserMessage = {
@@ -154,11 +171,26 @@ export function createUserMessageWithUploads(
     content,
     timestamp,
   };
-  if (files.length > 0) {
+  if (files.length > 0 || selection) {
     message[DISPLAY_CONTENT_FIELD] = userText.trim();
+  }
+  if (files.length > 0) {
     message[ATTACHMENTS_FIELD] = clonePendingUploadedFiles(files);
   }
+  if (selection) {
+    message[SELECTION_FIELD] = {
+      artifact: { ...selection.artifact },
+      selection: { ...selection.selection },
+    };
+  }
   return message;
+}
+
+export function getUserMessageSelection(
+  message: Pick<Message, "role"> & Record<string, unknown>,
+): SelectionContext | null {
+  const raw = message[SELECTION_FIELD];
+  return isSelectionContext(raw) ? raw : null;
 }
 
 function flattenUserContent(content: Message["content"] | undefined) {
@@ -229,13 +261,18 @@ export function getUserMessageAttachments(
 export function stripUploadedFilesMessageMetadata(message: Message): Message {
   if (message.role !== "user") return message;
   const userMessage = message as Message & Record<string, unknown>;
-  if (!(DISPLAY_CONTENT_FIELD in userMessage) && !(ATTACHMENTS_FIELD in userMessage)) {
+  if (
+    !(DISPLAY_CONTENT_FIELD in userMessage) &&
+    !(ATTACHMENTS_FIELD in userMessage) &&
+    !(SELECTION_FIELD in userMessage)
+  ) {
     return message;
   }
 
   const next = { ...userMessage };
   delete next[DISPLAY_CONTENT_FIELD];
   delete next[ATTACHMENTS_FIELD];
+  delete next[SELECTION_FIELD];
   return next as Message;
 }
 

@@ -27,6 +27,8 @@ export type ChatTranscriptProps = {
   liveTranscriptStore: LiveTranscriptStore;
   isCompactionRunning: boolean;
   bottomReservePx?: number;
+  /** A narrow embedded conversation, such as an artifact review. */
+  compact?: boolean;
   onResendFromEdit?: (
     messageRef: HistoryMessageRef,
     text: string,

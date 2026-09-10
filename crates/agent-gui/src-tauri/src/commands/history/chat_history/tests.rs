@@ -1867,6 +1867,31 @@ mod tests {
     }
 
     #[test]
+    fn review_lookup_uses_binding_normalizes_windows_paths_and_skips_archived() {
+        let conn = open_test_db().expect("db");
+        for (id, updated, metadata) in [
+            ("older", 10, json!({"review": {"workdir": "E:\\Project", "artifactPath": "deck\\result.pptx"}})),
+            ("newer", 20, json!({"review": {"workdir": "e:/project/", "artifactPath": "e:/project/deck/result.pptx"}})),
+            ("other", 30, json!({"review": {"workdir": "E:/Other", "artifactPath": "deck/result.pptx"}})),
+            ("main", 40, json!({})),
+        ] {
+            let mut conversation = sample_conversation();
+            conversation.id = id.to_string();
+            conversation.updated_at = updated;
+            conversation.context_meta_json = metadata.to_string();
+            upsert_chat_history_header(&conn, &conversation).expect("insert");
+        }
+        let lookup = || find_review_chat_history_sync(&conn, "E:/PROJECT/./", "deck/tmp/../RESULT.pptx").unwrap();
+        assert_eq!(lookup().as_deref(), Some("newer"));
+        conn.execute("UPDATE chatHistory SET archived_at = 100 WHERE id = 'newer'", []).unwrap();
+        assert_eq!(lookup().as_deref(), Some("older"));
+        conn.execute("DELETE FROM chatHistory WHERE id = 'older'", []).unwrap();
+        assert_eq!(lookup(), None);
+        assert_ne!(review_path_key("/tmp/Deck"), review_path_key("/tmp/deck"));
+        assert!(find_review_chat_history_sync(&conn, "", "deck.pptx").is_err());
+    }
+
+    #[test]
     fn archived_queries_facets_snapshots_and_deletes_share_one_authoritative_scope() {
         let mut conn = open_test_db().expect("open test db");
         for (id, title, cwd, archived_at, source) in [

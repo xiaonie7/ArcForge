@@ -34,6 +34,7 @@ macro_rules! app_invoke_handler {
         tauri::generate_handler![
             // Chat history
             commands::chat_history::chat_history_list,
+            commands::chat_history::chat_history_find_review,
             commands::chat_history::chat_history_workdirs,
             commands::chat_history::chat_history_shared_list,
             commands::chat_history::chat_history_search,
@@ -95,6 +96,9 @@ macro_rules! app_invoke_handler {
             // Bundled Office Runtime
             commands::office_runtime::office_runtime_execute,
             commands::office_runtime::office_runtime_cancel,
+            commands::office_runtime::presentation_preview_page,
+            commands::office_runtime::presentation_units,
+            commands::office_runtime::presentation_elements,
             // Subagent worktrees
             commands::subagent_worktree::subagent_worktree_create,
             commands::subagent_worktree::subagent_worktree_status,
@@ -269,6 +273,7 @@ macro_rules! app_invoke_handler {
             commands::system::system_import_pasted_texts,
             commands::system::system_import_readable_file_paths,
             commands::system::system_import_uploaded_readable_files,
+            commands::system::system_import_workspace_assets,
             commands::system::system_pick_readable_files,
             commands::system::system_read_uploaded_image_preview,
             commands::system::system_read_uploaded_native_attachment,

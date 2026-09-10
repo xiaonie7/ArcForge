@@ -35,6 +35,7 @@ import {
   mergePendingUploadedFiles,
   type PendingUploadedFile,
 } from "../../../lib/chat/messages/uploadedFiles";
+import type { SelectionContext } from "../../../lib/artifactReview/types";
 import {
   BRANCH_CONVERSATION_DEFAULT_TITLE,
   buildFallbackConversationTitle,
@@ -98,6 +99,7 @@ import {
 import {
   buildProviderRuntimeConfig,
   resolveConversationTitleModelSelection,
+  resolveVisualReviewModelSelection,
   resolveMemorySummaryModelSelection,
   selectedModelsMatch,
 } from "./providerRuntimeConfig";
@@ -138,6 +140,8 @@ type UseSendChatTurnParams = {
   setConversationAbortController: ChatPageRuntimeStore["setConversationAbortController"];
   setConversationSendingState: ChatPageRuntimeStore["setConversationSendingState"];
   pendingUploadedFiles: PendingUploadedFile[];
+  /** Current artifact review selection; attached to the next user message when set. */
+  getArtifactSelection?: () => SelectionContext | null;
   getPendingUploadsForConversation: (conversationId: string) => PendingUploadedFile[];
   setPendingUploadsForConversation: (
     conversationId: string,
@@ -211,6 +215,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     setConversationAbortController,
     setConversationSendingState,
     pendingUploadedFiles,
+    getArtifactSelection,
     getPendingUploadsForConversation,
     setPendingUploadsForConversation,
     getConversationLiveTranscriptStore,
@@ -272,6 +277,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     composerDraftOverride?: MentionComposerDraft;
     uploadedFilesOverride?: PendingUploadedFile[];
     conversationIdOverride?: string;
+    artifactSelectionOverride?: SelectionContext | null;
     executionModeOverride?: ExecutionMode;
     workdirOverride?: string;
     allowEmptyWorkdirOverride?: boolean;
@@ -677,7 +683,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       } catch (error) {
         const message = asErrorMessage(error, "大段粘贴内容导入附件失败");
         setConversationErrorState(message);
-        setErrorMessage(message);
+        if (conversationId === currentConversationIdRef.current) setErrorMessage(message);
         await gatewayBridgeEvents.emitError(message, conversationId);
         gatewayBridgeEvents.close();
         return false;
@@ -687,7 +693,19 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       }
     }
 
-    const userMessage = createUserMessageWithUploads(text, uploadedFiles, Date.now());
+    const artifactSelection = gatewayBridgeRequest
+      ? null
+      : overrides?.artifactSelectionOverride !== undefined
+        ? overrides.artifactSelectionOverride
+        : conversationId === currentConversationIdRef.current
+          ? (getArtifactSelection?.() ?? null)
+          : null;
+    const userMessage = createUserMessageWithUploads(
+      text,
+      uploadedFiles,
+      Date.now(),
+      artifactSelection,
+    );
     if (!userMessage) {
       if (gatewayBridgeRequest) {
         const message = "Message is required.";
@@ -758,16 +776,21 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       existingHistoryItem.title.trim() === BRANCH_CONVERSATION_DEFAULT_TITLE;
     const shouldCreatePendingHistoryItem = isFirstTurn && !existingHistoryItem;
     const pendingConversationTitle = t("chat.pendingTitle");
+    const reviewBinding = baseConversationState.meta.review;
+    const reviewTitle = reviewBinding
+      ? `${t("chat.review.threadTitlePrefix")}${reviewBinding.artifactPath.replace(/\\/g, "/").split("/").pop() ?? reviewBinding.artifactPath}`
+      : null;
     const fallbackTitle =
-      existingHistoryItem &&
+      reviewTitle ??
+      (existingHistoryItem &&
       (!existingHistoryItem.isPending || existingHistoryItem.title !== pendingConversationTitle)
         ? existingHistoryItem.title
         : buildFallbackConversationTitle(
             getFirstUserMessageText(buildRequestContext(baseConversationState)) || titleSourceText,
-          );
+          ));
 
     let titlePromise: Promise<string | null> | null = null;
-    if (isFirstTurn || isBranchDefaultTitle) {
+    if (!reviewBinding && (isFirstTurn || isBranchDefaultTitle)) {
       const titleModelSelection = resolveConversationTitleModelSelection(
         settings,
         effectiveSelectedModel,
@@ -1392,6 +1415,30 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             skillsRootDir: skillsRootDirForTools,
             skillAccessPolicy: skillAccessPolicyForTools,
             principal,
+            visualReview: (() => {
+              const selection = resolveVisualReviewModelSelection(settings, effectiveSelectedModel);
+              const config = buildProviderRuntimeConfig(
+                selection.provider,
+                selection.model,
+                runtimeControls,
+              );
+              return {
+                providerId: selection.providerId,
+                model: selection.model,
+                source: selection.source,
+                runtime: {
+                  baseUrl: config.baseUrl,
+                  apiKey: config.apiKey,
+                  customHeaders: config.customHeaders,
+                  requestFormat: config.requestFormat,
+                  reasoning: config.reasoning,
+                  promptCachingEnabled: config.promptCachingEnabled,
+                  nativeWebSearchEnabled: config.nativeWebSearchEnabled,
+                  useSystemProxy: config.useSystemProxy,
+                  modelConfig: config.modelConfig,
+                },
+              };
+            })(),
             onManagedSkillsChanged: principal
               ? undefined
               : (change) => {
@@ -1562,7 +1609,8 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       return accepted;
     } catch (error) {
       if (request) throw error;
-      setErrorMessage(asErrorMessage(error, "无法向此会话发送消息，请先取消归档或重试。"));
+      const message = asErrorMessage(error, "无法向此会话发送消息，请先取消归档或重试。");
+      updateConversationRuntimeEntry(conversationId, (prev) => ({ ...prev, errorMessage: message }));
       return false;
     }
   }

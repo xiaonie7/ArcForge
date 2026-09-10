@@ -169,6 +169,7 @@ async function buildRegistry(
     allowedSystemTools,
     memoryEnabled,
     selectedSystemToolIds = [],
+    visualReview,
   } = {},
 ) {
   const { loader } = harness;
@@ -184,6 +185,7 @@ async function buildRegistry(
     workspaceAccess,
     principal,
     selectedSystemToolIds,
+    visualReview,
     allowedSystemTools,
     memoryEnabled,
     getMcpSettings: () => mcpSettingsHolder.value,
@@ -547,4 +549,28 @@ test("read-only children inherit MCP business tools but no write, shell, or mana
   assert.ok(!names.includes("McpManager"));
   // Parent memory is read-write, so readonly children do not receive it.
   assert.ok(!names.includes("MemoryManager"));
+});
+
+test("VisualReview is registered only when a review model runtime is provided", async () => {
+  const review = {
+    providerId: "codex",
+    model: "gpt-5",
+    source: "configured",
+    runtime: { baseUrl: "https://api.openai.com/v1", apiKey: "key" },
+  };
+  const { registry: withReview } = await buildRegistry(createRegistryHarness(), {
+    visualReview: review,
+  });
+  const withNames = withReview.tools.map((tool) => tool.name);
+  assert.ok(withNames.includes("VisualReview"));
+  assert.equal(withReview.metadataByName.get("VisualReview")?.isReadOnly, true);
+
+  const { registry: withoutReview } = await buildRegistry(createRegistryHarness());
+  assert.ok(!withoutReview.tools.map((tool) => tool.name).includes("VisualReview"));
+
+  const { registry: readOnlyWorkspace } = await buildRegistry(createRegistryHarness(), {
+    visualReview: review,
+    workspaceAccess: "none",
+  });
+  assert.ok(!readOnlyWorkspace.tools.map((tool) => tool.name).includes("VisualReview"));
 });
