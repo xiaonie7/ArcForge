@@ -120,6 +120,9 @@ class ConnectorConfig:
     dedupe_ttl_seconds: int = 24 * 60 * 60
     delta_interval_seconds: float = 0.12
     state_db_path: str = ""
+    # Show transient run activity (reasoning excerpts, tool names) inside the
+    # WeCom "processing" placeholder. The final answer always replaces it.
+    show_progress: bool = True
 
 
 def load_config() -> ConnectorConfig:
@@ -182,4 +185,5 @@ def load_config() -> ConnectorConfig:
         dedupe_ttl_seconds=max(60, int(_env("ARCFORGE_GATEWAY_CHANNEL_DEDUPE_TTL_SECONDS", "86400"))),
         delta_interval_seconds=max(0.02, float(_env("ARCFORGE_GATEWAY_CHANNEL_DELTA_INTERVAL_SECONDS", "0.12"))),
         state_db_path=str(_state_db_path()),
+        show_progress=_env_bool("ARCFORGE_GATEWAY_CHANNEL_SHOW_PROGRESS", True),
     )

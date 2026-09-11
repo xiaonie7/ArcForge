@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -48,6 +49,11 @@ const (
 	channelInputMaxLabel     = 512
 	channelInputMaxDesc      = 2 * 1024
 	channelInputMaxTotal     = 32 * 1024
+	// channelProgressMaxTextBytes bounds one transient progress fragment. A
+	// connector renders only the tail of the accumulated text, so a larger
+	// fragment would only cost bandwidth without improving the placeholder.
+	channelProgressMaxTextBytes = 2 * 1024
+	channelProgressMaxNameBytes = 128
 )
 
 const (
@@ -66,6 +72,7 @@ type channelBinding struct {
 	connectorID      string
 	authAt           time.Time
 	lifecycleVersion uint32
+	progressVersion  uint32
 }
 
 type channelPresentedFile struct {
@@ -255,6 +262,7 @@ func (c *channelConn) vetChannelHello(hello *gatewayv2.ClientHello) (helloVerdic
 		botID:            strings.TrimSpace(hello.GetChannelBotId()),
 		connectorID:      strings.TrimSpace(hello.GetConnectorId()),
 		lifecycleVersion: hello.GetChannelLifecycleVersion(),
+		progressVersion:  hello.GetChannelProgressVersion(),
 		authAt:           time.Now().UTC(),
 	}
 	if binding.tenantID == "" || binding.botID == "" || binding.connectorID == "" {
@@ -262,6 +270,9 @@ func (c *channelConn) vetChannelHello(hello *gatewayv2.ClientHello) (helloVerdic
 	}
 	if binding.lifecycleVersion > 1 {
 		return helloVerdict{message: "unsupported channel lifecycle version"}, channelBinding{}
+	}
+	if binding.progressVersion > 1 {
+		return helloVerdict{message: "unsupported channel progress version"}, channelBinding{}
 	}
 	if expected := strings.TrimSpace(c.cfg.ChannelTenantID); expected != "" && expected != binding.tenantID {
 		return helloVerdict{message: "unexpected channel tenant"}, channelBinding{}
@@ -1611,9 +1622,15 @@ func (c *channelConn) subscribeRun(requestID, externalMessageID string, start se
 			}
 			// Restricted channel clients receive only the canonical final answer,
 			// validated PresentFile artifacts, and the user-facing portion of the
-			// explicitly allowlisted AskUserQuestion interaction.
+			// explicitly allowlisted AskUserQuestion interaction. Connectors that
+			// opted in additionally receive bounded, transient progress fragments
+			// so the external chat can show a live placeholder; tool arguments and
+			// tool results still never leave the gateway.
 			switch event.Type {
+			case "thinking", "token", "tool_status":
+				c.forwardProgress(requestID, event)
 			case "tool_call":
+				c.forwardProgress(requestID, event)
 				c.forwardInputRequest(requestID, event)
 			case "tool_result":
 				c.resolveInputToolEvent(event)
@@ -1735,6 +1752,101 @@ func (c *channelConn) sendRunDelta(
 		Payload: &gatewayv2.ChannelServerFrame_Delta{Delta: &gatewayv2.ChannelDelta{
 			RunId: runID, ConversationId: conversationID, Seq: seq, Text: text,
 		}},
+	})
+}
+
+// channelProgressText bounds one progress fragment and guarantees a valid
+// UTF-8 protobuf string. Truncation happens on rune boundaries.
+func channelProgressText(value string, maxBytes int) string {
+	value = strings.ToValidUTF8(value, "")
+	if len(value) <= maxBytes {
+		return value
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
+}
+
+// channelProgressFromEvent projects a desktop stream event onto the transient
+// progress contract. Only the event kinds documented on ChannelProgress are
+// mapped; arguments, results and any other payload fields are dropped here so
+// no later change to the desktop payload can widen what a connector sees.
+func channelProgressFromEvent(event *session.ConversationEvent) (*gatewayv2.ChannelProgress, bool) {
+	if event == nil || event.Payload == nil {
+		return nil, false
+	}
+	progress := &gatewayv2.ChannelProgress{
+		RunId:          event.RunID,
+		ConversationId: event.ConversationID,
+		Seq:            event.Seq,
+	}
+	if round, ok := channelUint64(event.Payload["round"]); ok && round <= channelMaxJSONInteger {
+		progress.Round = int64(round)
+	}
+	switch event.Type {
+	case "thinking", "token":
+		text, _ := event.Payload["text"].(string)
+		if text == "" {
+			return nil, false
+		}
+		if event.Type == "thinking" {
+			progress.Kind = "thinking"
+		} else {
+			progress.Kind = "text"
+		}
+		progress.Text = channelProgressText(text, channelProgressMaxTextBytes)
+	case "tool_call":
+		// Streaming argument fragments repeat the same call; the connector
+		// only needs to learn once that a tool started.
+		if payloadType, _ := event.Payload["type"].(string); payloadType != "" && payloadType != "tool_call" {
+			return nil, false
+		}
+		name := strings.TrimSpace(channelStringField(event.Payload, "name"))
+		if name == "" || name == "AskUserQuestion" || len(name) > channelProgressMaxNameBytes || !validChannelID(name) {
+			return nil, false
+		}
+		progress.Kind = "tool_call"
+		progress.Text = name
+	case "tool_status":
+		status := strings.TrimSpace(channelStringField(event.Payload, "status"))
+		if isCompaction, _ := event.Payload["isCompaction"].(bool); isCompaction {
+			status = "compacting"
+		}
+		if status == "" || len(status) > channelProgressMaxNameBytes || !validChannelID(status) {
+			return nil, false
+		}
+		progress.Kind = "status"
+		progress.Text = status
+	default:
+		return nil, false
+	}
+	if progress.Text == "" {
+		return nil, false
+	}
+	return progress, true
+}
+
+func (c *channelConn) forwardProgress(requestID string, event *session.ConversationEvent) {
+	if c.binding.progressVersion != 1 {
+		return
+	}
+	progress, ok := channelProgressFromEvent(event)
+	if !ok {
+		return
+	}
+	_ = c.sendRunProgress(requestID, progress)
+}
+
+func (c *channelConn) sendRunProgress(requestID string, progress *gatewayv2.ChannelProgress) error {
+	// Progress is advisory: under sustained backpressure it is shed like any
+	// other data frame instead of closing the connector link the way a
+	// dropped response frame would. The final answer still travels as a
+	// response frame and keeps its delivery guarantees.
+	return c.send(wscore.FrameData, "channel_progress", &gatewayv2.ChannelServerFrame{
+		RequestId: requestID,
+		Payload:   &gatewayv2.ChannelServerFrame_Progress{Progress: progress},
 	})
 }
 

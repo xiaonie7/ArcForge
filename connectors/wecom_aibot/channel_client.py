@@ -69,6 +69,7 @@ class ChannelResponse:
     done: asyncio.Event = field(default_factory=asyncio.Event)
     input_request_handler: ChannelInputHandler | None = field(default=None, repr=False)
     input_resolved_handler: ChannelInputHandler | None = field(default=None, repr=False)
+    progress_handler: ChannelInputHandler | None = field(default=None, repr=False)
 
 
 class ChannelSubmitInterrupted(ConnectionError):
@@ -99,6 +100,9 @@ class ChannelClient:
         self._callback_tasks: set[asyncio.Task[None]] = set()
         self.binding_handler: ChannelInputHandler | None = None
         self.binding_snapshot_loader: ChannelInputHandler | None = None
+        # Transient progress frames are opt-in at handshake time; legacy
+        # gateways ignore the field and keep sending only the final answer.
+        self.progress_enabled: bool = bool(getattr(config, "show_progress", True))
 
     async def connect(self) -> None:
         if self._ws is not None or self._reader_task is not None:
@@ -134,6 +138,7 @@ class ChannelClient:
                 channel_bot_id=self.config.bot_id,
                 connector_id=self.config.connector_id,
                 channel_lifecycle_version=1 if self.binding_handler is not None else 0,
+                channel_progress_version=1 if self.progress_enabled else 0,
             )
             await self._send(ChannelClientFrame(request_id=request_id, hello=hello))
             await asyncio.wait_for(self._hello.wait(), timeout=10)
@@ -182,6 +187,7 @@ class ChannelClient:
         input_resolved_handler: ChannelInputHandler | None = None,
         on_input_request: ChannelInputHandler | None = None,
         on_input_resolved: ChannelInputHandler | None = None,
+        progress_handler: ChannelInputHandler | None = None,
     ) -> ChannelResponse:
         if input_request_handler is not None and on_input_request is not None:
             raise ValueError("input_request_handler and on_input_request are aliases")
@@ -212,6 +218,7 @@ class ChannelClient:
                 request_id=request_id,
                 input_request_handler=input_request_handler or on_input_request,
                 input_resolved_handler=input_resolved_handler or on_input_resolved,
+                progress_handler=progress_handler,
             )
             async with self._responses_lock:
                 self._responses[request_id] = response
@@ -448,6 +455,8 @@ class ChannelClient:
             response.deduped = accepted.deduped
         elif frame.HasField("delta"):
             response.text += frame.delta.text
+        elif frame.HasField("progress"):
+            self._dispatch_progress(response.progress_handler, frame.progress)
         elif frame.HasField("file"):
             channel_file: ChannelFile = frame.file
             content = bytes(channel_file.content)
@@ -487,6 +496,40 @@ class ChannelClient:
             response.error_code = str(frame.local_error.code)
             response.message = frame.local_error.message
             response.done.set()
+
+    def _dispatch_progress(
+        self, handler: ChannelInputHandler | None, payload: Any
+    ) -> None:
+        """Deliver progress in arrival order without spawning a task per frame.
+
+        Progress is high-frequency and purely advisory: a synchronous handler
+        runs inline on the reader loop, an async handler is scheduled, and any
+        handler failure is logged without affecting the run.
+        """
+
+        if handler is None:
+            return
+        copied_payload = _copy_message(payload)
+        try:
+            result = handler(copied_payload)
+        except Exception:
+            logger.exception("ArcForge channel progress callback failed")
+            return
+        if inspect.isawaitable(result):
+
+            async def await_result() -> None:
+                try:
+                    await result
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("ArcForge channel progress callback failed")
+
+            task = asyncio.create_task(
+                await_result(), name="arcforge-channel-progress-callback"
+            )
+            self._callback_tasks.add(task)
+            task.add_done_callback(self._callback_tasks.discard)
 
     def _schedule_input_handler(
         self, handler: ChannelInputHandler | None, payload: Any

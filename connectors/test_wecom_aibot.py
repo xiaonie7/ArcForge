@@ -38,6 +38,7 @@ from connectors.wecom_aibot.protocol import (
     ChannelFinal,
     ChannelInboundFile,
     ChannelInboundMessage,
+    ChannelProgress,
     ChannelServerFrame,
     ClientHello,
     ErrorResponse,
@@ -57,6 +58,7 @@ from connectors.wecom_aibot.worker import (
     _handle_control_line,
     _installation_id,
     _maintain_reply_stream,
+    _ProgressState,
     _register_connection_handlers,
     _reply_final,
     _split_wecom_reply,
@@ -375,6 +377,263 @@ class ReplyStreamKeepaliveTests(unittest.IsolatedAsyncioTestCase):
         content = wecom.reply_stream.await_args.args[2]
         self.assertIn("正在处理", content)
         self.assertFalse(wecom.reply_stream.await_args.args[3])
+
+
+class ProgressPlaceholderTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _frame(message_id, text):
+        return {
+            "body": {
+                "msgid": message_id,
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "chatid": "",
+                "text": {"content": text},
+            }
+        }
+
+    def test_state_renders_tail_excerpts_and_tool_labels_without_arguments(self):
+        state = _ProgressState()
+        self.assertFalse(state.has_content())
+        state.apply(SimpleNamespace(kind="thinking", text="先看一下", round=1))
+        state.apply({"kind": "thinking", "text": "配置文件\n再决定", "round": 1})
+        state.apply(SimpleNamespace(kind="tool_call", text="Read", round=1))
+        state.apply(SimpleNamespace(kind="tool_call", text="Read", round=1))
+        state.apply(SimpleNamespace(kind="tool_call", text="CustomTool", round=1))
+        state.apply(SimpleNamespace(kind="text", text="好的，", round=1))
+        state.apply(SimpleNamespace(kind="status", text="compacting", round=1))
+        state.apply(SimpleNamespace(kind="unknown", text="ignored", round=1))
+
+        rendered = state.render()
+        self.assertTrue(state.has_content())
+        self.assertIn("第 1 轮", rendered)
+        self.assertIn("💭 先看一下配置文件 再决定", rendered)
+        self.assertIn("🔧 读取文件 → 使用 CustomTool", rendered)
+        self.assertIn("✍️ 好的，", rendered)
+        self.assertIn("正在压缩上下文", rendered)
+        self.assertNotIn("ignored", rendered)
+        self.assertIn("最终回复会替换", rendered)
+
+    def test_long_thinking_keeps_only_the_tail_and_new_round_resets(self):
+        state = _ProgressState()
+        state.apply(SimpleNamespace(kind="thinking", text="a" * 1000 + "END", round=1))
+        rendered = state.render()
+        self.assertIn("…", rendered)
+        self.assertIn("END", rendered)
+        self.assertLess(len(rendered), 600)
+
+        state.apply(SimpleNamespace(kind="tool_call", text="Grep", round=1))
+        state.apply(SimpleNamespace(kind="thinking", text="第二轮", round=2))
+        rendered = state.render()
+        self.assertNotIn("END", rendered)
+        self.assertIn("第二轮", rendered)
+        self.assertIn("搜索内容", rendered)
+
+    def test_replayed_sequence_numbers_and_unchanged_status_do_not_reapply(self):
+        state = _ProgressState()
+        state.apply(SimpleNamespace(kind="thinking", text="一", round=1, seq=5))
+        state.apply(SimpleNamespace(kind="thinking", text="二", round=1, seq=6))
+        # A gateway reconnect replays the same events; they must not duplicate.
+        state.apply(SimpleNamespace(kind="thinking", text="一", round=1, seq=5))
+        state.apply(SimpleNamespace(kind="thinking", text="二", round=1, seq=6))
+        self.assertIn("💭 一二", state.render())
+        self.assertEqual(state.updates, 2)
+
+        state.apply(SimpleNamespace(kind="status", text="compacting", round=1, seq=7))
+        state.apply(SimpleNamespace(kind="status", text="compacting", round=1, seq=8))
+        state.apply(SimpleNamespace(kind="status", text="running", round=1, seq=9))
+        state.apply(SimpleNamespace(kind="status", text="running", round=1, seq=10))
+        self.assertEqual(state.updates, 4)
+        self.assertNotIn("正在压缩上下文", state.render())
+        # Updates without a sequence number (older gateways) are still applied.
+        state.apply(SimpleNamespace(kind="thinking", text="三", round=1))
+        self.assertEqual(state.updates, 5)
+
+    async def test_keepalive_rewrites_placeholder_on_progress_and_coalesces(self):
+        sent = []
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(side_effect=lambda *args: sent.append(args) or {"errcode": 0})
+        )
+        refresh_allowed = asyncio.Event()
+        refresh_allowed.set()
+        stop = asyncio.Event()
+        wake = asyncio.Event()
+        state = _ProgressState()
+        task = asyncio.create_task(
+            _maintain_reply_stream(
+                wecom,
+                {},
+                "stream-1",
+                refresh_allowed=refresh_allowed,
+                send_lock=asyncio.Lock(),
+                stop=stop,
+                interval_seconds=60,
+                progress=state,
+                wake=wake,
+                min_interval_seconds=0.3,
+            )
+        )
+        try:
+            state.apply(SimpleNamespace(kind="thinking", text="第一段", round=1))
+            wake.set()
+            await self._eventually(lambda: len(sent) == 1)
+            self.assertIn("第一段", sent[0][2])
+            self.assertFalse(sent[0][3])
+
+            # A burst inside the throttle window is coalesced into one refresh
+            # that carries the newest state.
+            for text in ("第二段", "第三段"):
+                state.apply(SimpleNamespace(kind="thinking", text=text, round=1))
+                wake.set()
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(sent), 1)
+            await self._eventually(lambda: len(sent) == 2)
+            self.assertIn("第三段", sent[1][2])
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(sent), 2)
+        finally:
+            stop.set()
+            wake.set()
+            await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(len(sent), 2)
+
+    async def test_stop_alone_ends_a_progress_keepalive(self):
+        wecom = SimpleNamespace(reply_stream=AsyncMock(return_value={"errcode": 0}))
+        refresh_allowed = asyncio.Event()
+        refresh_allowed.set()
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            _maintain_reply_stream(
+                wecom,
+                {},
+                "stream-1",
+                refresh_allowed=refresh_allowed,
+                send_lock=asyncio.Lock(),
+                stop=stop,
+                interval_seconds=60,
+                progress=_ProgressState(),
+                wake=asyncio.Event(),
+            )
+        )
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5)
+        wecom.reply_stream.assert_not_awaited()
+
+    async def test_progress_never_overwrites_an_active_interaction_card(self):
+        wecom = SimpleNamespace(reply_stream=AsyncMock(return_value={"errcode": 0}))
+        refresh_allowed = asyncio.Event()
+        stop = asyncio.Event()
+        wake = asyncio.Event()
+        state = _ProgressState()
+        task = asyncio.create_task(
+            _maintain_reply_stream(
+                wecom,
+                {},
+                "stream-1",
+                refresh_allowed=refresh_allowed,
+                send_lock=asyncio.Lock(),
+                stop=stop,
+                interval_seconds=60,
+                progress=state,
+                wake=wake,
+                min_interval_seconds=0,
+            )
+        )
+        try:
+            state.apply(SimpleNamespace(kind="thinking", text="思考", round=1))
+            wake.set()
+            await asyncio.sleep(0.05)
+            wecom.reply_stream.assert_not_awaited()
+            refresh_allowed.set()
+            wake.set()
+            await self._eventually(lambda: wecom.reply_stream.await_count == 1)
+        finally:
+            stop.set()
+            wake.set()
+            await asyncio.wait_for(task, timeout=5)
+        wecom.reply_stream.assert_awaited_once()
+
+    @staticmethod
+    async def _eventually(predicate, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            if time.monotonic() > deadline:
+                raise AssertionError("condition was not met in time")
+            await asyncio.sleep(0.01)
+
+    async def test_handle_text_shows_progress_then_final_reply_replaces_it(self):
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        dedupe = DedupeStore()
+        wecom = SimpleNamespace(reply_stream=AsyncMock(return_value={"errcode": 0}))
+
+        async def submit(_inbound, *, progress_handler=None, **_kwargs):
+            self.assertIsNotNone(progress_handler)
+            progress_handler(SimpleNamespace(kind="thinking", text="先分析需求", round=1))
+            progress_handler(SimpleNamespace(kind="tool_call", text="Read", round=1))
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(status="completed", text="最终答案", message="")
+
+        channel = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+        await _handle_text(
+            wecom,
+            channel,
+            dedupe,
+            sessions,
+            _config(),
+            self._frame("message-1", "帮我看看"),
+        )
+
+        replies = [call.args[2:4] for call in wecom.reply_stream.await_args_list]
+        self.assertEqual(replies[0], ("正在处理，请稍候…", False))
+        progress_replies = [content for content, finish in replies if not finish and "先分析需求" in content]
+        self.assertTrue(progress_replies, replies)
+        self.assertIn("读取文件", progress_replies[-1])
+        self.assertEqual(replies[-1], ("最终答案", True))
+        self.assertNotIn("先分析需求", replies[-1][0])
+
+    async def test_progress_can_be_disabled_by_configuration(self):
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        dedupe = DedupeStore()
+        wecom = SimpleNamespace(reply_stream=AsyncMock(return_value={"errcode": 0}))
+        seen = {}
+
+        async def submit(_inbound, *, progress_handler=None, **_kwargs):
+            seen["progress_handler"] = progress_handler
+            return SimpleNamespace(status="completed", text="答案", message="")
+
+        channel = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+        await _handle_text(
+            wecom,
+            channel,
+            dedupe,
+            sessions,
+            _config(show_progress=False),
+            self._frame("message-1", "帮我看看"),
+        )
+        self.assertIsNone(seen["progress_handler"])
+        replies = [call.args[2:4] for call in wecom.reply_stream.await_args_list]
+        self.assertEqual(replies, [("正在处理，请稍候…", False), ("答案", True)])
+
+    async def test_legacy_submit_signature_never_receives_progress_handler(self):
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        dedupe = DedupeStore()
+        wecom = SimpleNamespace(reply_stream=AsyncMock(return_value={"errcode": 0}))
+
+        async def submit(_inbound):
+            return SimpleNamespace(status="completed", text="答案", message="")
+
+        channel = SimpleNamespace(submit=AsyncMock(side_effect=submit))
+        await _handle_text(
+            wecom,
+            channel,
+            dedupe,
+            sessions,
+            _config(),
+            self._frame("message-1", "帮我看看"),
+        )
+        self.assertEqual(channel.submit.await_args.kwargs, {})
+        self.assertEqual(wecom.reply_stream.await_args.args[2:4], ("答案", True))
 
 
 class CommandTests(unittest.TestCase):
@@ -1679,6 +1938,44 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(decoded_server.file.size_bytes, 3)
         self.assertEqual(decoded_server.file.content, b"abc")
 
+    def test_progress_frame_and_hello_opt_in_use_canonical_field_numbers(self):
+        hello = ClientHello(
+            protocol_version=2,
+            role=CHANNEL_ROLE,
+            token="token",
+            channel_tenant_id="tenant-1",
+            channel_bot_id="bot-1",
+            connector_id="wecom-desktop",
+            channel_progress_version=1,
+        )
+        self.assertEqual(
+            hello.DESCRIPTOR.fields_by_name["channel_progress_version"].number, 12
+        )
+        self.assertEqual(ClientHello.FromString(hello.SerializeToString()).channel_progress_version, 1)
+
+        server = ChannelServerFrame(
+            request_id="request-1",
+            progress=ChannelProgress(
+                run_id="run-1",
+                conversation_id="conversation-1",
+                seq=4,
+                kind="thinking",
+                text="先看一下",
+                round=2,
+            ),
+        )
+        decoded = ChannelServerFrame.FromString(server.SerializeToString())
+        self.assertEqual(decoded.DESCRIPTOR.fields_by_name["progress"].number, 13)
+        self.assertEqual(decoded.WhichOneof("payload"), "progress")
+        self.assertEqual(decoded.progress.kind, "thinking")
+        self.assertEqual(decoded.progress.text, "先看一下")
+        self.assertEqual(decoded.progress.round, 2)
+        fields = decoded.progress.DESCRIPTOR.fields_by_name
+        self.assertEqual(
+            [fields[name].number for name in ("run_id", "conversation_id", "seq", "kind", "text", "round")],
+            [1, 2, 3, 4, 5, 6],
+        )
+
 
 class WorkerCommandTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -2389,6 +2686,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
             send_lock,
             stop,
             interval_seconds=240,
+            **_kwargs,
         ):
             captured["refresh_allowed"] = refresh_allowed
             captured["send_lock"] = send_lock
@@ -3173,6 +3471,46 @@ class WorkerFileTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ChannelClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_progress_frames_dispatch_in_order_and_never_touch_final_text(self):
+        client = ChannelClient(_config())
+        received = []
+        response = ChannelResponse(
+            request_id="request-1", progress_handler=lambda update: received.append(update.text)
+        )
+        client._responses["request-1"] = response
+        for text in ("一", "二"):
+            await client._handle_frame(
+                ChannelServerFrame(
+                    request_id="request-1",
+                    progress=ChannelProgress(kind="thinking", text=text, round=1),
+                )
+            )
+        await client._handle_frame(
+            ChannelServerFrame(request_id="request-1", delta=ChannelDelta(text="答案"))
+        )
+        self.assertEqual(received, ["一", "二"])
+        self.assertEqual(response.text, "答案")
+
+        # A missing handler and a failing handler are both harmless.
+        client._responses["request-2"] = ChannelResponse(request_id="request-2")
+        await client._handle_frame(
+            ChannelServerFrame(request_id="request-2", progress=ChannelProgress(kind="text", text="x"))
+        )
+        failing = ChannelResponse(
+            request_id="request-3",
+            progress_handler=lambda _update: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        client._responses["request-3"] = failing
+        with patch("connectors.wecom_aibot.channel_client.logger.exception"):
+            await client._handle_frame(
+                ChannelServerFrame(request_id="request-3", progress=ChannelProgress(kind="text", text="x"))
+            )
+        self.assertFalse(failing.done.is_set())
+
+    def test_progress_opt_in_follows_configuration(self):
+        self.assertTrue(ChannelClient(_config()).progress_enabled)
+        self.assertFalse(ChannelClient(_config(show_progress=False)).progress_enabled)
+
     async def test_file_frame_is_accumulated_and_size_checked(self):
         client = ChannelClient(_config(max_file_bytes=8))
         response = ChannelResponse(request_id="request-1")

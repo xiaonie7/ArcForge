@@ -42,6 +42,10 @@ message ClientHello {
   // Zero means legacy: no binding lifecycle support. Version one implements
   // durable close/query and lazy session creation over this authenticated link.
   uint32 channel_lifecycle_version = 11;
+  // Zero means the connector receives only the canonical final answer.
+  // Version one opts into transient ChannelProgress frames for a live
+  // "processing" indicator; they are never part of the delivered message.
+  uint32 channel_progress_version = 12;
 }
 
 // ServerHello 是服务端对 ClientHello 的应答；ok=false 时随即关闭连接。
@@ -229,6 +233,27 @@ message ChannelFinal {
   string message = 5;
 }
 
+// ChannelProgress is a transient activity signal for connectors that opted in
+// through ClientHello.channel_progress_version. It lets an external chat show
+// what the run is doing while it is still running. Connectors must render it
+// only in an in-place "processing" placeholder that the final answer replaces;
+// it is never persisted, replayed as history, or appended to ChannelDelta.
+//
+// kind is one of:
+//   thinking  - a model reasoning fragment (delta text, bounded)
+//   text      - a visible assistant text fragment (delta text, bounded)
+//   tool_call - the model started a tool; text carries only the tool name
+//   status    - a coarse runtime status such as "compacting"
+// Tool arguments and tool results are never forwarded.
+message ChannelProgress {
+  string run_id = 1;
+  string conversation_id = 2;
+  int64 seq = 3;
+  string kind = 4;
+  string text = 5;
+  int64 round = 6;
+}
+
 // The restricted channel exposes only AskUserQuestion's user-facing fields.
 // IDs are gateway-generated opaque aliases; desktop tool/question/option IDs
 // and labels never cross back from an untrusted channel answer.
@@ -307,6 +332,7 @@ message ChannelServerFrame {
     ChannelInputAnswerResult input_answer_result = 10;
     ChannelInputResolved input_resolved = 11;
     liveagent.gateway.v1.ChannelBindingRequest binding_request = 12;
+    ChannelProgress progress = 13;
   }
 }
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/liveagent/agent-gateway/internal/config"
 	"github.com/liveagent/agent-gateway/internal/handler"
@@ -1121,5 +1122,113 @@ func TestVetChannelHelloBindsConnector(t *testing.T) {
 	verdict, _ = c.vetChannelHello(wrong)
 	if verdict.ok || !strings.Contains(verdict.message, "tenant_id") {
 		t.Fatalf("empty tenant accepted: %+v", verdict)
+	}
+
+	progress := proto.Clone(valid).(*gatewayv2.ClientHello)
+	progress.ChannelProgressVersion = 1
+	verdict, binding = c.vetChannelHello(progress)
+	if !verdict.ok || binding.progressVersion != 1 {
+		t.Fatalf("progress opt-in rejected: %+v %+v", verdict, binding)
+	}
+	if _, legacy := c.vetChannelHello(valid); legacy.progressVersion != 0 {
+		t.Fatalf("legacy hello must not opt into progress: %+v", legacy)
+	}
+	progress.ChannelProgressVersion = 2
+	verdict, _ = c.vetChannelHello(progress)
+	if verdict.ok || !strings.Contains(verdict.message, "progress version") {
+		t.Fatalf("unknown progress version accepted: %+v", verdict)
+	}
+}
+
+func TestChannelProgressFromEventMapsOnlyDocumentedKinds(t *testing.T) {
+	event := func(kind string, payload map[string]any) *session.ConversationEvent {
+		return &session.ConversationEvent{
+			ConversationID: "conversation-1", RunID: "run-1", Seq: 9, Type: kind, Payload: payload,
+		}
+	}
+	for _, test := range []struct {
+		name     string
+		event    *session.ConversationEvent
+		wantKind string
+		wantText string
+	}{
+		{"thinking", event("thinking", map[string]any{"text": "先看一下文件", "round": float64(2)}), "thinking", "先看一下文件"},
+		{"token", event("token", map[string]any{"text": "好的，"}), "text", "好的，"},
+		{"tool start", event("tool_call", map[string]any{"type": "tool_call", "id": "call-1", "name": "Read", "arguments": map[string]any{"path": "secret.env"}}), "tool_call", "Read"},
+		{"legacy tool start", event("tool_call", map[string]any{"name": "Bash", "arguments": "rm -rf"}), "tool_call", "Bash"},
+		{"status", event("tool_status", map[string]any{"status": "running"}), "status", "running"},
+		{"compaction", event("tool_status", map[string]any{"status": "running", "isCompaction": true}), "status", "compacting"},
+	} {
+		progress, ok := channelProgressFromEvent(test.event)
+		if !ok {
+			t.Fatalf("%s: progress was not produced", test.name)
+		}
+		if progress.GetKind() != test.wantKind || progress.GetText() != test.wantText {
+			t.Fatalf("%s: progress = %#v", test.name, progress)
+		}
+		if progress.GetRunId() != "run-1" || progress.GetConversationId() != "conversation-1" || progress.GetSeq() != 9 {
+			t.Fatalf("%s: routing fields = %#v", test.name, progress)
+		}
+		if strings.Contains(progress.String(), "secret") || strings.Contains(progress.String(), "rm -rf") {
+			t.Fatalf("%s: tool arguments leaked: %s", test.name, progress.String())
+		}
+	}
+	if progress, _ := channelProgressFromEvent(event("thinking", map[string]any{"text": "x", "round": float64(2)})); progress.GetRound() != 2 {
+		t.Fatalf("round was not carried: %#v", progress)
+	}
+
+	for _, test := range []struct {
+		name  string
+		event *session.ConversationEvent
+	}{
+		{"nil", nil},
+		{"argument delta", event("tool_call", map[string]any{"type": "tool_call_delta", "name": "Write", "arguments": map[string]any{}})},
+		{"ask user question", event("tool_call", map[string]any{"type": "tool_call", "name": "AskUserQuestion"})},
+		{"tool result", event("tool_result", map[string]any{"name": "Read", "content": "file body"})},
+		{"empty thinking", event("thinking", map[string]any{"text": ""})},
+		{"run finished", event(session.StreamEventRunFinished, map[string]any{"final_text": "answer"})},
+		{"control characters in status", event("tool_status", map[string]any{"status": "run\x00ning"})},
+	} {
+		if progress, ok := channelProgressFromEvent(test.event); ok || progress != nil {
+			t.Fatalf("%s: unexpected progress %#v", test.name, progress)
+		}
+	}
+
+	long := strings.Repeat("思", channelProgressMaxTextBytes)
+	progress, ok := channelProgressFromEvent(event("thinking", map[string]any{"text": long}))
+	if !ok || len(progress.GetText()) > channelProgressMaxTextBytes || !utf8.ValidString(progress.GetText()) || progress.GetText() == "" {
+		t.Fatalf("long thinking was not bounded on a rune boundary: %d bytes", len(progress.GetText()))
+	}
+	if progress, ok := channelProgressFromEvent(event("token", map[string]any{"text": "ok\xff"})); !ok || progress.GetText() != "ok" {
+		t.Fatalf("invalid UTF-8 was not stripped: %#v", progress)
+	}
+}
+
+func TestForwardProgressRequiresConnectorOptIn(t *testing.T) {
+	event := &session.ConversationEvent{
+		ConversationID: "conversation-1", RunID: "run-1", Seq: 3, Type: "thinking",
+		Payload: map[string]any{"text": "thinking"},
+	}
+	legacy := &channelConn{core: wscore.NewConn(nil, wscore.Config{QueueSize: 2, CtrlQueueSize: 1})}
+	legacy.forwardProgress("request-1", event)
+	if got := len(legacy.core.Outbox); got != 0 {
+		t.Fatalf("legacy connector received %d progress frames", got)
+	}
+
+	opted := &channelConn{
+		core:    wscore.NewConn(nil, wscore.Config{QueueSize: 2, CtrlQueueSize: 1}),
+		binding: channelBinding{progressVersion: 1},
+	}
+	opted.forwardProgress("request-1", event)
+	frame := <-opted.core.Outbox
+	if frame.Class != wscore.FrameData || frame.Kind != "channel_progress" {
+		t.Fatalf("progress frame = %#v, want sheddable data frame", frame)
+	}
+	var decoded gatewayv2.ChannelServerFrame
+	if err := proto.Unmarshal(frame.Data, &decoded); err != nil {
+		t.Fatalf("decode progress: %v", err)
+	}
+	if decoded.GetRequestId() != "request-1" || decoded.GetProgress().GetKind() != "thinking" || decoded.GetProgress().GetText() != "thinking" {
+		t.Fatalf("decoded progress = %#v", decoded.GetProgress())
 	}
 }

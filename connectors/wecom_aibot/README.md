@@ -103,6 +103,25 @@ policy. WeCom turns use the desktop's current workdir, Skills, system tools,
 MCP, Memory, SSH, tunnel, and database settings, including the same tool-level
 safety checks.
 
+## Progress placeholder
+
+While the desktop runs a turn, the Connector keeps one WeCom stream message
+alive and rewrites it in place. By default that placeholder shows what the run
+is doing: the tail of the model's current reasoning, the tools it started
+(names only, mapped to short labels), and the elapsed time. The Gateway only
+forwards these transient fragments to connectors that opt in at handshake time
+(`channel_progress_version = 1`); tool arguments and tool results are never
+forwarded. Progress is coalesced to at most one WeCom update every three
+seconds and is never stored or replayed.
+
+The final answer overwrites the same stream message, so nothing from the
+placeholder remains in the WeCom conversation after the turn completes. The
+one exception is a stream context that WeCom expires before the answer
+arrives: that message can no longer be updated and keeps its last placeholder,
+while the answer is delivered as a separate proactive message. Set
+`ARCFORGE_GATEWAY_CHANNEL_SHOW_PROGRESS=false` to fall back to the plain
+"processing" placeholder.
+
 ## Interactive questions
 
 The desktop `AskUserQuestion` tool is synchronized to WeCom through a restricted

@@ -65,6 +65,7 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
         _field(hello, name, number, kind, type_name=".liveagent.gateway.v2.ClientRole" if name == "role" else "")
     server = file.message_type.add(name="ServerHello")
     _field(hello, "channel_lifecycle_version", 11, 13)
+    _field(hello, "channel_progress_version", 12, 13)
     for name, number, kind in (("ok", 1, 8), ("message", 2, 9), ("session_id", 3, 9), ("server_time", 4, 3), ("heartbeat_period_seconds", 5, 13), ("max_message_bytes", 6, 4)):
         _field(server, name, number, kind)
     ping = file.message_type.add(name="PingFrame")
@@ -102,6 +103,9 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
     final = file.message_type.add(name="ChannelFinal")
     for name, number, kind in (("run_id", 1, 9), ("conversation_id", 2, 9), ("status", 3, 9), ("error_code", 4, 9), ("message", 5, 9)):
         _field(final, name, number, kind)
+    progress = file.message_type.add(name="ChannelProgress")
+    for name, number, kind in (("run_id", 1, 9), ("conversation_id", 2, 9), ("seq", 3, 3), ("kind", 4, 9), ("text", 5, 9), ("round", 6, 3)):
+        _field(progress, name, number, kind)
     channel_file = file.message_type.add(name="ChannelFile")
     for name, number, kind in (
         ("run_id", 1, 9),
@@ -207,6 +211,7 @@ def _build_pool() -> descriptor_pool.DescriptorPool:
         server_frame.field.add(name=name, number=number, label=1, type=11, type_name=type_name, oneof_index=0)
     pool = descriptor_pool.DescriptorPool()
     server_frame.field.add(name="binding_request", number=12, label=1, type=11, type_name=".liveagent.gateway.v1.ChannelBindingRequest", oneof_index=0)
+    server_frame.field.add(name="progress", number=13, label=1, type=11, type_name=".liveagent.gateway.v2.ChannelProgress", oneof_index=0)
     pool.Add(v1_file)
     pool.Add(file)
     return pool
@@ -226,6 +231,7 @@ ChannelInboundMessage = message_factory.GetMessageClass(_POOL.FindMessageTypeByN
 ChannelAccepted = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelAccepted"))
 ChannelDelta = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelDelta"))
 ChannelFinal = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelFinal"))
+ChannelProgress = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelProgress"))
 ChannelFile = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelFile"))
 ChannelInputOption = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelInputOption"))
 ChannelInputQuestion = message_factory.GetMessageClass(_POOL.FindMessageTypeByName("liveagent.gateway.v2.ChannelInputQuestion"))

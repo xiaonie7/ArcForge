@@ -70,6 +70,41 @@ _WECOM_REPLY_MAX_BYTES = 20 * 1024
 # Refresh at four minutes so scheduler and network jitter cannot consume the
 # entire safety window.
 _WECOM_STREAM_REFRESH_SECONDS = 4 * 60
+# Progress-driven refreshes reuse the same stream. Coalesce bursts so the
+# placeholder is rewritten at most once per interval regardless of how many
+# fragments the desktop produced in between.
+_WECOM_PROGRESS_MIN_INTERVAL_SECONDS = 3.0
+# A progress-capable keepalive waits on its wake event and re-checks the stop
+# flag at this cadence; the owner also sets wake on stop, so this only bounds
+# shutdown latency if a future caller forgets to.
+_WECOM_KEEPALIVE_STOP_POLL_SECONDS = 1.0
+# Only the tail of each transient excerpt is shown. Keeping the visible area
+# small also limits what could remain visible if the stream context expires
+# before the final answer replaces the placeholder.
+_WECOM_PROGRESS_THINKING_CHARS = 300
+_WECOM_PROGRESS_TEXT_CHARS = 200
+_WECOM_PROGRESS_MAX_TOOLS = 8
+_WECOM_PROGRESS_TOOL_LABELS = {
+    "Read": "读取文件",
+    "Image": "查看图片",
+    "Write": "写入文件",
+    "Edit": "编辑文件",
+    "Delete": "删除文件",
+    "List": "浏览目录",
+    "Glob": "查找文件",
+    "Grep": "搜索内容",
+    "Bash": "执行命令",
+    "ManagedProcess": "管理进程",
+    "ReadTerminal": "读取终端",
+    "PresentFile": "准备文件",
+    "TodoWrite": "整理任务清单",
+    "MemoryManager": "查阅记忆",
+    "WebSearch": "搜索网页",
+    "WebFetch": "访问网页",
+}
+_WECOM_PROGRESS_STATUS_LABELS = {
+    "compacting": "正在压缩上下文",
+}
 _WECOM_INTERACTION_DRAIN_SECONDS = 5.0
 _WECOM_REPLY_CONTEXT_ERROR_CODES = frozenset({846605, 846608})
 _WECOM_REPLY_CONTEXT_ERROR_PATTERN = re.compile(r"(?<!\d)(846605|846608)(?!\d)")
@@ -168,6 +203,124 @@ def _text(frame: dict[str, Any]) -> str:
 
 def _stream_id() -> str:
     return generate_req_id("arcforge-stream")
+
+
+def _progress_field(update: Any, name: str, default: Any = "") -> Any:
+    if isinstance(update, dict):
+        return update.get(name, default)
+    return getattr(update, name, default)
+
+
+def _compact_excerpt(text: str, max_chars: int) -> str:
+    """Collapse whitespace and keep only the trailing ``max_chars`` characters."""
+
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return "…" + collapsed[-max_chars:]
+
+
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total} 秒"
+    minutes, remainder = divmod(total, 60)
+    if remainder == 0:
+        return f"{minutes} 分钟"
+    return f"{minutes} 分 {remainder} 秒"
+
+
+class _ProgressState:
+    """Transient view of what the desktop run is doing right now.
+
+    The state feeds only the in-place WeCom placeholder. It is never written
+    to the dedupe store or included in the final reply, so nothing here
+    survives once the answer replaces the stream content.
+    """
+
+    def __init__(self) -> None:
+        self.started_at = time.monotonic()
+        self.round = 0
+        self.thinking = ""
+        self.text = ""
+        self.status = ""
+        self.tools: list[str] = []
+        self.updates = 0
+        self.last_seq = 0
+
+    def apply(self, update: Any) -> None:
+        kind = str(_progress_field(update, "kind") or "").strip()
+        text = str(_progress_field(update, "text") or "")
+        try:
+            round_number = int(_progress_field(update, "round", 0) or 0)
+        except (TypeError, ValueError):
+            round_number = 0
+        try:
+            seq = int(_progress_field(update, "seq", 0) or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        # After a reconnect the gateway replays the run's earlier events.
+        # Sequence numbers only grow, so anything at or below the last seen
+        # one has already been rendered.
+        if seq > 0:
+            if seq <= self.last_seq:
+                return
+            self.last_seq = seq
+        if round_number > self.round:
+            # A new model round starts a fresh excerpt; earlier reasoning
+            # is no longer what the run is doing.
+            self.round = round_number
+            self.thinking = ""
+            self.text = ""
+        if kind == "thinking":
+            self.thinking = (self.thinking + text)[-(_WECOM_PROGRESS_THINKING_CHARS * 4):]
+            self.status = ""
+        elif kind == "text":
+            self.text = (self.text + text)[-(_WECOM_PROGRESS_TEXT_CHARS * 4):]
+            self.status = ""
+        elif kind == "tool_call":
+            name = text.strip()
+            if not name:
+                return
+            label = _WECOM_PROGRESS_TOOL_LABELS.get(name, f"使用 {name}")
+            if not self.tools or self.tools[-1] != label:
+                self.tools.append(label)
+                del self.tools[:-_WECOM_PROGRESS_MAX_TOOLS]
+            # Visible text emitted before a tool call was a preface, not the
+            # answer; drop it so the placeholder tracks the current action.
+            self.text = ""
+            self.status = ""
+        elif kind == "status":
+            label = _WECOM_PROGRESS_STATUS_LABELS.get(text.strip(), "")
+            if label == self.status:
+                return
+            self.status = label
+        else:
+            return
+        self.updates += 1
+
+    def has_content(self) -> bool:
+        return self.updates > 0
+
+    def render(self) -> str:
+        elapsed = _format_elapsed(time.monotonic() - self.started_at)
+        header = f"⏳ 正在处理（已用时 {elapsed}"
+        if self.round > 0:
+            header += f"，第 {self.round} 轮"
+        header += "）"
+        lines = [header]
+        if self.tools:
+            lines.append("🔧 " + " → ".join(self.tools))
+        if self.status:
+            lines.append(f"⚙️ {self.status}")
+        thinking = _compact_excerpt(self.thinking, _WECOM_PROGRESS_THINKING_CHARS)
+        if thinking:
+            lines.append(f"💭 {thinking}")
+        text = _compact_excerpt(self.text, _WECOM_PROGRESS_TEXT_CHARS)
+        if text:
+            lines.append(f"✍️ {text}")
+        lines.append("最终回复会替换这里的过程内容。")
+        return "\n".join(lines)
 
 
 def _utf8_prefix_length(text: str, max_bytes: int) -> int:
@@ -422,6 +575,35 @@ async def _reply_final(
         return
 
 
+async def _wait_for_refresh_trigger(
+    stop: asyncio.Event,
+    wake: asyncio.Event | None,
+    timeout: float,
+) -> None:
+    """Return when ``stop`` or ``wake`` is set, or after ``timeout`` seconds.
+
+    Only the current task ever awaits here: no helper tasks are spawned, so
+    cancelling the keepalive can never be swallowed by a child's cancellation.
+    ``stop`` is polled once per second as a safety net; callers that own a
+    ``wake`` event also set it when stopping so shutdown is immediate.
+    """
+
+    if wake is None:
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop.wait(), timeout=timeout)
+        return
+    deadline = time.monotonic() + timeout
+    while not stop.is_set() and not wake.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                wake.wait(),
+                timeout=min(remaining, _WECOM_KEEPALIVE_STOP_POLL_SECONDS),
+            )
+
+
 async def _maintain_reply_stream(
     client: Any,
     frame: dict[str, Any],
@@ -431,25 +613,49 @@ async def _maintain_reply_stream(
     send_lock: asyncio.Lock,
     stop: asyncio.Event,
     interval_seconds: float = _WECOM_STREAM_REFRESH_SECONDS,
+    progress: _ProgressState | None = None,
+    wake: asyncio.Event | None = None,
+    min_interval_seconds: float = _WECOM_PROGRESS_MIN_INTERVAL_SECONDS,
 ) -> None:
-    """Refresh a long-running reply while leaving interactive cards untouched."""
+    """Refresh a long-running reply while leaving interactive cards untouched.
+
+    Without ``progress`` the placeholder is only refreshed every
+    ``interval_seconds`` so WeCom keeps the stream alive. With ``progress`` the
+    placeholder is additionally rewritten whenever ``wake`` fires, coalesced to
+    at most one send per ``min_interval_seconds``.
+    """
 
     started_at = time.monotonic()
+    last_sent_at: float | None = None
     while not stop.is_set():
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=interval_seconds)
-        except asyncio.TimeoutError:
-            pass
+        await _wait_for_refresh_trigger(stop, wake, interval_seconds)
         if stop.is_set():
             return
+        if wake is not None and wake.is_set() and last_sent_at is not None:
+            remaining = min_interval_seconds - (time.monotonic() - last_sent_at)
+            if remaining > 0:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=remaining)
+                if stop.is_set():
+                    return
         if not refresh_allowed.is_set():
+            if wake is not None:
+                wake.clear()
             continue
 
         async with send_lock:
             if stop.is_set() or not refresh_allowed.is_set():
                 continue
-            elapsed_minutes = max(1, int((time.monotonic() - started_at) / 60))
-            content = f"正在处理，已用时约 {elapsed_minutes} 分钟，请稍候…"
+            # Clear before rendering so fragments that arrive while this send
+            # is in flight trigger exactly one more refresh with newer state.
+            if wake is not None:
+                wake.clear()
+            if progress is not None and progress.has_content():
+                content = progress.render()
+            else:
+                elapsed_minutes = max(1, int((time.monotonic() - started_at) / 60))
+                content = f"正在处理，已用时约 {elapsed_minutes} 分钟，请稍候…"
+            last_sent_at = time.monotonic()
             try:
                 acknowledgement = await client.reply_stream(
                     frame,
@@ -480,6 +686,7 @@ async def _submit_with_input_handlers(
     *,
     input_request_handler: Any,
     input_resolved_handler: Any,
+    progress_handler: Any = None,
 ) -> Any:
     """Call new and pre-input ChannelClient implementations without version checks."""
 
@@ -495,18 +702,25 @@ async def _submit_with_input_handlers(
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
     )
+    extra: dict[str, Any] = {}
+    if progress_handler is not None and (accepts_kwargs or "progress_handler" in parameters):
+        extra["progress_handler"] = progress_handler
     if accepts_kwargs or "input_request_handler" in parameters:
         return await submit(
             inbound,
             input_request_handler=input_request_handler,
             input_resolved_handler=input_resolved_handler,
+            **extra,
         )
     if "on_input_request" in parameters:
         return await submit(
             inbound,
             on_input_request=input_request_handler,
             on_input_resolved=input_resolved_handler,
+            **extra,
         )
+    if extra:
+        return await submit(inbound, **extra)
     return await submit(inbound)
 
 
@@ -948,6 +1162,21 @@ async def _handle_message(
     stream_send_lock = asyncio.Lock()
     stream_keepalive_task: asyncio.Task[None] | None = None
     placeholder_sent = False
+    # Transient run activity only ever lands in the in-place placeholder that
+    # the final reply overwrites; it is never stored or replayed.
+    progress_state: _ProgressState | None = None
+    progress_wake: asyncio.Event | None = None
+    if getattr(config, "show_progress", True):
+        progress_state = _ProgressState()
+        progress_wake = asyncio.Event()
+
+    def progress_handler(update: Any) -> None:
+        if progress_state is None or progress_wake is None:
+            return
+        progress_state.apply(update)
+        if progress_state.has_content():
+            progress_wake.set()
+
     try:
         acknowledgement = await wecom.reply_stream(
             frame,
@@ -962,6 +1191,12 @@ async def _handle_message(
     except Exception:
         logger.warning("WeCom placeholder reply failed")
 
+    # Without a live placeholder there is nothing to rewrite, so do not ask
+    # the desktop for progress at all.
+    active_progress_handler = (
+        progress_handler if placeholder_sent and progress_state is not None else None
+    )
+
     if placeholder_sent:
         stream_keepalive_task = asyncio.create_task(
             _maintain_reply_stream(
@@ -971,12 +1206,16 @@ async def _handle_message(
                 refresh_allowed=refresh_allowed,
                 send_lock=stream_send_lock,
                 stop=stream_stop,
+                progress=progress_state,
+                wake=progress_wake,
             ),
             name="arcforge-wecom-stream-keepalive",
         )
 
     async def stop_stream_keepalive() -> None:
         stream_stop.set()
+        if progress_wake is not None:
+            progress_wake.set()
         if stream_keepalive_task is not None:
             await stream_keepalive_task
 
@@ -1078,7 +1317,16 @@ async def _handle_message(
             files=inbound_files,
         )
         if interactions is None:
-            result = await channel.submit(inbound)
+            if active_progress_handler is None:
+                result = await channel.submit(inbound)
+            else:
+                result = await _submit_with_input_handlers(
+                    channel,
+                    inbound,
+                    input_request_handler=None,
+                    input_resolved_handler=None,
+                    progress_handler=active_progress_handler,
+                )
         else:
 
             async def input_request_handler(request: object) -> None:
@@ -1114,6 +1362,7 @@ async def _handle_message(
                 inbound,
                 input_request_handler=input_request_handler,
                 input_resolved_handler=input_resolved_handler,
+                progress_handler=active_progress_handler,
             )
         if result.status != "completed":
             answer = result.message or failure_message
