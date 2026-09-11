@@ -82,6 +82,9 @@ pub(crate) fn build_client_hello(
         channel_bot_id: String::new(),
         connector_id: String::new(),
         channel_lifecycle_version: 0,
+        // Only channel connectors opt into transient progress frames; the
+        // desktop agent link never receives them.
+        channel_progress_version: 0,
     }
 }
 
