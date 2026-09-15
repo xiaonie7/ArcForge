@@ -84,9 +84,10 @@ const officeRuntimeTool: Tool = {
   description:
     "Create, patch, inspect, validate, or render Office deliverables with ArcForge's bundled local runtime. " +
     "Use document=spreadsheet for XLSX create/patch/inspect. Use document=presentation for PPTX " +
-    "create (a schema_version 3 SVG deck manifest, optionally with input_path as the template PPTX; " +
+    "create (a schema_version 3 deck manifest, optionally with input_path as the template PPTX; " +
+    "reuse original template pages with source_slide plus text_edits/table_edits using shape ids from inspect, or author SVG pages; " +
     "manifest assets may be raster pictures or SVG icons/logos that become native shapes), " +
-    "validate (manifest layout check, also normalizes SVG assets into .arcforge-assets/), inspect (structure, layouts, protected regions, theme), and render " +
+    "validate (layout and resource relationships, also normalizes SVG assets into .arcforge-assets/), inspect (editable elements, layouts, protected regions, theme, relationship errors), and render " +
     "(.pdf via LibreOffice or .png page previews via OfficeCLI; spec_path may hold {\"pages\":\"2\"}). " +
     "Use document=word for DOCX create/patch/inspect/validate and HTML/PNG render. " +
     "Paths must stay inside the current workspace.",

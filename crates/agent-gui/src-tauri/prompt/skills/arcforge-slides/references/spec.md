@@ -1,6 +1,6 @@
 # Presentation Specification
 
-`OfficeRuntime` with `document=presentation` accepts a UTF-8 JSON manifest. New decks use the **SVG deck manifest** (`schema_version: 3`). The older `slides[]` layout specification is still accepted for `create` and is summarized at the end.
+`OfficeRuntime` with `document=presentation` accepts a UTF-8 JSON manifest. New decks use the **deck manifest** (`schema_version: 3`), with original template pages, new SVG pages, or both. The older `slides[]` layout specification is still accepted for `create` and is summarized at the end.
 
 ## Deck manifest (schema_version 3)
 
@@ -26,15 +26,48 @@
 
 | Field | Meaning |
 | --- | --- |
-| `mode` | `blank` (default) starts from an empty 16:9 deck; `template` starts from the `.pptx` in `template` (or the tool's `input_path`), keeps its masters, layouts, and theme, and removes its sample slides. |
+| `mode` | `blank` (default) starts from an empty 16:9 deck; `template` starts from the `.pptx` in `template` (or the tool's `input_path`), retains its masters, layouts and theme, and emits only the pages listed in the manifest. |
 | `stage` | `plan` accepts only grayscale colors and no gradients (wireframe); `design` accepts the full subset. |
 | `template` | Workspace `.pptx` path relative to the manifest. Required when `mode` is `template`. |
 | `style.fonts` | Font families used for text measurement and chart fonts; fallbacks are appended automatically. |
 | `style.layout` | Optional layout name inside the template. Otherwise the `Blank` layout or the layout with the fewest placeholders is used. |
 | `assets` | Asset id → workspace path relative to the manifest. Raster pictures: PNG, JPEG, GIF, BMP, WebP. Vector drawings: SVG (icons, logos, illustrations you draw or the user supplies). SVG pages reference assets only through these ids. |
-| `slides[]` | Ordered pages. `slide_id` is a stable id (letters, digits, `_`, `-`, `.`), `svg` is the page file, `notes` is optional speaker text. |
+| `slides[]` | Ordered pages. `slide_id` is a stable id (letters, digits, `_`, `-`, `.`). Supply `svg` for a new page or `source_slide` for a template page. `notes` is optional speaker text. |
+| `slides[].source_slide` | Positive, 1-based page number in the original template. Reuses that page including groups, pictures, tables, its layout, background and formatting. Requires template mode; the tool's `input_path` selects it automatically. |
+| `slides[].layout` | Optional layout name or zero-based layout index from inspect. Original pages keep their layout by default. New SVG pages use this value, then `style.layout`, then the default blank layout. |
+| `slides[].text_edits` | For a `source_slide` page, an array of `{shape_id, text, shape_path?}` targeting existing text elements. Text is a string; line breaks create paragraphs. Template formatting and geometry are retained. |
+| `slides[].table_edits` | For a `source_slide` page, an array of `{shape_id, rows, shape_path?}`. `rows` is a rectangular array of strings matching the existing table's exact row and column counts. Ambiguous merged-cell edits are rejected. |
 
 Paths are resolved relative to the manifest file and must stay inside the workspace. Rust rejects any SVG **page** that contains `href`, `xlink`, `<use>`, `<style>`, `<script>`, `<foreignObject>`, data URIs, or remote URLs before the runtime parses it.
+
+## Reusing original template pages
+
+First inspect and render the template. `slides[].elements` lists the element tree with `shape_id`, `shape_path`, name, type and existing text or table rows. Use those selectors rather than guessing ids. `shape_path` is the full chain of positive shape ids through nested groups, including the target, such as `[12, 8]` with `shape_id: 8`. Without it, an id must uniquely identify an element anywhere on that page.
+
+```json
+{
+  "schema_version": 3,
+  "mode": "template",
+  "stage": "design",
+  "template": "assets/company-template.pptx",
+  "slides": [
+    {
+      "slide_id": "cover",
+      "source_slide": 1,
+      "text_edits": [{"shape_id": 14, "text": "Quarterly report"}]
+    },
+    {
+      "slide_id": "overview",
+      "source_slide": 4,
+      "text_edits": [{"shape_id": 7, "text": "Delivery status"}]
+    }
+  ]
+}
+```
+
+The example ids must be replaced by ids from the actual template's inspect result. `svg` may be omitted for reused pages. When present, it adds content over the existing page, so it must not cover original artwork or text. A template page may be reused several times with independent edits. Slide-dependent resources and relationship ids are copied consistently; generated notes point to the generated page instead of pulling original sample slides back into the package. Source custom shows and section lists are cleared because they refer to the old page sequence. Internal links to pages absent from the manifest are rejected.
+
+Do not clone page XML or change relationship ids manually. `create` and `validate` reject broken internal resource references and SVG extension references that target non-SVG content. `inspect` returns `relationship_errors` so existing damaged decks can be diagnosed without claiming they are valid. An error includes the owning part and reference so a missing image can be located.
 
 ## SVG assets
 
@@ -92,7 +125,9 @@ The review API returns boxes in a normalized 1280×720 coordinate space. It expo
 
 ## Render options
 
-`action=render` with a `.png` output produces a contact sheet of all pages. Pass a JSON file as `spec_path` to select pages: `{"pages": "2"}`, `{"pages": "1-3"}`, or `{"pages": [1, 3], "grid": true}`. A `.pdf` output uses LibreOffice when it is installed.
+`action=render` with a `.png` output produces a contact sheet. Pass a JSON file as `spec_path` to select pages: `{"pages": "2"}`, `{"pages": "1-3"}`, or `{"pages": [1, 3], "grid": true}`. Every selected page is rendered separately and included in order. `grid: true` arranges pages in columns; otherwise an explicit multi-page selection is stacked vertically. Without a selection, all pages are arranged in a grid. A call accepts at most 50 selected pages; render larger decks in batches. The result lists `pages` and `page_count`, and the contact sheet is scaled to a bounded image size. A `.pdf` output uses LibreOffice when it is installed.
+
+PNG previews materialize inherited master/layout artwork in a temporary copy to avoid missing backgrounds and logos in the HTML renderer. This does not flatten or alter the editable deliverable. The runtime publishes the preview only after every selected page succeeds.
 
 ## Legacy layout specification (schema_version 1)
 

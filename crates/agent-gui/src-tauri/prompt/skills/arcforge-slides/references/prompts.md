@@ -2,6 +2,8 @@
 
 Use these as working instructions for yourself (or for a sub-agent) at each stage. Keep the outputs in the workspace `deck/` folder.
 
+For an uploaded PPTX template, choose `source_slide` pages and edit their existing text/table elements as described in `spec.md`. Sections B and C below apply to new SVG pages or overlays, not to reconstructing an existing cover, icon, or brand composition. Keep original template typography and geometry. Check resource relationships before visual review, then compare the original template and output previews.
+
 ## A. Outline architect (stage 2)
 
 ```text
@@ -77,7 +79,7 @@ When a template is provided, build the style pack from the `inspect` result: `th
 ## D. Visual review (after each render)
 
 ```text
-Look at the rendered preview and report, per page: text cut off or overlapping, cards too dense, pictures cropped where text or drawings exist, inconsistent colors or fonts across pages, elements covering template logos or footers, icons that are not recognizable at a glance.
+Look at the rendered preview and report, per page: text cut off or overlapping, cards too dense, pictures cropped where text or drawings exist, inconsistent colors or fonts across pages, elements covering template logos or footers, icons that are missing or not recognizable at a glance. For reused template pages, compare the original and generated previews and confirm that backgrounds, logos and grouped icons are still visible. If the original preview also omits known artwork, report a renderer problem instead of changing the template to compensate.
 For each problem name the page id and the element id, then redraw only those pages. Stop after two rounds and report what remains.
 ```
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 
-RUNTIME_VERSION = "0.2.0"
+RUNTIME_VERSION = "0.3.0"
 
 
 def _configure_stdio() -> None:
@@ -68,7 +68,7 @@ def print_help() -> None:
         "Usage:\n"
         "  arcforge-office-runtime doctor\n"
         "  arcforge-office-runtime spreadsheet <create|patch|code|inspect> [options]\n"
-        "  arcforge-office-runtime presentation <create|validate|inspect|render> [options]"
+        "  arcforge-office-runtime presentation <create|validate|inspect|render|render-png|prepare-preview> [options]"
     )
 
 

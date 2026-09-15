@@ -448,6 +448,51 @@ fn is_valid_asset_id(asset_id: &str) -> bool {
         && asset_id != ".."
 }
 
+fn validate_template_slide_edits(slide: &serde_json::Value, index: usize) -> Result<(), String> {
+    for field in ["text_edits", "table_edits"] {
+        let Some(edits) = slide.get(field) else { continue };
+        let label = format!("specPath slides[{index}].{field}");
+        if slide.get("source_slide").is_none() {
+            return Err(format!("{label} requires source_slide"));
+        }
+        let edits = edits.as_array().ok_or_else(|| format!("{label} must be an array"))?;
+        for (edit_index, edit) in edits.iter().enumerate() {
+            let label = format!("{label}[{edit_index}]");
+            let shape_id = edit.get("shape_id").and_then(serde_json::Value::as_u64)
+                .filter(|id| *id > 0)
+                .ok_or_else(|| format!("{label}.shape_id must be a positive integer from inspect"))?;
+            if let Some(path) = edit.get("shape_path") {
+                let valid = path.as_array().is_some_and(|parts| {
+                    !parts.is_empty()
+                        && parts.iter().all(|part| part.as_u64().is_some_and(|id| id > 0))
+                        && parts.last().and_then(serde_json::Value::as_u64) == Some(shape_id)
+                });
+                if !valid {
+                    return Err(format!("{label}.shape_path must be a non-empty array of positive ids ending in shape_id"));
+                }
+            }
+            if field == "text_edits" {
+                if !edit.get("text").is_some_and(serde_json::Value::is_string) {
+                    return Err(format!("{label}.text must be a string"));
+                }
+            } else {
+                let rows = edit.get("rows").and_then(serde_json::Value::as_array)
+                    .filter(|rows| !rows.is_empty())
+                    .ok_or_else(|| format!("{label}.rows must be a non-empty rectangular array of strings"))?;
+                let width = rows[0].as_array().map_or(0, Vec::len);
+                if width == 0 || !rows.iter().all(|row| {
+                    row.as_array().is_some_and(|cells| {
+                        cells.len() == width && cells.iter().all(serde_json::Value::is_string)
+                    })
+                }) {
+                    return Err(format!("{label}.rows must be a non-empty rectangular array of strings"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate a schema_version 3 manifest. SVG assets are normalized into
 /// `<manifest dir>/.arcforge-assets/` on the way; the cache directory is returned so it can be
 /// handed to the runtime with `--asset-cache`.
@@ -455,6 +500,7 @@ fn validate_svg_deck_manifest(
     value: &serde_json::Value,
     spec_dir: &Path,
     workspace: &Path,
+    template_override: bool,
 ) -> Result<Option<PathBuf>, String> {
     let mut asset_cache: Option<PathBuf> = None;
     if let Some(mode) = value.get("mode").and_then(serde_json::Value::as_str) {
@@ -518,7 +564,7 @@ fn validate_svg_deck_manifest(
     }
     let Some(slides) = value.get("slides").and_then(serde_json::Value::as_array) else {
         return Err(
-            "specPath slides must be a non-empty array of {slide_id, svg} entries".to_string(),
+            "specPath slides must be a non-empty array of entries with slide_id and svg or source_slide".to_string(),
         );
     };
     if slides.is_empty() {
@@ -530,8 +576,28 @@ fn validate_svg_deck_manifest(
         ));
     }
     for (index, slide) in slides.iter().enumerate() {
-        let Some(svg) = slide.get("svg").and_then(serde_json::Value::as_str) else {
-            return Err(format!("specPath slides[{index}].svg is required"));
+        if !slide.is_object() {
+            return Err(format!("specPath slides[{index}] must be an object"));
+        }
+        if let Some(source_slide) = slide.get("source_slide") {
+            if !source_slide.as_u64().is_some_and(|number| number > 0) {
+                return Err(format!("specPath slides[{index}].source_slide must be a positive integer (1-based template page)"));
+            }
+            if !template_override && value.get("mode").and_then(serde_json::Value::as_str) != Some("template") {
+                return Err(format!("specPath slides[{index}].source_slide requires template mode or inputPath"));
+            }
+        }
+        if let Some(layout) = slide.get("layout") {
+            if !(layout.as_str().is_some_and(|name| !name.trim().is_empty()) || layout.as_u64().is_some()) {
+                return Err(format!("specPath slides[{index}].layout must be a non-empty name or a zero-based layout index"));
+            }
+        }
+        validate_template_slide_edits(slide, index)?;
+        let svg = match slide.get("svg") {
+            None if slide.get("source_slide").is_some() => continue,
+            Some(svg) => svg.as_str().filter(|path| !path.trim().is_empty())
+                .ok_or_else(|| format!("specPath slides[{index}].svg must be a non-empty workspace SVG path"))?,
+            None => return Err(format!("specPath slides[{index}].svg is required without source_slide")),
         };
         let label = format!("slides[{index}].svg");
         let path = resolve_existing_path(workspace, spec_dir, svg, "svg", &label)?;
@@ -550,6 +616,7 @@ fn validate_svg_deck_manifest(
 fn validate_presentation_assets(
     spec_path: &Path,
     workspace: &Path,
+    template_override: bool,
 ) -> Result<Option<PathBuf>, String> {
     let raw = std::fs::read_to_string(spec_path)
         .map_err(|error| format!("specPath could not be read: {error}"))?;
@@ -561,7 +628,7 @@ fn validate_presentation_assets(
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
     if schema_version >= 3 {
-        return validate_svg_deck_manifest(&value, spec_dir, workspace);
+        return validate_svg_deck_manifest(&value, spec_dir, workspace, template_override);
     }
     let Some(slides) = value.get("slides").and_then(serde_json::Value::as_array) else {
         return Ok(None);
@@ -993,7 +1060,8 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                 "json",
                 "specPath",
             )?;
-            let asset_cache = validate_presentation_assets(&spec, &workspace)?;
+            let asset_cache = validate_presentation_assets(&spec, &workspace,
+                input.input_path.as_deref().is_some_and(|path| !path.trim().is_empty()))?;
             let output = resolve_output_path(
                 &workspace,
                 required_path(&input.output_path, "outputPath")?,
@@ -1047,7 +1115,8 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                         .to_string(),
                 );
             }
-            let asset_cache = validate_presentation_assets(&spec, &workspace)?;
+            let asset_cache = validate_presentation_assets(&spec, &workspace,
+                input.input_path.as_deref().is_some_and(|path| !path.trim().is_empty()))?;
             push_path_argument(&mut arguments, "--spec", spec);
             if let Some(asset_cache) = asset_cache {
                 push_path_argument(&mut arguments, "--asset-cache", asset_cache);
@@ -1110,7 +1179,6 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                     push_path_argument(&mut arguments, "--output", output);
                 }
                 "png" => {
-                    backend = RuntimeBackend::OfficeCli;
                     let output = resolve_output_path(&workspace, output_raw, "png", "outputPath")?;
                     if output.exists() && !input.force {
                         return Err(
@@ -1145,20 +1213,17 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                         target: output.clone(),
                     });
                     arguments = vec![
-                        OsString::from("view"),
+                        OsString::from("presentation"),
+                        OsString::from("render-png"),
+                        OsString::from("--input"),
                         presentation.into_os_string(),
-                        OsString::from("screenshot"),
-                        OsString::from("--render"),
-                        OsString::from("html"),
-                        OsString::from("--page"),
+                        OsString::from("--pages"),
                         OsString::from(pages),
                     ];
                     if grid {
                         arguments.push(OsString::from("--grid"));
                     }
-                    arguments.push(OsString::from("-o"));
-                    arguments.push(output.into_os_string());
-                    push_officecli_json(&mut arguments);
+                    push_path_argument(&mut arguments, "--output", output);
                 }
                 _ => {
                     return Err(
@@ -1737,10 +1802,71 @@ fn commit_officecli_output(
     Ok(())
 }
 
+fn prepare_presentation_render_input(
+    input: &Path,
+    workdir: &Path,
+    timeout: Duration,
+    cancelled: &AtomicBool,
+) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let directory = tempfile::Builder::new().prefix("arcforge-ppt-preview-").tempdir()
+        .map_err(|error| format!("Failed to prepare presentation preview directory: {error}"))?;
+    let output = directory.path().join("preview.pptx");
+    let runtime = resolve_runtime_program()?;
+    let mut command = Command::new(&runtime.program);
+    command.args(&runtime.prefix_arguments)
+        .args(["presentation", "prepare-preview", "--input"])
+        .arg(input).arg("--output").arg(&output)
+        .current_dir(workdir)
+        .env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1")
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn()
+        .map_err(|error| format!("Failed to start presentation preview preparation: {error}"))?;
+    let stdout = child.stdout.take().ok_or("Failed to capture preview preparation output")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture preview preparation errors")?;
+    let stdout_reader = thread::spawn(move || read_capped(stdout, STDOUT_LIMIT_BYTES));
+    let stderr_reader = thread::spawn(move || read_capped(stderr, STDERR_LIMIT_BYTES));
+    let result = wait_for_child(&mut child, timeout, cancelled);
+    let _ = stdout_reader.join();
+    let error = stderr_reader.join().map(|output| output.text).unwrap_or_default();
+    let (status, timed_out, was_cancelled) = result?;
+    if timed_out || was_cancelled || !status.success() || !output.is_file() {
+        return Err(if timed_out { "Presentation preview preparation timed out".to_string() }
+            else if was_cancelled { "Presentation preview preparation was cancelled".to_string() }
+            else { format!("Presentation preview preparation failed: {}", error.trim()) });
+    }
+    Ok((directory, output))
+}
+
+fn published_output_report(stdout: &str, staged: &Path, target: &Path) -> String {
+    fn rewrite(value: &mut serde_json::Value, staged: &Path, target: &Path) {
+        match value {
+            serde_json::Value::String(path) if Path::new(path) == staged => {
+                *path = target.to_string_lossy().into_owned();
+            }
+            serde_json::Value::Array(items) => {
+                for item in items { rewrite(item, staged, target); }
+            }
+            serde_json::Value::Object(items) => {
+                for item in items.values_mut() { rewrite(item, staged, target); }
+            }
+            _ => {}
+        }
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(stdout) else { return stdout.to_string() };
+    rewrite(&mut value, staged, target);
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| stdout.to_string())
+}
+
 fn run_office_runtime(
     invocation: PreparedInvocation,
     cancelled: Arc<AtomicBool>,
 ) -> Result<OfficeRuntimeResponse, String> {
+    let operation_started = Instant::now();
     let (artifact_record, preparation_error) =
         match prepare_office_runtime_artifacts(invocation.artifact_record.clone()) {
             Ok(record) => (record, None),
@@ -1751,6 +1877,12 @@ fn run_office_runtime(
         RuntimeBackend::OfficeCli => resolve_officecli_program()?,
     };
     let mut arguments = invocation.arguments.clone();
+    if invocation.backend == RuntimeBackend::ArcForge
+        && arguments.first().is_some_and(|argument| argument == "presentation")
+        && arguments.get(1).is_some_and(|argument| argument == "render-png")
+    {
+        push_path_argument(&mut arguments, "--officecli", resolve_officecli_program()?.program);
+    }
     let _staged_input = if matches!(
         artifact_record.action.as_str(),
         "patch" | "code" | "render" | "validate"
@@ -1841,8 +1973,9 @@ fn run_office_runtime(
     let stdout_reader = thread::spawn(move || read_capped(stdout, STDOUT_LIMIT_BYTES));
     let stderr_reader = thread::spawn(move || read_capped(stderr, STDERR_LIMIT_BYTES));
 
-    let status_result = wait_for_child(&mut child, invocation.timeout, &cancelled);
-    let captured_stdout = match stdout_reader.join() {
+    let status_result = wait_for_child(&mut child,
+        invocation.timeout.saturating_sub(operation_started.elapsed()), &cancelled);
+    let mut captured_stdout = match stdout_reader.join() {
         Ok(output) => output,
         Err(_) => {
             if let Some((temp, ..)) = &staged_output {
@@ -1880,6 +2013,7 @@ fn run_office_runtime(
                 let _ = std::fs::remove_file(temp);
                 return Err(error);
             }
+            captured_stdout.text = published_output_report(&captured_stdout.text, temp, target);
         } else {
             let _ = std::fs::remove_file(temp);
         }
@@ -2001,6 +2135,7 @@ fn presentation_preview_page_sync(
     // The cache key follows the slide content, not the file: re-creating a deck only
     // invalidates the slides whose XML (or shared masters/media) actually changed.
     let mut hasher = Sha256::new();
+    hasher.update(b"inherited-artwork-preview-v1");
     hasher.update(parts[page - 1].fingerprint.as_bytes());
     hasher.update((page as u64).to_le_bytes());
     hasher.update(u64::from(width).to_le_bytes());
@@ -2015,6 +2150,10 @@ fn presentation_preview_page_sync(
 
     if !target.is_file() {
         cached = false;
+        let started = Instant::now();
+        let cancelled = AtomicBool::new(false);
+        let (_prepared_directory, prepared_input) = prepare_presentation_render_input(
+            &file, &workspace, PRESENTATION_PREVIEW_TIMEOUT, &cancelled)?;
         let runtime = resolve_officecli_program()?;
         let temp = cache_dir.join(format!("{key}.{}.tmp.png", std::process::id()));
         let _ = std::fs::remove_file(&temp);
@@ -2022,7 +2161,7 @@ fn presentation_preview_page_sync(
         command
             .args(&runtime.prefix_arguments)
             .arg("view")
-            .arg(&file)
+            .arg(&prepared_input)
             .arg("screenshot")
             .arg("--render")
             .arg("html")
@@ -2058,9 +2197,8 @@ fn presentation_preview_page_sync(
             .ok_or_else(|| "Failed to capture OfficeCLI stderr".to_string())?;
         let stdout_reader = thread::spawn(move || read_capped(stdout, STDOUT_LIMIT_BYTES));
         let stderr_reader = thread::spawn(move || read_capped(stderr, STDERR_LIMIT_BYTES));
-        let cancelled = AtomicBool::new(false);
         let (status, timed_out, _) =
-            wait_for_child(&mut child, PRESENTATION_PREVIEW_TIMEOUT, &cancelled)?;
+            wait_for_child(&mut child, PRESENTATION_PREVIEW_TIMEOUT.saturating_sub(started.elapsed()), &cancelled)?;
         let _ = stdout_reader.join();
         let stderr_text = stderr_reader
             .join()
@@ -3238,6 +3376,61 @@ mod tests {
     }
 
     #[test]
+    fn presentation_template_pages_accept_edits_without_svg_via_input_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_test_pptx(&temp.path().join("brand.pptx"), 2);
+        std::fs::write(temp.path().join("deck.json"), serde_json::json!({
+            "schema_version": 3,
+            "slides": [{"slide_id": "cover", "source_slide": 1,
+                "text_edits": [{"shape_id": 14, "text": "Quarterly report"}],
+                "table_edits": [{"shape_id": 34, "shape_path": [12, 34],
+                    "rows": [["Item", "Value"], ["Revenue", "100"]]}]}]
+        }).to_string()).expect("manifest");
+        for action in ["create", "validate"] {
+            let mut request = presentation_request(temp.path(), action);
+            request.spec_path = Some("deck.json".to_string());
+            request.input_path = Some("brand.pptx".to_string());
+            if action == "create" { request.output_path = Some("out.pptx".to_string()); }
+            let invocation = prepare_invocation(request).expect("template page without SVG");
+            assert!(argument_strings(&invocation).iter().any(|argument| argument == "--template"));
+        }
+    }
+
+    #[test]
+    fn presentation_template_manifest_rejects_invalid_selectors_and_edits() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cases = [
+            (serde_json::json!({"source_slide": 0}), "source_slide"),
+            (serde_json::json!({"source_slide": true}), "source_slide"),
+            (serde_json::json!({"source_slide": 1, "svg": ""}), "svg"),
+            (serde_json::json!({"source_slide": 1, "layout": -1}), "layout"),
+            (serde_json::json!({"source_slide": 1, "text_edits": [{"shape_id": 14, "text": 5}]}), ".text"),
+            (serde_json::json!({"source_slide": 1, "text_edits": [{"shape_id": 14, "shape_path": [12, 13], "text": "x"}]}), "shape_path"),
+            (serde_json::json!({"source_slide": 1, "table_edits": [{"shape_id": 34, "rows": [["x"], ["y", "z"]]}]}), ".rows"),
+            (serde_json::json!({"text_edits": []}), "requires source_slide"),
+        ];
+        for (slide, expected) in cases {
+            let value = serde_json::json!({"schema_version": 3, "mode": "template", "slides": [slide]});
+            let error = validate_svg_deck_manifest(&value, temp.path(), temp.path(), false)
+                .expect_err("invalid template selector/edit");
+            assert!(error.contains(expected), "expected {expected}, got {error}");
+        }
+        let value = serde_json::json!({"schema_version": 3, "slides": [{"source_slide": 1}]});
+        assert!(validate_svg_deck_manifest(&value, temp.path(), temp.path(), false)
+            .expect_err("template missing").contains("requires template mode"));
+    }
+
+    #[test]
+    fn presentation_template_overlay_keeps_svg_workspace_validation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let value = serde_json::json!({"schema_version": 3, "mode": "template", "slides": [
+            {"slide_id": "cover", "source_slide": 1, "svg": "../outside.svg"}
+        ]});
+        assert!(validate_svg_deck_manifest(&value, temp.path(), temp.path(), false)
+            .expect_err("overlay must remain in workspace").contains("must not contain '..'"));
+    }
+
+    #[test]
     fn presentation_create_rejects_a_template_for_legacy_specs() {
         let temp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
@@ -3350,7 +3543,7 @@ mod tests {
             .and_then(Path::parent)
             .expect("manifest inside <workspace>/<deck>/")
             .to_path_buf();
-        let cache = validate_presentation_assets(&spec, &workspace).expect("prepare assets");
+        let cache = validate_presentation_assets(&spec, &workspace, false).expect("prepare assets");
         println!("asset cache: {:?}", cache);
     }
 
@@ -3500,6 +3693,42 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
+    fn probe_presentation_template_workflow_from_env() {
+        let Some(raw) = std::env::var_os("ARCFORGE_PPTX_PREVIEW_PROBE") else { return };
+        let temp = tempfile::tempdir().expect("workspace");
+        std::fs::copy(PathBuf::from(raw), temp.path().join("template.pptx")).expect("copy template");
+        std::fs::write(temp.path().join("deck.json"), serde_json::json!({
+            "schema_version": 3,
+            "slides": [{"slide_id": "cover", "source_slide": 1}]
+        }).to_string()).expect("manifest");
+        for action in ["validate", "create", "render"] {
+            let mut request = presentation_request(temp.path(), action);
+            request.timeout_ms = Some(120_000);
+            if action == "render" {
+                request.input_path = Some("deck.pptx".to_string());
+                request.output_path = Some("preview.png".to_string());
+            } else {
+                request.spec_path = Some("deck.json".to_string());
+                request.input_path = Some("template.pptx".to_string());
+                if action == "create" { request.output_path = Some("deck.pptx".to_string()); }
+            }
+            let result = run_office_runtime(prepare_invocation(request).expect("prepare"), Arc::new(AtomicBool::new(false))).expect("run");
+            assert!(result.success, "{action}: {} {}", result.stdout, result.stderr);
+            if action == "render" {
+                let report: serde_json::Value = serde_json::from_str(&result.stdout).expect("render JSON");
+                let reported_path = PathBuf::from(report["png"].as_str().expect("output path"));
+                assert_eq!(
+                    reported_path.canonicalize().expect("published preview exists"),
+                    temp.path().join("preview.png").canonicalize().expect("expected preview exists")
+                );
+            }
+        }
+        assert!(std::fs::read(temp.path().join("preview.png")).expect("PNG").starts_with(b"\x89PNG\r\n\x1a\n"));
+        println!("template validate/create/render passed with the bundled runtime");
+    }
+
+    #[test]
     fn presentation_validate_runs_the_runtime_against_the_manifest() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_svg_deck(temp.path(), SAFE_SVG);
@@ -3514,7 +3743,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_render_selects_pdf_runtime_or_png_screenshot() {
+    fn presentation_render_selects_pdf_or_complete_png_runtime() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_test_pptx(&temp.path().join("deck.pptx"), 3);
 
@@ -3532,17 +3761,16 @@ mod tests {
         png.output_path = Some("previews/deck.png".to_string());
         let png_invocation = prepare_invocation(png).expect("prepare png render");
         let arguments = argument_strings(&png_invocation);
-        assert_eq!(png_invocation.backend, RuntimeBackend::OfficeCli);
-        assert_eq!(arguments[0], "view");
-        assert_eq!(arguments[2], "screenshot");
-        assert_eq!(arguments[3], "--render");
-        assert_eq!(arguments[4], "html");
-        assert_eq!(arguments[5], "--page");
-        assert_eq!(arguments[6], "1-3");
-        assert_eq!(arguments[7], "--grid");
-        assert_eq!(arguments[8], "-o");
-        assert!(arguments[9].ends_with("deck.png"));
-        assert_eq!(arguments[10], "--json");
+        assert_eq!(png_invocation.backend, RuntimeBackend::ArcForge);
+        assert_eq!(arguments[0], "presentation");
+        assert_eq!(arguments[1], "render-png");
+        assert_eq!(arguments[2], "--input");
+        assert_eq!(arguments[4], "--pages");
+        assert_eq!(arguments[5], "1-3");
+        assert_eq!(arguments[6], "--grid");
+        assert_eq!(arguments[7], "--output");
+        assert!(arguments[8].ends_with("deck.png"));
+        assert!(!arguments.iter().any(|value| value == "--officecli"), "trusted renderer is injected at execution, not accepted from the spec");
         assert!(matches!(
             png_invocation.officecli_output,
             Some(OfficeCliOutput::New { target, .. }) if target.ends_with("previews/deck.png")
@@ -3554,7 +3782,7 @@ mod tests {
         single.spec_path = Some("render.json".to_string());
         single.output_path = Some("previews/p2.png".to_string());
         let single_arguments = argument_strings(&prepare_invocation(single).expect("single page"));
-        assert_eq!(single_arguments[6], "2");
+        assert_eq!(single_arguments[5], "2");
         assert!(!single_arguments.iter().any(|value| value == "--grid"));
 
         std::fs::write(temp.path().join("bad.json"), r#"{"pages":"2;rm"}"#).expect("bad spec");

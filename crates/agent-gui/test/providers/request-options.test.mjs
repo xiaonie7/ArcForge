@@ -580,6 +580,60 @@ test("custom Codex Chat Completions GPT vision models infer image input metadata
   assert.deepEqual(model.input, ["text", "image"]);
 });
 
+test("GLM-5.3-Flash accepts images on custom OpenAI-compatible and Zhipu endpoints", () => {
+  for (const providerId of ["codex", "zhipu"]) {
+    for (const modelId of ["glm-5.3-flash", " GLM-5.3-FLASH "]) {
+      const model = providers.createModelFromConfig(
+        providerId,
+        modelId,
+        "https://relay.example.test/v1",
+        "openai-completions",
+      );
+
+      assert.equal(model.api, "openai-completions");
+      assert.deepEqual(model.input, ["text", "image"], `${providerId}: ${modelId}`);
+    }
+  }
+});
+
+test("GLM-5.3-Flash image inference does not apply to other GLM-5 models", () => {
+  for (const modelId of ["glm-5", "glm-5.2", "glm-5.3", "glm-5.3-flash-custom"]) {
+    const model = providers.createModelFromConfig(
+      "codex",
+      modelId,
+      "https://relay.example.test/v1",
+      "openai-completions",
+    );
+
+    assert.deepEqual(model.input, ["text"], modelId);
+  }
+});
+
+test("GLM-5.3-Flash Chat Completions wire payload retains image blocks", async () => {
+  const model = providers.createModelFromConfig(
+    "codex",
+    "glm-5.3-flash",
+    "https://relay.example.test/v1",
+    "openai-completions",
+  );
+  const payload = await captureArcForgeOpenAIPayload(model, {
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "Compare these slide previews." },
+        { type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+      ],
+      timestamp: 1,
+    }],
+  });
+
+  assert.equal(payload.model, "glm-5.3-flash");
+  assert.deepEqual(payload.messages[0].content.find((block) => block.type === "image_url"), {
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,aW1hZ2U=" },
+  });
+});
+
 test("custom Codex Chat Completions search preview models stay text-only", () => {
   const model = providers.createModelFromConfig(
     "codex",

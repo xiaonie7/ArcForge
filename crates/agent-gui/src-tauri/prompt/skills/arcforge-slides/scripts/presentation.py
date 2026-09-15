@@ -12,15 +12,19 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import math
 import os
+import posixpath
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+import zipfile
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -35,6 +39,7 @@ try:
     from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE, MSO_SHAPE_TYPE
     from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
     from pptx.oxml.ns import qn
+    from pptx.opc.packuri import PackURI
     from pptx.util import Emu, Inches, Pt
 
     PPTX_IMPORT_ERROR: Optional[Exception] = None
@@ -1483,7 +1488,7 @@ def load_deck_manifest(
 
     slides_raw = spec.get("slides")
     if not isinstance(slides_raw, list) or not slides_raw:
-        raise PresentationError("slides must be a non-empty array of {slide_id, svg} entries")
+        raise PresentationError("slides must be a non-empty array of entries with slide_id and svg or source_slide")
     seen_ids: set[str] = set()
     slides: List[Dict[str, Any]] = []
     for index, entry in enumerate(slides_raw):
@@ -1495,21 +1500,36 @@ def load_deck_manifest(
         if slide_id in seen_ids:
             raise PresentationError("duplicate slide_id " + slide_id)
         seen_ids.add(slide_id)
-        raw_svg = entry.get("svg")
-        if not raw_svg:
-            raise PresentationError("slides[" + str(index) + "].svg is required")
-        svg_path = Path(str(raw_svg)).expanduser()
-        if not svg_path.is_absolute():
-            svg_path = spec_dir / svg_path
-        svg_path = svg_path.resolve()
-        if not svg_path.is_file() or svg_path.suffix.lower() != ".svg":
-            raise PresentationError("slides[" + str(index) + "].svg must be an existing .svg file: " + str(svg_path))
+        source_slide = entry.get("source_slide")
+        if "source_slide" in entry:
+            if type(source_slide) is not int or source_slide < 1 or mode != "template":
+                raise PresentationError(slide_id + ": source_slide must be a positive template page number")
+        svg_path = None
+        if "svg" in entry:
+            raw_svg = entry["svg"]
+            if not isinstance(raw_svg, str) or not raw_svg.strip():
+                raise PresentationError(slide_id + ": svg must be a non-empty path")
+            svg_path = Path(raw_svg).expanduser()
+            if not svg_path.is_absolute():
+                svg_path = spec_dir / svg_path
+            svg_path = svg_path.resolve()
+            if not svg_path.is_file() or svg_path.suffix.lower() != ".svg":
+                raise PresentationError(slide_id + ": svg must be an existing .svg file: " + str(svg_path))
+        elif source_slide is None:
+            raise PresentationError(slide_id + ": svg is required without source_slide")
+        layout = entry.get("layout")
+        if "layout" in entry and not ((isinstance(layout, str) and layout.strip()) or (type(layout) is int and layout >= 0)):
+            raise PresentationError(slide_id + ": layout must be a name or zero-based index")
+        validate_template_edits(entry, slide_id)
         slides.append(
             {
                 "slide_id": slide_id,
                 "svg": svg_path,
                 "notes": entry.get("notes"),
                 "layout": entry.get("layout"),
+                "source_slide": source_slide,
+                "text_edits": entry.get("text_edits", []),
+                "table_edits": entry.get("table_edits", []),
             }
         )
 
@@ -1545,6 +1565,254 @@ def load_deck_manifest(
     )
 
 
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+SVG_BLIP = "{http://schemas.microsoft.com/office/drawing/2016/SVG/main}svgBlip"
+
+
+def relationship_errors(source: Any) -> List[Dict[str, Any]]:
+    """Audit the actual package, including SVG fallbacks and duplicate part names."""
+    errors: List[Dict[str, Any]] = []
+    with zipfile.ZipFile(source) as archive:
+        names = archive.namelist()
+        files = set(names)
+        content_types = ET.fromstring(archive.read("[Content_Types].xml"))
+        defaults = {node.get("Extension", "").lower(): node.get("ContentType") for node in content_types if node.tag.endswith("}Default")}
+        overrides = {node.get("PartName", "").lstrip("/"): node.get("ContentType") for node in content_types if node.tag.endswith("}Override")}
+        if len(files) != len(names):
+            errors.append({"part": "package", "error": "duplicate ZIP part names"})
+        relationships_by_owner = {}
+        for name in names:
+            if not name.endswith(".rels"):
+                continue
+            directory, filename = posixpath.split(name)
+            owner = posixpath.join(posixpath.dirname(directory), filename[:-5]) if name != "_rels/.rels" else ""
+            root = ET.fromstring(archive.read(name))
+            rels = {}
+            relationships_by_owner[owner] = rels
+            for rel in root:
+                rid = rel.get("Id")
+                if rid in rels:
+                    errors.append({"part": owner, "relationship": rid, "error": "duplicate relationship id"})
+                rels[rid] = rel
+                if rel.get("TargetMode") == "External":
+                    continue
+                target = rel.get("Target", "")
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(owner), target)).lstrip("/")
+                if resolved not in files:
+                    errors.append({"part": owner, "relationship": rid, "target": resolved, "error": "missing target part"})
+        # A part can still contain r:id after its entire .rels file was lost.
+        for owner in names:
+            if not owner.endswith(".xml"):
+                continue
+            rels = relationships_by_owner.get(owner, {})
+            xml = ET.fromstring(archive.read(owner))
+            for element in xml.iter():
+                for attribute, rid in element.attrib.items():
+                    if not attribute.startswith("{" + REL_NS + "}") or not rid:
+                        continue
+                    rel = rels.get(rid)
+                    if rel is None:
+                        errors.append({"part": owner, "relationship": rid, "error": "undefined relationship id"})
+                        continue
+                    if element.tag != SVG_BLIP:
+                        continue
+                    target = posixpath.normpath(posixpath.join(posixpath.dirname(owner), rel.get("Target", ""))).lstrip("/")
+                    valid = False
+                    if rel.get("TargetMode") != "External" and target in files:
+                        try:
+                            mime = overrides.get(target, defaults.get(posixpath.splitext(target)[1][1:].lower()))
+                            valid = ET.fromstring(archive.read(target)).tag == SVG_NS + "svg" and mime == "image/svg+xml"
+                        except ET.ParseError:
+                            pass
+                    if not valid:
+                        errors.append({"part": owner, "relationship": rid, "target": target, "error": "SVG reference does not target SVG content"})
+    return errors
+
+
+def require_valid_relationships(source: Any) -> None:
+    errors = relationship_errors(source)
+    if errors:
+        raise PresentationError("Invalid PPTX resource relationships: " + json.dumps(errors[:10], ensure_ascii=False))
+
+
+def validate_template_edits(entry: Mapping[str, Any], page: str) -> None:
+    for field in ("text_edits", "table_edits"):
+        if field not in entry:
+            continue
+        if entry.get("source_slide") is None:
+            raise PresentationError(page + ": " + field + " requires source_slide")
+        edits = entry[field]
+        if not isinstance(edits, list):
+            raise PresentationError(page + ": " + field + " must be an array")
+        for edit in edits:
+            if not isinstance(edit, dict) or type(edit.get("shape_id")) is not int or edit["shape_id"] < 1:
+                raise PresentationError(page + ": edit.shape_id must be a positive integer from inspect")
+            path = edit.get("shape_path")
+            if "shape_path" in edit and (not isinstance(path, list) or not path or
+                    any(type(part) is not int or part < 1 for part in path) or path[-1] != edit["shape_id"]):
+                raise PresentationError(page + ": shape_path must end in shape_id and contain positive ids")
+            if field == "text_edits":
+                if not isinstance(edit.get("text"), str):
+                    raise PresentationError(page + ": text must be a string")
+            else:
+                rows = edit.get("rows")
+                if (not isinstance(rows, list) or not rows or not isinstance(rows[0], list) or not rows[0] or
+                        any(not isinstance(row, list) or len(row) != len(rows[0]) or
+                            any(not isinstance(cell, str) for cell in row) for row in rows)):
+                    raise PresentationError(page + ": rows must be a non-empty rectangular array of strings")
+
+
+def iter_shape_paths(shapes: Any, prefix: Tuple[int, ...] = ()) -> Any:
+    for shape in shapes:
+        path = prefix + (shape.shape_id,)
+        yield path, shape
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            yield from iter_shape_paths(shape.shapes, path)
+
+
+def find_template_shape(slide: Any, edit: Mapping[str, Any], page: str) -> Any:
+    matches = [shape for path, shape in iter_shape_paths(slide.shapes)
+               if shape.shape_id == edit["shape_id"] and
+               ("shape_path" not in edit or list(path) == edit["shape_path"])]
+    if len(matches) != 1:
+        raise PresentationError(page + ": shape selector must match exactly one element: " + str(dict(edit)))
+    return matches[0]
+
+
+def replace_template_text(frame: Any, text: str) -> None:
+    """Keep paragraph/run styling and geometry; replace only the requested content."""
+    originals = [deepcopy(paragraph._p) for paragraph in frame.paragraphs]
+    for paragraph in list(frame._txBody.findall(qn("a:p"))):
+        frame._txBody.remove(paragraph)
+    for index, line in enumerate(text.split("\n")):
+        paragraph = deepcopy(originals[min(index, len(originals) - 1)])
+        prototype = paragraph.find(qn("a:r"))
+        properties = deepcopy(prototype.find(qn("a:rPr"))) if prototype is not None and prototype.find(qn("a:rPr")) is not None else None
+        if properties is None:
+            end_properties = paragraph.find(qn("a:endParaRPr"))
+            if end_properties is not None:
+                properties = deepcopy(end_properties)
+                properties.tag = qn("a:rPr")
+        for child in list(paragraph):
+            if child.tag in (qn("a:r"), qn("a:br"), qn("a:fld")):
+                paragraph.remove(child)
+        run = etree.Element(qn("a:r"))
+        if properties is not None:
+            # The original hyperlink text was replaced; don't attach an unrelated link.
+            for link in list(properties):
+                if link.tag in (qn("a:hlinkClick"), qn("a:hlinkMouseOver")):
+                    properties.remove(link)
+            run.append(properties)
+        etree.SubElement(run, qn("a:t")).text = line
+        end = paragraph.find(qn("a:endParaRPr"))
+        paragraph.insert(list(paragraph).index(end) if end is not None else len(paragraph), run)
+        frame._txBody.append(paragraph)
+
+
+def apply_template_edits(slide: Any, entry: Mapping[str, Any]) -> None:
+    edited = set()
+    for field in ("text_edits", "table_edits"):
+        for edit in entry[field]:
+            shape = find_template_shape(slide, edit, entry["slide_id"])
+            if shape._element in edited:
+                raise PresentationError(entry["slide_id"] + ": duplicate edit target")
+            edited.add(shape._element)
+            if field == "text_edits":
+                if not shape.has_text_frame:
+                    raise PresentationError(entry["slide_id"] + ": text_edits target is not a text element")
+                replace_template_text(shape.text_frame, edit["text"])
+            else:
+                if not shape.has_table:
+                    raise PresentationError(entry["slide_id"] + ": table_edits target is not a table")
+                table, rows = shape.table, edit["rows"]
+                if len(rows) != len(table.rows) or len(rows[0]) != len(table.columns):
+                    raise PresentationError(entry["slide_id"] + ": table rows must match the original dimensions")
+                if any(cell.is_merge_origin or cell.is_spanned for row in table.rows for cell in row.cells):
+                    raise PresentationError(entry["slide_id"] + ": merged tables require explicit cell support; choose another template page")
+                for row_index, row in enumerate(rows):
+                    for column_index, text in enumerate(row):
+                        replace_template_text(table.cell(row_index, column_index).text_frame, text)
+
+
+def all_layouts(presentation: Any) -> List[Any]:
+    return [layout for master in presentation.slide_masters for layout in master.slide_layouts]
+
+
+def select_layout(presentation: Any, selector: Any = None, default: Any = None) -> Any:
+    if selector is None:
+        return default if default is not None else blank_layout(presentation)
+    layouts = all_layouts(presentation)
+    matches = ([layouts[selector]] if type(selector) is int and 0 <= selector < len(layouts) else
+               [layout for layout in layouts if isinstance(selector, str) and layout.name.strip().lower() == selector.strip().lower()])
+    if len(matches) != 1:
+        raise PresentationError("layout selector must match exactly one layout: " + str(selector))
+    return matches[0]
+
+
+def remap_xml_relationships(root: Any, mapping: Mapping[str, str]) -> None:
+    # One pass is essential: old 6 -> new 5 and old 5 -> new 6 must not cascade.
+    for node in root.iter():
+        for attribute, value in list(node.attrib.items()):
+            if attribute.startswith("{" + REL_NS + "}") and value in mapping:
+                node.set(attribute, mapping[value])
+
+
+def clone_template_slide(source: Any, destination: Any, slide_targets: Mapping[Any, Any], used_names: set[str]) -> None:
+    package = destination.part.package
+    memo = dict(slide_targets)
+    memo[source.part] = destination.part
+    shared = {"slideLayout", "slideMaster", "notesMaster", "theme", "image", "font", "commentAuthors"}
+
+    def clone_part(part: Any) -> Any:
+        if part in memo:
+            return memo[part]
+        stem, extension = posixpath.splitext(str(part.partname))
+        index = 1
+        while stem + "-arcforge" + str(index) + extension in used_names:
+            index += 1
+        name = stem + "-arcforge" + str(index) + extension
+        used_names.add(name)
+        result = type(part).load(PackURI(name), part.content_type, package, part.blob)
+        memo[part] = result
+        mapping = copy_relationships(part, result)
+        if hasattr(result, "_element"):
+            remap_xml_relationships(result._element, mapping)
+        elif part.content_type.endswith("xml"):
+            root = etree.fromstring(result.blob)
+            remap_xml_relationships(root, mapping)
+            result._blob = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+        return result
+
+    def copy_relationships(src: Any, dst: Any, keep_layout: bool = False) -> Dict[str, str]:
+        mapping = {}
+        for rel in src.rels.values():
+            kind = rel.reltype.rsplit("/", 1)[-1]
+            if keep_layout and kind == "slideLayout":
+                continue
+            if rel.is_external:
+                new_id = dst.rels.get_or_add_ext_rel(rel.reltype, rel.target_ref)
+            else:
+                if kind == "slide" and rel.target_part not in memo:
+                    raise PresentationError("Template contains an internal link to a page absent from source_slide selections")
+                target = rel.target_part if kind in shared else clone_part(rel.target_part)
+                new_id = dst.relate_to(target, rel.reltype)
+            mapping[rel.rId] = new_id
+        return mapping
+
+    root = destination._element
+    original = deepcopy(source._element)
+    root.attrib.clear()
+    root.attrib.update(original.attrib)
+    for child in list(root):
+        root.remove(child)
+    for child in original:
+        root.append(child)
+    remap_xml_relationships(root, copy_relationships(source.part, destination.part, keep_layout=True))
+    # add_slide caches its placeholder tree; point later edits at the cloned tree.
+    destination.__dict__.pop("shapes", None)
+    destination.__dict__.pop("placeholders", None)
+
+
 def remove_placeholder_shapes(container: Any, types: Sequence[int]) -> None:
     for shape in list(container.placeholders):
         try:
@@ -1571,16 +1839,16 @@ def strip_footer_placeholders(presentation: Any) -> None:
 
 def blank_layout(presentation: Any, preferred_name: Optional[str] = None) -> Any:
     if preferred_name:
-        for layout in presentation.slide_layouts:
+        for layout in all_layouts(presentation):
             if layout.name.strip().lower() == preferred_name.strip().lower():
                 return layout
         raise PresentationError("layout '" + preferred_name + "' does not exist in the template")
-    for layout in presentation.slide_layouts:
+    for layout in all_layouts(presentation):
         if layout.name.strip().lower() in ("blank", "空白"):
             return layout
     best = None
     best_count = None
-    for layout in presentation.slide_layouts:
+    for layout in all_layouts(presentation):
         count = len(list(layout.placeholders))
         if best is None or count < best_count:
             best, best_count = layout, count
@@ -1599,6 +1867,31 @@ def remove_all_slides(presentation: Any) -> int:
         sldIdLst.remove(sldId)
         removed += 1
     return removed
+
+
+def clear_template_slide_navigation(presentation: Any) -> None:
+    """Source custom shows/sections refer to the old page sequence, not the new deck."""
+    root = presentation._element
+    for child in list(root):
+        if child.tag == qn("p:custShowLst"):
+            root.remove(child)
+    show = root.find(qn("p:showPr"))
+    if show is not None:
+        selected = [node for node in show if node.tag in (qn("p:custShow"), qn("p:sldRg"))]
+        for node in selected:
+            index = list(show).index(node)
+            show.remove(node)
+            if show.find(qn("p:sldAll")) is None:
+                show.insert(index, etree.Element(qn("p:sldAll")))
+    for node in list(root.iter()):
+        if node.tag == "{http://schemas.microsoft.com/office/powerpoint/2010/main}sectionLst":
+            parent = node.getparent()
+            parent.remove(node)
+            if len(parent) == 0 and parent.tag == qn("p:ext"):
+                grandparent = parent.getparent()
+                grandparent.remove(parent)
+                if len(grandparent) == 0:
+                    grandparent.getparent().remove(grandparent)
 
 
 def protected_regions_px(presentation: Any, layout: Any) -> List[Dict[str, Any]]:
@@ -2521,12 +2814,13 @@ class SvgSlideConverter:
 
 def open_deck_base(manifest: DeckManifest) -> Tuple[Any, Any, List[Dict[str, Any]], int]:
     if manifest.template is not None:
+        require_valid_relationships(manifest.template)
         try:
             presentation = Presentation(str(manifest.template))
         except Exception as error:
             raise PresentationError("Failed to open template presentation: " + str(error)) from error
-        removed = remove_all_slides(presentation)
-        layout = blank_layout(presentation, str(manifest.style.get("layout") or "") or None)
+        removed = len(presentation.slides)
+        layout = select_layout(presentation, manifest.style.get("layout"))
         protected = protected_regions_px(presentation, layout)
         return presentation, layout, protected, removed
     presentation = Presentation()
@@ -2559,6 +2853,7 @@ def create_svg_deck(
 ) -> Tuple[Any, Dict[str, Any]]:
     manifest = load_deck_manifest(spec, spec_dir, asset_cache)
     presentation, layout, protected, removed = open_deck_base(manifest)
+    originals = list(presentation.slides)
     apply_metadata(presentation, {"metadata": manifest.metadata})
     scale = (
         float(presentation.slide_width) / (CANVAS_WIDTH * EMU_PER_PX),
@@ -2566,16 +2861,45 @@ def create_svg_deck(
     )
     measurer = TextMeasurer()
     report = ConversionReport()
-    converter = SvgSlideConverter(manifest, measurer, report, protected, scale)
     slide_ids: List[str] = []
+    prepared = []
+    slide_targets = {}
     for entry in manifest.slides:
-        slide = presentation.slides.add_slide(layout)
-        converter.convert(slide, entry["svg"], entry["slide_id"])
+        source = None
+        if entry["source_slide"] is not None:
+            if entry["source_slide"] > len(originals):
+                raise PresentationError(entry["slide_id"] + ": source_slide exceeds the template page count")
+            source = originals[entry["source_slide"] - 1]
+        page_layout = select_layout(presentation, entry["layout"], source.slide_layout if source is not None else layout)
+        slide = presentation.slides.add_slide(page_layout)
+        prepared.append((entry, source, slide, page_layout))
+        if source is not None:
+            slide_targets.setdefault(source.part, slide.part)
+    used_names = {str(part.partname) for part in presentation.part.package.iter_parts()}
+    page_layouts = []
+    for entry, source, slide, page_layout in prepared:
+        if source is not None:
+            clone_template_slide(source, slide, slide_targets, used_names)
+            apply_template_edits(slide, entry)
+        page_protected = protected_regions_px(presentation, page_layout) if manifest.template else []
+        converter = SvgSlideConverter(manifest, measurer, report, page_protected, scale)
+        if entry["svg"] is not None:
+            converter.convert(slide, entry["svg"], entry["slide_id"])
         slide.name = entry["slide_id"]
         if entry.get("notes"):
             apply_notes(slide, entry["notes"])
         slide_ids.append(entry["slide_id"])
+        page_layouts.append({"slide_id": entry["slide_id"], "layout": page_layout.name, "source_slide": entry["source_slide"], "protected_regions": page_protected})
+    if removed:
+        clear_template_slide_navigation(presentation)
+    for slide_id in list(presentation.slides._sldIdLst)[:removed]:
+        presentation.part.drop_rel(slide_id.rId)
+        presentation.slides._sldIdLst.remove(slide_id)
     fix_chart_axis_ids(presentation)
+    serialized = io.BytesIO()
+    presentation.save(serialized)
+    serialized.seek(0)
+    require_valid_relationships(serialized)
     report.missing_fonts = list(measurer.missing_fonts)
     report.measured_with_fonts = measurer.measured_with_fonts
     fingerprints = deck_slide_fingerprints(manifest)
@@ -2591,6 +2915,8 @@ def create_svg_deck(
         "template": str(manifest.template) if manifest.template else None,
         "template_slides_removed": removed,
         "layout": layout.name,
+        "page_layouts": page_layouts,
+        "relationship_errors": [],
         "canvas": {"width": CANVAS_WIDTH, "height": CANVAS_HEIGHT},
         "slide_ids": slide_ids,
         "protected_regions": protected,
@@ -2634,12 +2960,14 @@ def deck_slide_fingerprints(manifest: DeckManifest) -> Dict[str, str]:
     for entry in manifest.slides:
         digest = hashlib.sha256()
         digest.update(shared_digest)
-        try:
-            digest.update(Path(entry["svg"]).read_bytes())
-        except OSError:
-            digest.update(str(entry["svg"]).encode("utf-8"))
+        if entry["svg"] is not None:
+            try:
+                digest.update(Path(entry["svg"]).read_bytes())
+            except OSError:
+                digest.update(str(entry["svg"]).encode("utf-8"))
+        for key in ("source_slide", "layout", "text_edits", "table_edits"):
+            digest.update(json.dumps(entry.get(key), sort_keys=True, ensure_ascii=False).encode("utf-8"))
         digest.update(json.dumps(entry.get("notes") or "", ensure_ascii=False).encode("utf-8"))
-        digest.update(json.dumps(entry.get("layout") or "", ensure_ascii=False).encode("utf-8"))
         fingerprints[entry["slide_id"]] = digest.hexdigest()
     return fingerprints
 
@@ -2695,6 +3023,7 @@ def atomic_save(presentation: Any, output_path: Path, force: bool) -> None:
     temporary_path = Path(temporary_name)
     try:
         presentation.save(temporary_path)
+        require_valid_relationships(temporary_path)
         Presentation(temporary_path)
         os.replace(temporary_path, output_path)
     except Exception:
@@ -2727,6 +3056,7 @@ def slide_title(slide: Any) -> str:
 def inspect_presentation(path: Path) -> Dict[str, Any]:
     if not path.is_file():
         raise PresentationError("Presentation does not exist: " + str(path))
+    resource_errors = relationship_errors(path)
     try:
         presentation = Presentation(path)
     except Exception as error:
@@ -2745,7 +3075,7 @@ def inspect_presentation(path: Path) -> Dict[str, Any]:
         charts = 0
         out_of_bounds = 0
         text_characters = 0
-        for shape in slide.shapes:
+        for _shape_path, shape in iter_shape_paths(slide.shapes):
             if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
                 images += 1
             if getattr(shape, "has_table", False):
@@ -2780,11 +3110,13 @@ def inspect_presentation(path: Path) -> Dict[str, Any]:
                 "chart_count": charts,
                 "out_of_bounds_shapes": out_of_bounds,
                 "has_notes": bool(notes),
+                "layout": {"name": slide.slide_layout.name, "index": all_layouts(presentation).index(slide.slide_layout)},
+                "elements": inspect_template_elements(slide.shapes),
             }
         )
 
     layouts: List[Dict[str, Any]] = []
-    for layout_index, layout in enumerate(presentation.slide_layouts):
+    for layout_index, layout in enumerate(all_layouts(presentation)):
         placeholders = []
         for shape in layout.placeholders:
             try:
@@ -2809,6 +3141,7 @@ def inspect_presentation(path: Path) -> Dict[str, Any]:
             "height": round(presentation.slide_height / Inches(1), 3),
         },
         "slides": slides,
+        "relationship_errors": resource_errors,
         "total_images": total_images,
         "total_tables": total_tables,
         "total_charts": total_charts,
@@ -2826,6 +3159,94 @@ def inspect_presentation(path: Path) -> Dict[str, Any]:
         },
         "visually_rendered": False,
     }
+
+
+def inspect_template_elements(shapes: Any, prefix: Tuple[int, ...] = ()) -> List[Dict[str, Any]]:
+    elements = []
+    for shape in shapes:
+        path = prefix + (shape.shape_id,)
+        element = {"shape_id": shape.shape_id, "shape_path": list(path), "name": shape.name,
+                   "type": str(shape.shape_type),
+                   "bounds_inches": [round(value / 914400, 4) if value is not None else None
+                                     for value in (shape.left, shape.top, shape.width, shape.height)]}
+        if shape.has_text_frame:
+            element["text"] = shape.text
+        if shape.has_table:
+            element["table"] = {"rows": [[cell.text for cell in row.cells] for row in shape.table.rows]}
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            element["children"] = inspect_template_elements(shape.shapes, path)
+        elements.append(element)
+    return elements
+
+
+def prepare_preview_presentation(input_path: Path, output_path: Path) -> Dict[str, Any]:
+    """Materialize inherited artwork in an ephemeral copy for OfficeCLI HTML rendering.
+
+    The editable deliverable is never rewritten. Disable inherited artwork in the copy
+    after insertion so renderers that support inheritance cannot draw it twice.
+    """
+    require_valid_relationships(input_path)
+    presentation = Presentation(input_path)
+    inserted = 0
+    for slide in presentation.slides:
+        layout = slide.slide_layout
+        master = layout.slide_master
+        show_slide = slide._element.get("showMasterSp", "1") not in ("0", "false")
+        show_layout = layout._element.get("showMasterSp", "1") not in ("0", "false")
+        containers = ([master] if show_slide and show_layout else []) + ([layout] if show_slide else [])
+        tree = slide.shapes._spTree
+        index = 2  # nvGrpSpPr / grpSpPr precede renderable shapes.
+        next_id = max((shape.shape_id for _, shape in iter_shape_paths(slide.shapes)), default=1) + 1
+        for container in containers:
+            mapping = {}
+            for shape in container.shapes:
+                if shape.is_placeholder:
+                    continue
+                element = deepcopy(shape._element)
+                for node in element.iter():
+                    if node.tag == qn("p:cNvPr"):
+                        node.set("id", str(next_id))
+                        next_id += 1
+                    for attribute, rid in list(node.attrib.items()):
+                        if not attribute.startswith("{" + REL_NS + "}"):
+                            continue
+                        if rid not in mapping:
+                            rel = container.part.rels[rid]
+                            mapping[rid] = (slide.part.rels.get_or_add_ext_rel(rel.reltype, rel.target_ref)
+                                            if rel.is_external else slide.part.relate_to(rel.target_part, rel.reltype))
+                remap_xml_relationships(element, mapping)
+                tree.insert(index, element)
+                index += 1
+                inserted += 1
+        # Make background inheritance explicit as well (this is below all artwork).
+        if slide._element.cSld.find(qn("p:bg")) is None:
+            for container in (layout, master):
+                background = container._element.cSld.find(qn("p:bg"))
+                if background is not None:
+                    element = deepcopy(background)
+                    mapping = {}
+                    for node in element.iter():
+                        for attribute, rid in node.attrib.items():
+                            if attribute.startswith("{" + REL_NS + "}") and rid not in mapping:
+                                rel = container.part.rels[rid]
+                                mapping[rid] = (slide.part.rels.get_or_add_ext_rel(rel.reltype, rel.target_ref)
+                                                if rel.is_external else slide.part.relate_to(rel.target_part, rel.reltype))
+                    remap_xml_relationships(element, mapping)
+                    slide._element.cSld.insert(0, element)
+                    break
+        slide._element.set("showMasterSp", "0")
+    # OfficeCLI may ignore showMasterSp; remove non-placeholder inherited artwork from
+    # this preview-only package after all pages have consumed their original layouts.
+    for container in [*presentation.slide_masters, *all_layouts(presentation)]:
+        for shape in list(container.shapes):
+            if not shape.is_placeholder:
+                container.shapes._spTree.remove(shape._element)
+    atomic_save(presentation, output_path, False)
+    return {"path": str(output_path), "materialized_shapes": inserted, "preview_only": True}
+
+
+def run_prepare_preview(args: argparse.Namespace) -> Dict[str, Any]:
+    return prepare_preview_presentation(Path(args.input).resolve(), Path(args.output).resolve())
 
 
 def soffice_candidates() -> List[Path]:
@@ -2992,6 +3413,128 @@ def run_render(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+PNG_PREVIEW_MAX_PAGES = 50
+PNG_PREVIEW_MAX_PIXELS = 40_000_000
+PNG_PREVIEW_MAX_EDGE = 16_000
+
+
+def parse_preview_pages(raw: str, slide_count: int) -> List[int]:
+    """Expand an explicit page selection without silently dropping or reordering pages."""
+    if not raw or len(raw) > 4096 or not re.fullmatch(r"[0-9]+(?:-[0-9]+)?(?:,[0-9]+(?:-[0-9]+)?)*", raw):
+        raise PresentationError("pages must look like 1,3-5")
+    pages: List[int] = []
+    for item in raw.split(","):
+        bounds = [int(value) for value in item.split("-")]
+        first, last = bounds[0], bounds[-1]
+        if first < 1 or last < first or last > slide_count:
+            raise PresentationError(f"Page selection {item} is outside 1-{slide_count} or reversed")
+        if len(pages) + last - first + 1 > PNG_PREVIEW_MAX_PAGES:
+            raise PresentationError(f"PNG previews support at most {PNG_PREVIEW_MAX_PAGES} selected pages")
+        pages.extend(range(first, last + 1))
+    if len(set(pages)) != len(pages):
+        raise PresentationError("Page selection must not contain duplicate pages")
+    return pages
+
+
+def compose_preview_pages(paths: Sequence[Path], grid: bool) -> Image.Image:
+    """Compose every page, preserving its aspect ratio and bounding memory use."""
+    if not paths or len(paths) > PNG_PREVIEW_MAX_PAGES:
+        raise PresentationError(f"PNG previews require 1-{PNG_PREVIEW_MAX_PAGES} pages")
+    dimensions = []
+    for path in paths:
+        with Image.open(path) as page:
+            if page.format != "PNG" or page.width * page.height > 12_000_000:
+                raise PresentationError("OfficeCLI returned an invalid or oversized PNG preview")
+            dimensions.append(page.size)
+    columns = math.ceil(math.sqrt(len(paths))) if grid else 1
+    rows = math.ceil(len(paths) / columns)
+    gap = 12 if len(paths) > 1 else 0
+    cell_width = max(width for width, _ in dimensions)
+    cell_height = max(height for _, height in dimensions)
+    width = columns * cell_width + gap * (columns - 1)
+    height = rows * cell_height + gap * (rows - 1)
+    scale = min(1.0, math.sqrt(PNG_PREVIEW_MAX_PIXELS / (width * height)),
+                PNG_PREVIEW_MAX_EDGE / width, PNG_PREVIEW_MAX_EDGE / height)
+    cell_width = max(1, int(cell_width * scale))
+    cell_height = max(1, int(cell_height * scale))
+    gap = int(gap * scale)
+    result = Image.new("RGB", (columns * cell_width + gap * (columns - 1),
+                              rows * cell_height + gap * (rows - 1)), "#E2E8F0")
+    for index, path in enumerate(paths):
+        with Image.open(path) as source:
+            page = source.convert("RGBA")
+            page.thumbnail((cell_width, cell_height), Image.Resampling.LANCZOS)
+            x = (index % columns) * (cell_width + gap) + (cell_width - page.width) // 2
+            y = (index // columns) * (cell_height + gap) + (cell_height - page.height) // 2
+            result.paste(page, (x, y), page)
+            page.close()
+    return result
+
+
+def run_render_png(args: argparse.Namespace) -> Dict[str, Any]:
+    import time
+
+    input_path = Path(args.input).expanduser().resolve()
+    output_path = normalized_output_path(args.output, ".png")
+    officecli = Path(args.officecli)
+    if not officecli.is_absolute() or not officecli.is_file():
+        raise PresentationError("--officecli must identify the trusted OfficeCLI executable by absolute path")
+    if not input_path.is_file():
+        raise PresentationError("Input presentation does not exist: " + str(input_path))
+    if output_path.exists() and not args.force:
+        raise PresentationError("Output already exists; use --force to replace it")
+    slide_count = len(Presentation(input_path).slides)
+    pages = parse_preview_pages(args.pages, slide_count)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    environment = os.environ.copy()
+    environment.update(OFFICECLI_NO_AUTO_INSTALL="1", OFFICECLI_SKIP_UPDATE="1", OFFICECLI_NO_AUTO_RESIDENT="1")
+    with tempfile.TemporaryDirectory(prefix="arcforge-png-preview-") as directory:
+        root = Path(directory)
+        preview = root / "preview.pptx"
+        prepare_preview_presentation(input_path, preview)
+        screenshots = []
+        for page in pages:
+            remaining = 540 - (time.monotonic() - started)
+            if remaining <= 0:
+                raise PresentationError("PNG preview rendering exceeded its total time limit")
+            screenshot = root / f"page-{page}.png"
+            command = [str(officecli), "view", str(preview), "screenshot", "--render", "html",
+                       "--page", str(page), "--screenshot-width", "1280", "-o", str(screenshot), "--json"]
+            try:
+                with tempfile.TemporaryFile() as errors:
+                    completed = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                               stderr=errors, env=environment, timeout=min(60, remaining),
+                                               creationflags=0x08000000 if os.name == "nt" else 0)
+                    errors.seek(0)
+                    detail = errors.read(4096).decode("utf-8", errors="replace").strip()
+                if completed.returncode != 0 or not screenshot.is_file():
+                    raise PresentationError(f"OfficeCLI failed to render page {page}: {detail}")
+                if screenshot.stat().st_size > 24 * 1024 * 1024:
+                    raise PresentationError(f"OfficeCLI page {page} PNG exceeds the preview size limit")
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise PresentationError(f"Failed to render PNG page {page}: {error}") from error
+            screenshots.append(screenshot)
+        contact = compose_preview_pages(screenshots, args.grid)
+        dimensions = contact.size
+        # Publish only after every selected page rendered and the entire contact sheet is valid.
+        with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".png", delete=False) as handle:
+            staging = Path(handle.name)
+        try:
+            contact.save(staging, format="PNG")
+            if args.force:
+                os.replace(staging, output_path)
+            else:
+                with staging.open("rb") as source, output_path.open("xb") as destination:
+                    shutil.copyfileobj(source, destination)
+        finally:
+            contact.close()
+            staging.unlink(missing_ok=True)
+    return {"action": "rendered", "input": str(input_path), "png": str(output_path),
+            "pages": pages, "page_count": len(pages), "grid": args.grid,
+            "width": dimensions[0], "height": dimensions[1]}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Create, inspect, and optionally render PowerPoint decks for ArcForge."
@@ -3040,6 +3583,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Overwrite the exact output path"
     )
     render_parser.set_defaults(handler=run_render)
+    png_parser = subparsers.add_parser("render-png", help="Render every selected slide into a PNG contact sheet")
+    png_parser.add_argument("--input", required=True)
+    png_parser.add_argument("--output", required=True)
+    png_parser.add_argument("--pages", required=True)
+    png_parser.add_argument("--officecli", required=True)
+    png_parser.add_argument("--grid", action="store_true")
+    png_parser.add_argument("--force", action="store_true")
+    png_parser.set_defaults(handler=run_render_png)
+    preview_parser = subparsers.add_parser("prepare-preview", help="Create a temporary render-only PPTX with inherited artwork")
+    preview_parser.add_argument("--input", required=True)
+    preview_parser.add_argument("--output", required=True)
+    preview_parser.set_defaults(handler=run_prepare_preview)
     return parser
 
 

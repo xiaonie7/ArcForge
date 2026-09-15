@@ -140,6 +140,8 @@ function supportsOpenAICompletionsImageInputModel(modelId: string) {
     normalizedModelId.startsWith("gpt-4-turbo") ||
     normalizedModelId.startsWith("o3") ||
     normalizedModelId.startsWith("o4") ||
+    // GLM-5.3-Flash accepts images; other GLM-5 variants may still be text-only.
+    normalizedModelId === "glm-5.3-flash" ||
     normalizedModelId.includes("vision") ||
     normalizedModelId.includes("qwen-vl") ||
     normalizedModelId.includes("qwen2-vl") ||

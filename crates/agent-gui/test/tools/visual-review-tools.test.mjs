@@ -42,7 +42,7 @@ function createHarness(options = {}) {
     runtime: {
       baseUrl: "https://api.openai.com/v1",
       apiKey: "key",
-      requestFormat: "chat_completions",
+      requestFormat: "openai-completions",
     },
   };
   const bundle = createVisualReviewTools({
@@ -50,7 +50,7 @@ function createHarness(options = {}) {
     review,
     resolveHomeDir: async () => "C:/Users/test",
     deps: {
-      resolveModelInput: () => options.input ?? ["text", "image"],
+      ...(options.input ? { resolveModelInput: () => options.input } : {}),
       async complete(params) {
         completions.push(params);
         return {
@@ -123,6 +123,30 @@ test("VisualReview refuses text-only models instead of pretending to look", asyn
   assert.match(result.content[0].text, /Visual review model/);
   assert.equal(result.details.reviewed, false);
   assert.equal(completions.length, 0);
+});
+
+test("VisualReview recognizes GLM-5.3-Flash through the runtime model factory", async () => {
+  const { bundle, completions } = createHarness({ model: "glm-5.3-flash" });
+  const result = await bundle.executeToolCall({
+    type: "toolCall",
+    id: "call-glm-vision",
+    name: "VisualReview",
+    arguments: {
+      paths: ["deck/template-cover.png", "deck/generated-cover.png"],
+      question: "Compare the layout and missing icons on these slides.",
+    },
+  });
+
+  assert.equal(result.isError, false, JSON.stringify(result.content));
+  assert.equal(result.details.reviewed, true);
+  assert.match(result.content[0].text, /Reviewed 2 images with glm-5.3-flash/);
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].model, "glm-5.3-flash");
+  assert.equal(completions[0].runtime.requestFormat, "openai-completions");
+  assert.equal(
+    completions[0].context.messages[0].content.filter((block) => block.type === "image").length,
+    2,
+  );
 });
 
 test("VisualReview rejects SVG inputs and points at the raster preview", async () => {
