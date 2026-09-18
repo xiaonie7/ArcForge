@@ -24,6 +24,7 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1446,7 +1447,10 @@ PLAN_STAGE_GRAY = "8C8C8C"
 
 
 def load_deck_manifest(
-    spec: Mapping[str, Any], spec_dir: Path, asset_cache: Optional[Path] = None
+    spec: Mapping[str, Any],
+    spec_dir: Path,
+    asset_cache: Optional[Path] = None,
+    require_asset_cache: bool = True,
 ) -> DeckManifest:
     if int(spec.get("schema_version", 1)) != DECK_SCHEMA_VERSION:
         raise PresentationError("schema_version must be " + str(DECK_SCHEMA_VERSION) + " for an SVG deck manifest")
@@ -1480,7 +1484,7 @@ def load_deck_manifest(
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", str(asset_id)):
             raise PresentationError("asset id '" + str(asset_id) + "' must use letters, digits, '_', '-' or '.'")
         assets[str(asset_id)] = resolve_asset_path(raw_path, spec_dir)
-        if assets[str(asset_id)].suffix.lower() == ".svg" and asset_cache is None:
+        if assets[str(asset_id)].suffix.lower() == ".svg" and asset_cache is None and require_asset_cache:
             raise PresentationError(
                 "asset '" + str(asset_id) + "' is an SVG; SVG assets are normalized by ArcForge before conversion, "
                 "run create or validate through the OfficeRuntime tool"
@@ -2902,11 +2906,16 @@ def create_svg_deck(
     require_valid_relationships(serialized)
     report.missing_fonts = list(measurer.missing_fonts)
     report.measured_with_fonts = measurer.measured_with_fonts
-    fingerprints = deck_slide_fingerprints(manifest)
-    previous = read_build_stamp(spec_dir)
+    fingerprints, shared_fingerprint = deck_slide_fingerprints(manifest)
+    stamp = read_build_stamp_record(spec_dir)
+    previous = stamp["slides"]
+    # Page fingerprints exclude deck-level inputs on purpose: editing one page's SVG must not
+    # flag every other page as changed. Shared inputs (template, style, stage) are reported
+    # separately so the caller can decide whether every preview needs refreshing.
     changed_slide_ids = [
         slide_id for slide_id in slide_ids if previous.get(slide_id) != fingerprints.get(slide_id)
     ]
+    shared_inputs_changed = stamp["shared"] != shared_fingerprint
     removed_slide_ids = [slide_id for slide_id in previous if slide_id not in fingerprints]
     summary = {
         "schema_version": DECK_SCHEMA_VERSION,
@@ -2928,18 +2937,25 @@ def create_svg_deck(
         "measured_with_fonts": report.measured_with_fonts,
         "asset_renders": report.asset_renders,
         "changed_slide_ids": changed_slide_ids,
+        "shared_inputs_changed": shared_inputs_changed,
         "removed_slide_ids": removed_slide_ids,
         "slide_fingerprints": fingerprints,
+        "shared_fingerprint": shared_fingerprint,
         "warnings": report.warnings,
     }
     return presentation, summary
 
 
 BUILD_STAMP_NAME = ".arcforge-build.json"
+ASSET_REFERENCE_PATTERN = re.compile(rb"data-asset\s*=\s*[\"']([A-Za-z0-9_.-]{1,64})[\"']")
 
 
-def deck_slide_fingerprints(manifest: DeckManifest) -> Dict[str, str]:
-    """One hash per page covering its SVG, notes, and the deck-level inputs that change rendering."""
+def deck_slide_fingerprints(manifest: DeckManifest) -> Tuple[Dict[str, str], str]:
+    """Per-page source hashes plus one hash for the deck-level inputs.
+
+    A page hash covers only what that page owns: its SVG, the assets it places, its template
+    mapping, and its notes. Template bytes, style, mode, and stage go into the shared hash.
+    """
     shared = hashlib.sha256()
     shared.update(manifest.mode.encode("utf-8"))
     shared.update(manifest.stage.encode("utf-8"))
@@ -2948,49 +2964,819 @@ def deck_slide_fingerprints(manifest: DeckManifest) -> Dict[str, str]:
             shared.update(manifest.template.read_bytes())
         except OSError:
             shared.update(str(manifest.template).encode("utf-8"))
-    for asset_id in sorted(manifest.assets):
-        try:
-            shared.update(asset_id.encode("utf-8"))
-            shared.update(manifest.assets[asset_id].read_bytes())
-        except OSError:
-            continue
     shared.update(json.dumps(manifest.style, sort_keys=True, ensure_ascii=False).encode("utf-8"))
-    shared_digest = shared.digest()
+    asset_digests: Dict[str, bytes] = {}
+    for asset_id, asset_path in manifest.assets.items():
+        try:
+            asset_digests[asset_id] = hashlib.sha256(asset_path.read_bytes()).digest()
+        except OSError:
+            asset_digests[asset_id] = hashlib.sha256(str(asset_path).encode("utf-8")).digest()
     fingerprints: Dict[str, str] = {}
     for entry in manifest.slides:
         digest = hashlib.sha256()
-        digest.update(shared_digest)
         if entry["svg"] is not None:
             try:
-                digest.update(Path(entry["svg"]).read_bytes())
+                svg_bytes = Path(entry["svg"]).read_bytes()
             except OSError:
-                digest.update(str(entry["svg"]).encode("utf-8"))
+                svg_bytes = str(entry["svg"]).encode("utf-8")
+            digest.update(svg_bytes)
+            referenced = sorted({match.group(1).decode("ascii") for match in ASSET_REFERENCE_PATTERN.finditer(svg_bytes)})
+            for asset_id in referenced:
+                digest.update(asset_id.encode("utf-8"))
+                digest.update(asset_digests.get(asset_id, b""))
         for key in ("source_slide", "layout", "text_edits", "table_edits"):
             digest.update(json.dumps(entry.get(key), sort_keys=True, ensure_ascii=False).encode("utf-8"))
         digest.update(json.dumps(entry.get("notes") or "", ensure_ascii=False).encode("utf-8"))
         fingerprints[entry["slide_id"]] = digest.hexdigest()
-    return fingerprints
+    return fingerprints, shared.hexdigest()
 
 
-def read_build_stamp(spec_dir: Path) -> Dict[str, str]:
+def read_build_stamp_record(spec_dir: Path) -> Dict[str, Any]:
+    """The last build's page fingerprints and shared fingerprint; empty when no build happened."""
     stamp = spec_dir / BUILD_STAMP_NAME
     try:
         data = json.loads(stamp.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {}
-    slides = data.get("slides") if isinstance(data, dict) else None
-    if not isinstance(slides, dict):
-        return {}
-    return {str(key): str(value) for key, value in slides.items()}
+        data = None
+    if not isinstance(data, dict):
+        return {"slides": {}, "shared": None, "output": None, "spec": None, "template": None}
+    slides = data.get("slides")
+    return {
+        "slides": {str(key): str(value) for key, value in slides.items()} if isinstance(slides, dict) else {},
+        "shared": data.get("shared") if isinstance(data.get("shared"), str) else None,
+        "output": data.get("output") if isinstance(data.get("output"), str) else None,
+        "spec": data.get("spec") if isinstance(data.get("spec"), str) else None,
+        "template": data.get("template") if isinstance(data.get("template"), str) else None,
+    }
 
 
-def write_build_stamp(spec_dir: Path, fingerprints: Mapping[str, str], output_path: Path) -> None:
-    stamp = spec_dir / BUILD_STAMP_NAME
-    payload = {"schema": 1, "output": str(output_path), "slides": dict(fingerprints)}
+def read_build_stamp(spec_dir: Path) -> Dict[str, str]:
+    return read_build_stamp_record(spec_dir)["slides"]
+
+
+def write_build_stamp(
+    spec_path: Path,
+    output_path: Path,
+    fingerprints: Mapping[str, str],
+    shared_fingerprint: Optional[str] = None,
+    template: Optional[Path] = None,
+    strict: bool = False,
+) -> None:
+    stamp = spec_path.parent / BUILD_STAMP_NAME
+    payload = {
+        "schema": 2,
+        "spec": str(spec_path),
+        "output": str(output_path),
+        "template": str(template) if template else None,
+        "shared": shared_fingerprint,
+        "slides": dict(fingerprints),
+    }
     try:
         stamp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
-        pass
+        if strict:
+            raise
+
+
+# ---------------------------------------------------------------------------
+# Scoped edits: patch one page or one element, keep a snapshot, and refuse to
+# touch anything else. This is the only write path the inline review editor uses.
+# ---------------------------------------------------------------------------
+
+HISTORY_DIR_NAME = ".arcforge-history"
+EDIT_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,64}")
+SNIPPET_LIMIT = 24 * 1024
+SUMMARY_TEXT_LIMIT = 200
+
+
+def find_tag_end(raw: bytes, begin: int) -> int:
+    """Index just past the '>' that closes the start tag beginning at ``begin``."""
+    quote = None
+    index = begin
+    while index < len(raw):
+        byte = raw[index : index + 1]
+        if quote is not None:
+            if byte == quote:
+                quote = None
+        elif byte in (b'"', b"'"):
+            quote = byte
+        elif byte == b">":
+            return index + 1
+        index += 1
+    raise PresentationError("SVG start tag is not terminated")
+
+
+def svg_element_spans(raw: bytes) -> Dict[str, Tuple[int, int]]:
+    """Byte ranges of every element that carries an id, keyed by id.
+
+    Offsets come from expat, so the caller can replace one node without re-serializing
+    (and therefore reformatting) the rest of the page.
+    """
+    import xml.parsers.expat as expat
+
+    if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:
+        raise PresentationError("DOCTYPE and entity declarations are not allowed")
+    parser = expat.ParserCreate()
+    stack: List[Tuple[Optional[str], int]] = []
+    spans: Dict[str, Tuple[int, int]] = {}
+    duplicates: set[str] = set()
+
+    def start(name: str, attributes: Dict[str, str]) -> None:
+        stack.append((attributes.get("id"), parser.CurrentByteIndex))
+
+    def end(name: str) -> None:
+        element_id, begin = stack.pop()
+        if not element_id:
+            return
+        tag_close = find_tag_end(raw, begin)
+        if raw[tag_close - 2 : tag_close] == b"/>":
+            finish = tag_close
+        else:
+            finish = raw.index(b">", parser.CurrentByteIndex) + 1
+        if element_id in spans:
+            duplicates.add(element_id)
+        spans[element_id] = (begin, finish)
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    try:
+        parser.Parse(raw, True)
+    except expat.ExpatError as error:
+        raise PresentationError("SVG is not well-formed XML: " + str(error)) from error
+    if duplicates:
+        raise PresentationError("duplicate element id " + ", ".join(sorted(duplicates)))
+    return spans
+
+
+def summarize_text(value: str) -> str:
+    collapsed = re.sub(r"\s+", " ", value).strip()
+    if len(collapsed) > SUMMARY_TEXT_LIMIT:
+        return collapsed[: SUMMARY_TEXT_LIMIT - 1] + "…"
+    return collapsed
+
+
+def svg_fragment_summary(fragment: bytes) -> str:
+    try:
+        root = ET.fromstring(b'<svg xmlns="http://www.w3.org/2000/svg">' + fragment + b"</svg>")
+    except ET.ParseError:
+        return ""
+    return summarize_text("".join(root.itertext()))
+
+
+def parse_svg_replacement(fragment: bytes, element_id: str, original_role: Optional[str], page: str) -> Any:
+    """A replacement is exactly one SVG element that keeps the id and the semantic role."""
+    if b"<!DOCTYPE" in fragment or b"<!ENTITY" in fragment:
+        raise PresentationError(page + ": replacement must not contain DOCTYPE or entity declarations")
+    try:
+        root = ET.fromstring(b'<svg xmlns="http://www.w3.org/2000/svg">' + fragment + b"</svg>")
+    except ET.ParseError as error:
+        raise PresentationError(page + ": replacement is not well-formed XML: " + str(error)) from error
+    children = list(root)
+    if len(children) != 1:
+        raise PresentationError(page + ": replacement must contain exactly one SVG element")
+    if (root.text or "").strip() or (children[0].tail or "").strip():
+        raise PresentationError(page + ": replacement must not contain text outside the element")
+    node = children[0]
+    if (node.get("id") or "").strip() != element_id:
+        raise PresentationError(page + ": replacement root must keep id '" + element_id + "'")
+    role = (node.get("data-role") or "").strip().lower() or None
+    if original_role and role != original_role:
+        raise PresentationError(page + ": replacement must keep data-role '" + original_role + "'")
+    return node
+
+
+def parse_svg_page_replacement(document: bytes, page: str) -> None:
+    if b"<!DOCTYPE" in document or b"<!ENTITY" in document:
+        raise PresentationError(page + ": replacement must not contain DOCTYPE or entity declarations")
+    try:
+        root = ET.fromstring(document)
+    except ET.ParseError as error:
+        raise PresentationError(page + ": replacement is not well-formed XML: " + str(error)) from error
+    if svg_local_name(root.tag) != "svg":
+        raise PresentationError(page + ": replacement root element must be <svg>")
+
+
+def parse_json_replacement(raw: bytes, page: str) -> Dict[str, Any]:
+    try:
+        value = json.loads(raw.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PresentationError(page + ": replacement must be a JSON object: " + str(error)) from error
+    if not isinstance(value, dict):
+        raise PresentationError(page + ": replacement must be a JSON object")
+    return value
+
+
+def manifest_slide_index(spec: Mapping[str, Any], slide_id: str) -> int:
+    slides = spec.get("slides")
+    if isinstance(slides, list):
+        for index, entry in enumerate(slides):
+            if isinstance(entry, dict) and str(entry.get("slide_id", "")).strip() == slide_id:
+                return index
+    raise PresentationError("slide_id '" + slide_id + "' is not in the manifest")
+
+
+def template_shape_for_element(manifest: DeckManifest, entry: Mapping[str, Any], element_id: str) -> Tuple[Any, List[int]]:
+    """Map a review element id (shape name or shape-<id>) onto the template's source page shape."""
+    if manifest.template is None or entry.get("source_slide") is None:
+        raise PresentationError(entry["slide_id"] + ": element '" + element_id + "' is not on this page")
+    try:
+        template = Presentation(str(manifest.template))
+    except Exception as error:
+        raise PresentationError("Failed to open template presentation: " + str(error)) from error
+    slides = list(template.slides)
+    if entry["source_slide"] > len(slides):
+        raise PresentationError(entry["slide_id"] + ": source_slide exceeds the template page count")
+    matches = []
+    for path, shape in iter_shape_paths(slides[entry["source_slide"] - 1].shapes):
+        if shape.name == element_id or "shape-" + str(shape.shape_id) == element_id:
+            matches.append((shape, list(path)))
+    if len(matches) != 1:
+        raise PresentationError(entry["slide_id"] + ": element '" + element_id + "' does not identify exactly one template shape")
+    return matches[0]
+
+
+def template_shape_text(shape: Any) -> Any:
+    if getattr(shape, "has_table", False):
+        return [[cell.text for cell in row.cells] for row in shape.table.rows]
+    if getattr(shape, "has_text_frame", False):
+        return shape.text
+    return None
+
+
+def existing_template_edit(entry: Mapping[str, Any], field: str, shape_id: int) -> Optional[Dict[str, Any]]:
+    for edit in entry.get(field) or []:
+        if isinstance(edit, dict) and edit.get("shape_id") == shape_id:
+            return edit
+    return None
+
+
+@dataclass
+class EditTarget:
+    kind: str  # svg_element | svg_page | template_text | template_table | template_page
+    slide_id: str
+    element_id: Optional[str]
+    svg_path: Optional[Path] = None
+    role: Optional[str] = None
+    span: Optional[Tuple[int, int]] = None
+    shape_id: Optional[int] = None
+    shape_path: Optional[List[int]] = None
+
+
+def resolve_edit_target(manifest: DeckManifest, entry: Mapping[str, Any], element_id: Optional[str]) -> EditTarget:
+    slide_id = entry["slide_id"]
+    svg_path = entry["svg"]
+    if element_id is None:
+        if svg_path is not None:
+            return EditTarget("svg_page", slide_id, None, svg_path=svg_path)
+        return EditTarget("template_page", slide_id, None)
+    if not element_id or (svg_path is not None and any(character.isspace() for character in element_id)):
+        raise PresentationError(slide_id + ": element_id must not be empty or contain whitespace")
+    if svg_path is not None:
+        raw = svg_path.read_bytes()
+        spans = svg_element_spans(raw)
+        span = spans.get(element_id)
+        if span is not None:
+            fragment = raw[span[0] : span[1]]
+            node = ET.fromstring(b'<svg xmlns="http://www.w3.org/2000/svg">' + fragment + b"</svg>")[0]
+            if (node.get("data-arcforge") or "").strip().lower() == "background":
+                raise PresentationError(slide_id + ": the slide background cannot be edited as an element")
+            role = (node.get("data-role") or "").strip().lower() or None
+            return EditTarget("svg_element", slide_id, element_id, svg_path=svg_path, role=role, span=span)
+    shape, path = template_shape_for_element(manifest, entry, element_id)
+    kind = "template_table" if getattr(shape, "has_table", False) else "template_text"
+    if kind == "template_text" and not getattr(shape, "has_text_frame", False):
+        raise PresentationError(slide_id + ": element '" + element_id + "' is not a text or table shape; only template text can be edited")
+    return EditTarget(kind, slide_id, element_id, shape_id=shape.shape_id, shape_path=path)
+
+
+def history_dir(spec_dir: Path) -> Path:
+    return spec_dir / HISTORY_DIR_NAME
+
+
+def history_path(spec_dir: Path, edit_id: str) -> Path:
+    return history_dir(spec_dir) / (edit_id + ".json")
+
+
+def read_history(spec_dir: Path, edit_id: str) -> Dict[str, Any]:
+    path = history_path(spec_dir, edit_id)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PresentationError("edit '" + edit_id + "' has no snapshot: " + str(error)) from error
+    if not isinstance(record, dict) or record.get("edit_id") != edit_id:
+        raise PresentationError("edit '" + edit_id + "' snapshot is invalid")
+    return record
+
+
+def write_history(spec_dir: Path, record: Mapping[str, Any]) -> Path:
+    directory = history_dir(spec_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = history_path(spec_dir, str(record["edit_id"]))
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def generate_edit_id() -> str:
+    import time
+
+    return "e-" + time.strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(3).hex()
+
+
+def relative_display(path: Path, spec_dir: Path) -> str:
+    try:
+        return path.resolve().relative_to(spec_dir.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def write_manifest_edit_arrays(spec_path: Path, spec: Mapping[str, Any], slide_index: int, edits: Mapping[str, Any]) -> None:
+    updated = json.loads(json.dumps(spec, ensure_ascii=False))
+    entry = updated["slides"][slide_index]
+    for field in ("text_edits", "table_edits"):
+        values = edits.get(field)
+        if values:
+            entry[field] = values
+        else:
+            entry.pop(field, None)
+    spec_path.write_text(json.dumps(updated, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def entry_edit_arrays(entry: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "text_edits": list(entry.get("text_edits") or []),
+        "table_edits": list(entry.get("table_edits") or []),
+    }
+
+
+def validate_replacement_edit_arrays(edits: Mapping[str, Any], slide_id: str) -> Dict[str, Any]:
+    probe = {"slide_id": slide_id, "source_slide": 1}
+    for field in ("text_edits", "table_edits"):
+        if field in edits and edits[field] is not None:
+            probe[field] = edits[field]
+    unknown = [key for key in edits if key not in ("text_edits", "table_edits")]
+    if unknown:
+        raise PresentationError(slide_id + ": replacement may only contain text_edits and table_edits, found " + ", ".join(unknown))
+    validate_template_edits(probe, slide_id)
+    return {"text_edits": list(probe.get("text_edits") or []), "table_edits": list(probe.get("table_edits") or [])}
+
+
+def template_edit_from_replacement(target: EditTarget, replacement: Mapping[str, Any]) -> Dict[str, Any]:
+    edit: Dict[str, Any] = {"shape_id": target.shape_id}
+    if target.shape_path and len(target.shape_path) > 1:
+        edit["shape_path"] = target.shape_path
+    if target.kind == "template_text":
+        if not isinstance(replacement.get("text"), str):
+            raise PresentationError(target.slide_id + ": replacement for a text shape must be {\"text\": \"...\"}")
+        edit["text"] = replacement["text"]
+    else:
+        edit["rows"] = replacement.get("rows")
+    field = "text_edits" if target.kind == "template_text" else "table_edits"
+    validate_template_edits({"slide_id": target.slide_id, "source_slide": 1, field: [edit]}, target.slide_id)
+    return edit
+
+
+def replace_template_edit(entry: Mapping[str, Any], field: str, shape_id: int, edit: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Return the page's edit arrays with one shape's entry replaced (or removed when ``edit`` is None)."""
+    edits = entry_edit_arrays(entry)
+    edits[field] = [item for item in edits[field] if not (isinstance(item, dict) and item.get("shape_id") == shape_id)]
+    if edit is not None:
+        edits[field].append(dict(edit))
+    return edits
+
+
+@contextmanager
+def patch_lock(spec_dir: Path):
+    """OS-owned lock is released even if the runtime is killed by Stop/timeout."""
+    with (spec_dir / ".arcforge-patch.lock").open("a+b") as lock:
+        lock.seek(0, os.SEEK_END)
+        if lock.tell() == 0:
+            lock.write(b"0")
+            lock.flush()
+        lock.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise PresentationError("Another edit is still running for this deck; wait for it to finish") from error
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+PATCH_JOURNAL_NAME = ".arcforge-patch-transaction"
+
+
+def restore_patch_transaction(spec_path: Path, output_path: Path, workspace: Optional[Path] = None) -> None:
+    directory = spec_path.parent / PATCH_JOURNAL_NAME
+    root = (workspace or Path(os.path.commonpath([spec_path.parent, output_path.parent]))).resolve()
+    if not directory.resolve().is_relative_to(root):
+        raise PresentationError("Patch journal escapes the workspace")
+    record_path = directory / "transaction.json"
+    if not record_path.is_file():
+        # Incomplete preparation has not changed any source file.
+        if directory.exists():
+            shutil.rmtree(directory)
+        return
+    transaction = json.loads(record_path.read_text(encoding="utf-8"))
+    if Path(transaction["spec"]).resolve() != spec_path.resolve() or Path(transaction["output"]).resolve() != output_path.resolve():
+        raise PresentationError("A pending edit belongs to another deck; recover that deck first")
+    if not (directory / "committed").exists():
+        # Validate every destination before restoring anything. The journal lives in an
+        # editable workspace and must not become an arbitrary file-write mechanism.
+        for item in transaction["files"]:
+            target = Path(item["path"]).resolve()
+            backup = (directory / str(item["backup"])).resolve()
+            if not target.is_relative_to(root) or backup.parent != directory.resolve():
+                raise PresentationError("Invalid patch recovery record: path escapes the workspace")
+        for item in reversed(transaction["files"]):
+            target = Path(item["path"])
+            # Backups are local to this journal. Never accept traversal from a damaged record.
+            backup = directory / str(item["backup"])
+            if backup.parent.resolve() != directory.resolve():
+                raise PresentationError("Invalid patch recovery record")
+            if item["existed"]:
+                data = backup.read_bytes()
+                if target.is_file() and target.read_bytes() == data:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temporary = target.with_name(target.name + ".arcforge-restore")
+                temporary.write_bytes(data)
+                os.replace(temporary, target)
+            else:
+                target.unlink(missing_ok=True)
+    shutil.rmtree(directory)
+
+
+def run_recover_patch(args: argparse.Namespace) -> Dict[str, Any]:
+    spec_path = Path(args.spec).expanduser().resolve()
+    output_path = normalized_output_path(args.output, ".pptx")
+    with patch_lock(spec_path.parent):
+        restore_patch_transaction(spec_path, output_path, Path(args.workspace) if getattr(args, "workspace", None) else None)
+    return {"action": "patch_recovered"}
+
+
+def run_patch(args: argparse.Namespace) -> Dict[str, Any]:
+    """Journal every changed file before writing; recover after failures or process termination."""
+    spec_path = Path(args.spec).expanduser().resolve()
+    output_path = normalized_output_path(args.output, ".pptx")
+    workspace = Path(args.workspace).resolve() if getattr(args, "workspace", None) else None
+    with patch_lock(spec_path.parent):
+        restore_patch_transaction(spec_path, output_path, workspace)
+        spec, _ = load_json_object(str(spec_path))
+        spec = apply_template_override(spec, getattr(args, "template", None))
+        manifest = load_deck_manifest(spec, spec_path.parent, resolve_asset_cache(args))
+        edit_id = (getattr(args, "revert", None) or getattr(args, "edit_id", None) or generate_edit_id()).strip()
+        if not EDIT_ID_PATTERN.fullmatch(edit_id):
+            raise PresentationError("edit id must use letters, digits, '_' or '-' (max 64 chars)")
+        if not getattr(args, "revert", None):
+            args.edit_id = edit_id
+        files = [spec_path, output_path, spec_path.parent / BUILD_STAMP_NAME, history_path(spec_path.parent, edit_id)]
+        previous = read_history(spec_path.parent, edit_id) if getattr(args, "revert", None) else None
+        slide_id = str(previous["slide_id"]) if previous else (getattr(args, "slide_id", None) or "").strip()
+        element_id = previous.get("element_id") if previous else (getattr(args, "element_id", None) or "").strip() or None
+        entry = manifest.slides[manifest_slide_index(spec, slide_id)]
+        target = resolve_edit_target(manifest, entry, element_id)
+        if target.svg_path is not None:
+            files.append(target.svg_path)
+        directory = spec_path.parent / PATCH_JOURNAL_NAME
+        directory.mkdir()
+        records = []
+        try:
+            for index, path in enumerate(dict.fromkeys(files)):
+                path = Path(path).resolve()
+                if workspace and not path.is_relative_to(workspace):
+                    raise PresentationError("Patch target escapes the workspace")
+                backup_name = str(index) + ".backup"
+                existed = path.is_file()
+                if existed:
+                    shutil.copyfile(path, directory / backup_name)
+                records.append({"path": str(path), "backup": backup_name, "existed": existed})
+            (directory / "transaction.json").write_text(json.dumps({
+                "spec": str(spec_path), "output": str(output_path), "files": records,
+            }), encoding="utf-8")
+            result = run_patch_inner(args)
+            (directory / "committed").write_text("1", encoding="ascii")
+        except BaseException:
+            restore_patch_transaction(spec_path, output_path, workspace)
+            raise
+        # Cleanup failure cannot turn an already committed edit into a reported failure.
+        try:
+            shutil.rmtree(directory)
+        except OSError:
+            pass
+        return result
+
+
+def run_patch_inner(args: argparse.Namespace) -> Dict[str, Any]:
+    """Apply (or revert) one bounded change, rebuild the deck, and refuse if anything else moved."""
+    spec, spec_path = load_json_object(args.spec)
+    spec_dir = spec_path.parent
+    output_path = normalized_output_path(args.output, ".pptx")
+    spec = apply_template_override(spec, getattr(args, "template", None))
+    if not is_svg_deck_spec(spec):
+        raise PresentationError("patch requires a schema_version 3 SVG deck manifest")
+    asset_cache = resolve_asset_cache(args)
+    revert_id = (getattr(args, "revert", None) or "").strip()
+    replacement_path = getattr(args, "replacement", None)
+    if bool(revert_id) == bool(replacement_path):
+        raise PresentationError("patch requires exactly one of --replacement or --revert")
+    manifest = load_deck_manifest(spec, spec_dir, asset_cache)
+    fingerprints_before, _ = deck_slide_fingerprints(manifest)
+
+    if revert_id:
+        if not EDIT_ID_PATTERN.fullmatch(revert_id):
+            raise PresentationError("--revert must name an edit id (letters, digits, '_' or '-')")
+        record = read_history(spec_dir, revert_id)
+        if record.get("reverted"):
+            raise PresentationError("edit '" + revert_id + "' was already reverted")
+        slide_id = str(record.get("slide_id", ""))
+        element_id = record.get("element_id")
+        edit_id = revert_id
+    else:
+        slide_id = (getattr(args, "slide_id", None) or "").strip()
+        element_id = (getattr(args, "element_id", None) or "").strip() or None
+        edit_id = (getattr(args, "edit_id", None) or "").strip() or generate_edit_id()
+        if not EDIT_ID_PATTERN.fullmatch(edit_id):
+            raise PresentationError("--edit-id must use letters, digits, '_' or '-' (max 64 chars)")
+        record = read_history(spec_dir, edit_id) if history_path(spec_dir, edit_id).exists() else {}
+        if record and (record.get("reverted") or record.get("slide_id") != slide_id or record.get("element_id") != element_id):
+            raise PresentationError("edit id '" + edit_id + "' was already used for a different target or reverted edit")
+    if not slide_id:
+        raise PresentationError("patch requires --slide-id")
+    slide_index = manifest_slide_index(spec, slide_id)
+    entry = manifest.slides[slide_index]
+    target = resolve_edit_target(manifest, entry, element_id)
+    if record and (Path(record.get("output", "")).resolve() != output_path or record.get("kind") != target.kind
+                   or (record.get("spec") and Path(record["spec"]).resolve() != spec_path)):
+        raise PresentationError("edit snapshot does not match this deck and target")
+    if revert_id and record.get("kind") != target.kind:
+        raise PresentationError("edit '" + revert_id + "' targets a " + str(record.get("kind")) + " but the page now resolves to " + target.kind)
+
+    # Capture the original bytes of everything this patch may touch so any failure restores
+    # them exactly. Rollback writes whole files; the snapshot keeps only the edited part.
+    original_manifest_text = spec_path.read_text(encoding="utf-8-sig")
+    original_svg_bytes = target.svg_path.read_bytes() if target.svg_path is not None else None
+    if record:
+        if target.kind == "svg_element":
+            current_value = original_svg_bytes[slice(*target.span)].decode("utf-8", errors="replace")
+        elif target.kind == "svg_page":
+            current_value = original_svg_bytes.decode("utf-8", errors="replace")
+        elif target.kind == "template_page":
+            current_value = entry_edit_arrays(entry)
+        else:
+            current_value = existing_template_edit(entry, "text_edits" if target.kind == "template_text" else "table_edits", target.shape_id or -1)
+        if current_value != record.get("after"):
+            raise PresentationError("edit_conflict: this target changed after the edit; undo its newer changes first")
+    restore_actions: List[Any] = []
+
+    def rollback() -> None:
+        for action in reversed(restore_actions):
+            try:
+                action()
+            except OSError:
+                pass
+
+    before_value: Any
+    after_value: Any
+    before_text = ""
+    after_text = ""
+    target_display = relative_display(target.svg_path, spec_dir) if target.svg_path is not None else relative_display(spec_path, spec_dir)
+    try:
+        if target.kind == "svg_element":
+            assert original_svg_bytes is not None and target.span is not None and target.svg_path is not None
+            begin, finish = target.span
+            before_bytes = original_svg_bytes[begin:finish]
+            if revert_id:
+                after_bytes = str(record.get("before", "")).encode("utf-8")
+                parse_svg_replacement(after_bytes, target.element_id or "", None, slide_id)
+            else:
+                after_bytes = Path(replacement_path).read_bytes()
+                parse_svg_replacement(after_bytes, target.element_id or "", target.role, slide_id)
+            restore_actions.append(lambda: target.svg_path.write_bytes(original_svg_bytes))
+            target.svg_path.write_bytes(original_svg_bytes[:begin] + after_bytes + original_svg_bytes[finish:])
+            before_value = before_bytes.decode("utf-8", errors="replace")
+            after_value = after_bytes.decode("utf-8", errors="replace")
+            before_text, after_text = svg_fragment_summary(before_bytes), svg_fragment_summary(after_bytes)
+        elif target.kind == "svg_page":
+            assert original_svg_bytes is not None and target.svg_path is not None
+            if revert_id:
+                after_bytes = str(record.get("before", "")).encode("utf-8")
+            else:
+                after_bytes = Path(replacement_path).read_bytes()
+            if len(after_bytes) > MAX_SVG_BYTES:
+                raise PresentationError(slide_id + ": replacement exceeds " + str(MAX_SVG_BYTES // 1024) + " KiB")
+            parse_svg_page_replacement(after_bytes, slide_id)
+            restore_actions.append(lambda: target.svg_path.write_bytes(original_svg_bytes))
+            target.svg_path.write_bytes(after_bytes)
+            before_value = original_svg_bytes.decode("utf-8", errors="replace")
+            after_value = after_bytes.decode("utf-8", errors="replace")
+            before_text = summarize_text("".join(ET.fromstring(original_svg_bytes).itertext()))
+            after_text = summarize_text("".join(ET.fromstring(after_bytes).itertext()))
+        else:
+            current_edits = entry_edit_arrays(entry)
+            field = "text_edits" if target.kind == "template_text" else "table_edits"
+            if target.kind == "template_page":
+                if revert_id:
+                    before_edits = record.get("before")
+                    if not isinstance(before_edits, dict):
+                        raise PresentationError("edit '" + revert_id + "' snapshot has no manifest edits to restore")
+                    next_edits = validate_replacement_edit_arrays(before_edits, slide_id)
+                else:
+                    next_edits = validate_replacement_edit_arrays(parse_json_replacement(Path(replacement_path).read_bytes(), slide_id), slide_id)
+                before_value = current_edits
+                after_value = next_edits
+                before_text = summarize_text(json.dumps(current_edits, ensure_ascii=False))
+                after_text = summarize_text(json.dumps(next_edits, ensure_ascii=False))
+            else:
+                # Element edits snapshot one shape's entry only, so reverting them later cannot
+                # undo edits made to other shapes on the same page in between.
+                previous = existing_template_edit(entry, field, target.shape_id or -1)
+                if revert_id:
+                    edit = record.get("before")
+                    if edit is not None:
+                        if not isinstance(edit, dict):
+                            raise PresentationError("edit '" + revert_id + "' snapshot is not a template edit")
+                        validate_template_edits({"slide_id": slide_id, "source_slide": 1, field: [edit]}, slide_id)
+                else:
+                    edit = template_edit_from_replacement(target, parse_json_replacement(Path(replacement_path).read_bytes(), slide_id))
+                next_edits = replace_template_edit(entry, field, target.shape_id or -1, edit)
+                before_value = previous
+                after_value = edit
+                value_key = "text" if target.kind == "template_text" else "rows"
+                before_text = summarize_text(json.dumps(previous.get(value_key), ensure_ascii=False)) if previous else ""
+                after_text = summarize_text(json.dumps(edit.get(value_key), ensure_ascii=False)) if edit else ""
+                if target.kind == "template_text":
+                    before_text = summarize_text(str(previous.get("text"))) if previous else ""
+                    after_text = summarize_text(str(edit.get("text"))) if edit else ""
+            restore_actions.append(lambda: spec_path.write_text(original_manifest_text, encoding="utf-8"))
+            write_manifest_edit_arrays(spec_path, spec, slide_index, next_edits)
+
+        spec_after, _ = load_json_object(str(spec_path))
+        spec_after = apply_template_override(spec_after, getattr(args, "template", None))
+        manifest_after = load_deck_manifest(spec_after, spec_dir, asset_cache)
+        fingerprints_after, _ = deck_slide_fingerprints(manifest_after)
+        strays = sorted(
+            other for other in fingerprints_after
+            if other != slide_id and fingerprints_after[other] != fingerprints_before.get(other)
+        )
+        if strays:
+            raise PresentationError(
+                "scope_violation: the change would also alter " + ", ".join(strays)
+                + " (pages sharing the same source file); nothing was written"
+            )
+        presentation, deck = create_svg_deck(spec_after, spec_dir, asset_cache)
+    except Exception as error:
+        rollback()
+        if isinstance(error, PresentationError):
+            raise PresentationError(str(error) + " — the page was restored and the deck was not rebuilt") from error
+        raise
+
+    atomic_save(presentation, output_path, True)
+    write_build_stamp(spec_path, output_path, deck.pop("slide_fingerprints", {}), deck.pop("shared_fingerprint", None), manifest_after.template, strict=True)
+    deck["patched_slide_ids"] = [slide_id]
+    if slide_id not in deck["changed_slide_ids"]:
+        deck["changed_slide_ids"] = deck["changed_slide_ids"] + [slide_id]
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    if revert_id:
+        record = dict(record)
+        record["reverted"] = True
+        record["reverted_at"] = now
+        history = write_history(spec_dir, record)
+    else:
+        previous_record = record
+        record = {
+            "schema": 1,
+            "edit_id": edit_id,
+            "created_at": previous_record.get("created_at", now),
+            "slide_id": slide_id,
+            "element_id": target.element_id,
+            "scope": "element" if target.element_id else "unit",
+            "kind": target.kind,
+            "target": target_display,
+            "output": str(output_path),
+            "spec": str(spec_path),
+            "before": previous_record.get("before", before_value),
+            "after": after_value,
+            "before_text": previous_record.get("before_text", before_text),
+            "after_text": after_text,
+            "reverted": False,
+        }
+        history = write_history(spec_dir, record)
+    return {
+        "action": "patched",
+        "edit": {
+            "edit_id": edit_id,
+            "slide_id": slide_id,
+            "element_id": target.element_id,
+            "scope": record["scope"],
+            "kind": target.kind,
+            "target": target_display,
+            "reverted": bool(revert_id),
+            "before_text": record["after_text"] if revert_id else record["before_text"],
+            "after_text": record["before_text"] if revert_id else after_text,
+            "history_path": str(history),
+        },
+        "deck": deck,
+        "presentation": inspect_presentation(output_path),
+    }
+
+
+def validate_context_paths(spec: Mapping[str, Any], spec_path: Path, workspace: Optional[str]) -> None:
+    """Source context is read-only, but it still must not read files outside the workspace."""
+    if not workspace:
+        return
+    root = Path(workspace).resolve()
+    sources = [spec_path, spec.get("template")]
+    sources.extend(entry.get("svg") for entry in spec.get("slides", []) if isinstance(entry, dict))
+    if isinstance(spec.get("assets"), dict):
+        sources.extend(spec["assets"].values())
+    for source in sources:
+        if source and isinstance(source, (str, Path)):
+            path = (spec_path.parent / source).resolve()
+            if not path.is_relative_to(root):
+                raise PresentationError("Selection context source escapes the workspace")
+
+
+def run_selection_context(args: argparse.Namespace) -> Dict[str, Any]:
+    """Everything the model needs to patch one page or element without exploring the workspace."""
+    spec, spec_path = load_json_object(args.spec)
+    spec_dir = spec_path.parent
+    spec = apply_template_override(spec, getattr(args, "template", None))
+    if not is_svg_deck_spec(spec):
+        raise PresentationError("selection-context requires a schema_version 3 SVG deck manifest")
+    validate_context_paths(spec, spec_path, getattr(args, "workspace", None))
+    manifest = load_deck_manifest(spec, spec_dir, None, require_asset_cache=False)
+    slide_id = (getattr(args, "slide_id", None) or "").strip()
+    element_id = (getattr(args, "element_id", None) or "").strip() or None
+    result: Dict[str, Any] = {
+        "action": "selection_context",
+        "manifest": str(spec_path),
+        "mode": manifest.mode,
+        "stage": manifest.stage,
+        "template": str(manifest.template) if manifest.template else None,
+        "slide_count": len(manifest.slides),
+        "slide_ids": [entry["slide_id"] for entry in manifest.slides],
+    }
+    if not slide_id:
+        result["replacement_kind"] = "deck"
+        return result
+    slide_index = manifest_slide_index(spec, slide_id)
+    entry = manifest.slides[slide_index]
+    target = resolve_edit_target(manifest, entry, element_id)
+    result["slide"] = {
+        "slide_id": slide_id,
+        "index": slide_index + 1,
+        "svg": str(entry["svg"]) if entry["svg"] is not None else None,
+        "source_slide": entry["source_slide"],
+        "layout": entry.get("layout"),
+        "notes": entry.get("notes"),
+        **entry_edit_arrays(entry),
+    }
+    result["replacement_kind"] = target.kind
+    if target.kind == "svg_element":
+        assert target.span is not None and target.svg_path is not None
+        raw = target.svg_path.read_bytes()
+        fragment = raw[target.span[0] : target.span[1]]
+        result["element"] = {
+            "id": element_id,
+            "role": target.role,
+            "snippet": fragment[:SNIPPET_LIMIT].decode("utf-8", errors="replace"),
+            "truncated": len(fragment) > SNIPPET_LIMIT,
+            "text": svg_fragment_summary(fragment),
+            "size_bytes": len(fragment),
+        }
+    elif target.kind == "svg_page":
+        assert target.svg_path is not None
+        raw = target.svg_path.read_bytes()
+        result["page"] = {
+            "snippet": raw[:SNIPPET_LIMIT].decode("utf-8", errors="replace"),
+            "truncated": len(raw) > SNIPPET_LIMIT,
+            "size_bytes": len(raw),
+        }
+    elif target.kind in ("template_text", "template_table"):
+        shape, _ = template_shape_for_element(manifest, entry, element_id or "")
+        field = "text_edits" if target.kind == "template_text" else "table_edits"
+        current = existing_template_edit(entry, field, target.shape_id or -1)
+        result["element"] = {
+            "id": element_id,
+            "shape_id": target.shape_id,
+            "shape_path": target.shape_path,
+            "name": shape.name,
+            "template_value": template_shape_text(shape),
+            "current_edit": current,
+        }
+    return result
 
 
 def is_svg_deck_spec(spec: Mapping[str, Any]) -> bool:
@@ -3366,7 +4152,14 @@ def run_create(args: argparse.Namespace) -> Dict[str, Any]:
     if is_svg_deck_spec(spec):
         presentation, deck = create_svg_deck(spec, spec_path.parent, resolve_asset_cache(args))
         atomic_save(presentation, output_path, args.force)
-        write_build_stamp(spec_path.parent, deck.pop("slide_fingerprints", {}), output_path)
+        template = (spec_path.parent / Path(spec["template"]).expanduser()).resolve() if spec.get("template") else None
+        write_build_stamp(
+            spec_path,
+            output_path,
+            deck.pop("slide_fingerprints", {}),
+            deck.pop("shared_fingerprint", None),
+            template,
+        )
         return {
             "action": "created",
             "deck": deck,
@@ -3385,6 +4178,7 @@ def run_validate(args: argparse.Namespace) -> Dict[str, Any]:
         raise PresentationError("validate requires a schema_version 3 SVG deck manifest")
     _presentation, deck = create_svg_deck(spec, spec_path.parent, resolve_asset_cache(args))
     deck.pop("slide_fingerprints", None)
+    deck.pop("shared_fingerprint", None)
     issues = (
         len(deck["text_overflows"])
         + len(deck["out_of_bounds"])
@@ -3567,6 +4361,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory with SVG assets normalized by ArcForge (.arcforge-assets next to the manifest)",
     )
     validate_parser.set_defaults(handler=run_validate)
+
+    patch_parser = subparsers.add_parser(
+        "patch", help="Replace one page or one element of an SVG deck manifest, then rebuild the deck"
+    )
+    patch_parser.add_argument("--spec", required=True, help="UTF-8 JSON deck manifest")
+    patch_parser.add_argument("--output", required=True, help="Destination .pptx path (replaced in place)")
+    patch_parser.add_argument("--slide-id", help="Manifest slide_id of the page to change")
+    patch_parser.add_argument("--element-id", help="SVG element id (or template shape name) inside that page")
+    patch_parser.add_argument("--replacement", help="File holding the replacement: one SVG element, a whole SVG page, or JSON template edits")
+    patch_parser.add_argument("--edit-id", help="Stable id for the snapshot; generated when omitted")
+    patch_parser.add_argument("--revert", help="Undo a previous edit by its edit id instead of applying a replacement")
+    patch_parser.add_argument("--template", help="Existing .pptx used as the base deck")
+    patch_parser.add_argument("--asset-cache", help="Directory with SVG assets normalized by ArcForge")
+    patch_parser.add_argument("--force", action="store_true", help="Accepted for symmetry; patch always replaces its output")
+    patch_parser.add_argument("--workspace", help=argparse.SUPPRESS)
+    patch_parser.set_defaults(handler=run_patch)
+
+    recover_parser = subparsers.add_parser("recover-patch", help=argparse.SUPPRESS)
+    recover_parser.add_argument("--spec", required=True)
+    recover_parser.add_argument("--output", required=True)
+    recover_parser.add_argument("--workspace", help=argparse.SUPPRESS)
+    recover_parser.set_defaults(handler=run_recover_patch)
+
+    context_parser = subparsers.add_parser(
+        "selection-context", help="Describe one page or element of a manifest for a scoped edit"
+    )
+    context_parser.add_argument("--spec", required=True, help="UTF-8 JSON deck manifest")
+    context_parser.add_argument("--slide-id", help="Manifest slide_id")
+    context_parser.add_argument("--element-id", help="SVG element id or template shape name")
+    context_parser.add_argument("--template", help="Existing .pptx used as the base deck")
+    context_parser.add_argument("--workspace", help=argparse.SUPPRESS)
+    context_parser.set_defaults(handler=run_selection_context)
 
     inspect_parser = subparsers.add_parser(
         "inspect", help="Print a structural deck summary"

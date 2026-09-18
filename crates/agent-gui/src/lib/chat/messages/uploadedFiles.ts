@@ -139,9 +139,11 @@ export function buildUserMessageContentWithUploads(
   userText: string,
   files: PendingUploadedFile[],
   selection?: SelectionContext | null,
+  selectionInstructionOverride?: string,
 ) {
   const normalizedText = userText.trim();
-  const selectionInstruction = selection ? buildSelectionInstruction(selection) : "";
+  const selectionInstruction =
+    selectionInstructionOverride ?? (selection ? buildSelectionInstruction(selection) : "");
   if (files.length === 0) {
     if (!normalizedText) return selectionInstruction ? "" : normalizedText;
     return selectionInstruction ? `${normalizedText}\n\n${selectionInstruction}` : normalizedText;
@@ -161,8 +163,14 @@ export function createUserMessageWithUploads(
   files: PendingUploadedFile[],
   timestamp = Date.now(),
   selection?: SelectionContext | null,
+  selectionInstructionOverride?: string,
 ): UploadedUserMessage | null {
-  const content = buildUserMessageContentWithUploads(userText, files, selection);
+  const content = buildUserMessageContentWithUploads(
+    userText,
+    files,
+    selection,
+    selectionInstructionOverride,
+  );
   if (!content.trim()) return null;
 
   const message: UploadedUserMessage = {
@@ -181,6 +189,9 @@ export function createUserMessageWithUploads(
     message[SELECTION_FIELD] = {
       artifact: { ...selection.artifact },
       selection: { ...selection.selection },
+      ...(selection.edit
+        ? { edit: { ...selection.edit, artifact: { ...selection.edit.artifact } } }
+        : {}),
     };
   }
   return message;

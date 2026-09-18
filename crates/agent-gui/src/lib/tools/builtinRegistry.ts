@@ -1,5 +1,7 @@
 import type { ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { homeDir } from "@tauri-apps/api/path";
+import { isRestrictedEditScope } from "../artifactReview/editScope";
+import type { ArtifactEditScope } from "../artifactReview/types";
 import type { RuntimeEnvironmentSnapshot, RuntimePlatform } from "../runtimePlatform";
 import type { PrincipalContext } from "../security/principalContext";
 import {
@@ -223,14 +225,103 @@ type BuildBuiltinBaseToolRegistryParams = {
   principal?: PrincipalContext;
   /** Model that answers VisualReview calls; the tool is registered only when this is set. */
   visualReview?: VisualReviewModelConfig;
+  /**
+   * Inline review edit lock. Element and page scopes register only read-only file tools plus
+   * a locked OfficeRuntime (patch only); a deck scope keeps the ordinary tool set.
+   */
+  editScope?: ArtifactEditScope;
   onSshSessionsChanged?: (change: SshManagerSessionChange) => void | Promise<void>;
   onTunnelsChanged?: (change: TunnelManagerChange) => void | Promise<void>;
 };
 
 const resolveHomeDir = () => homeDir();
 
+/** Keep only the tools a bundle marks read-only; calls to anything else are refused. */
+function restrictBundleToReadOnly(bundle: BuiltinToolBundle, skills = false): BuiltinToolBundle {
+  const allowed = new Set(
+    bundle.tools
+      .filter(
+        (tool) =>
+          bundle.metadataByName.get(tool.name)?.isReadOnly === true ||
+          (skills && tool.name === "SkillsManager"),
+      )
+      .map((tool) => tool.name),
+  );
+  return {
+    ...bundle,
+    tools: bundle.tools.filter((tool) => allowed.has(tool.name)),
+    async executeToolCall(toolCall, signal, context) {
+      if (
+        !allowed.has(toolCall.name) ||
+        (skills && !["read", "list"].includes(String(toolCall.arguments?.action)))
+      ) {
+        return {
+          role: "toolResult",
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          content: [
+            {
+              type: "text",
+              text: `${toolCall.name} is not available during a scoped inline edit. Change the target only through OfficeRuntime action=patch.`,
+            },
+          ],
+          details: {},
+          isError: true,
+          timestamp: Date.now(),
+        };
+      }
+      return bundle.executeToolCall(toolCall, signal, context);
+    },
+  };
+}
+
+/** Bundles for a scoped inline edit: read, look, patch. Nothing that writes elsewhere. */
+function buildScopedEditToolBundles(
+  params: BuildBuiltinBaseToolRegistryParams,
+  editScope: ArtifactEditScope,
+): BuiltinToolBundle[] {
+  const bundles: BuiltinToolBundle[] = [
+    restrictBundleToReadOnly(
+      createFsTools({
+        workdir: params.workdir,
+        fileState: params.fileState,
+        skillsRootEnabled: params.skillsEnabled,
+        skillsRootDir: params.skillsRootDir,
+        skillAccessPolicy: params.skillAccessPolicy,
+        resolveHomeDir,
+      }),
+    ),
+    createOfficeRuntimeTools({ workdir: params.workdir, editScope }),
+  ];
+  if (params.skillsEnabled) {
+    bundles.push(
+      restrictBundleToReadOnly(
+        createSkillTools({
+          workdir: params.workdir,
+          skillAccessPolicy: params.skillAccessPolicy,
+          onManagedSkillsChanged: params.onManagedSkillsChanged,
+        }),
+        true,
+      ),
+    );
+  }
+  if (params.visualReview) {
+    bundles.push(
+      createVisualReviewTools({
+        workdir: params.workdir,
+        review: params.visualReview,
+        resolveHomeDir,
+      }),
+    );
+  }
+  return bundles;
+}
+
 async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryParams) {
   const workspaceAccess = params.workspaceAccess ?? "full";
+  if (workspaceAccess === "full" && isRestrictedEditScope(params.editScope)) {
+    return buildScopedEditToolBundles(params, params.editScope);
+  }
   const baseBundles: BuiltinToolBundle[] = [];
 
   if (workspaceAccess === "full") {
@@ -243,7 +334,7 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
         skillAccessPolicy: params.skillAccessPolicy,
         resolveHomeDir,
       }),
-      createOfficeRuntimeTools({ workdir: params.workdir }),
+      createOfficeRuntimeTools({ workdir: params.workdir, editScope: params.editScope }),
       createShellTools({
         workdir: params.workdir,
         providerId: params.providerId,
@@ -372,18 +463,23 @@ export async function buildBuiltinToolRegistry(
   },
 ) {
   const baseBundles = await buildBaseBuiltinToolBundles(params);
+  const restricted = isRestrictedEditScope(params.editScope);
   const todoBundles =
-    params.runtimeScope === "chat" && params.todoState
+    params.runtimeScope === "chat" && params.todoState && !restricted
       ? [createTodoTools({ state: params.todoState })]
       : [];
   const askUserQuestionBundles =
-    params.runtimeScope === "chat" && params.askUserQuestionConversationId
+    params.runtimeScope === "chat" && params.askUserQuestionConversationId && !restricted
       ? [createAskUserQuestionTools({ conversationId: params.askUserQuestionConversationId })]
       : [];
   const chatBundles = [...todoBundles, ...askUserQuestionBundles];
 
   const subagentRuntime = params.subagentRuntime;
-  if (!subagentRuntime || params.workspaceAccess === "none") {
+  if (
+    !subagentRuntime ||
+    params.workspaceAccess === "none" ||
+    isRestrictedEditScope(params.editScope)
+  ) {
     return createBuiltinToolRegistry(
       [...baseBundles, ...chatBundles],
       params.principal,
@@ -442,6 +538,7 @@ export async function buildBuiltinToolRegistry(
               selectedSystemToolIds: [],
               mcpLoadFailureMode: "continue",
               memoryToolMode: "ro",
+              editScope: undefined,
             }),
             params.principal,
             params.allowedSystemTools,

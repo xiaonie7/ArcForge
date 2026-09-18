@@ -21,7 +21,6 @@ import {
 } from "../components/chat/GeneratedFilesCard";
 import { HistoryShareModal } from "../components/chat/HistoryShareModal";
 import type { MentionComposerHandle } from "../components/chat/MentionComposer";
-import { ReviewChatPanel } from "../components/artifact-review/ReviewChatPanel";
 import { useReviewThread } from "../lib/artifactReview/useReviewThread";
 import {
   createReviewSessionStore,
@@ -1349,7 +1348,7 @@ export function ChatPage(props: ChatPageProps) {
     getConversationAbortController,
   });
 
-  const { send } = useSendChatTurn({
+  const { send, recordArtifactUndo } = useSendChatTurn({
     settings,
     setSettings,
     getMcpSettings,
@@ -2021,40 +2020,35 @@ export function ChatPage(props: ChatPageProps) {
         onCloseFilePreview={handleCloseGeneratedFilePreview}
         artifactSelection={artifactSelection}
         onArtifactSelect={setArtifactSelection}
-        reviewChat={reviewArtifact ? (
-          <ReviewChatPanel
-            key={activeReviewThread.threadId ?? `${reviewArtifact.workdir}::${reviewArtifact.path}`}
-            threadId={activeReviewThread.threadId}
-            artifact={reviewArtifact}
-            selection={artifactSelection}
-            runtime={activeReviewThread.runtime}
-            liveTranscriptStore={getConversationLiveTranscriptStore(activeReviewThread.threadId ?? "review-loading")}
-            hasModels={hasModels}
-            isAgentMode={isAgentMode}
-            enabledSkills={enabledComposerSkills}
-            loading={activeReviewThread.loading}
-            errorMessage={activeReviewThread.errorMessage}
-            onRetry={activeReviewThread.retry}
-            onOpenSettings={onOpenSettings}
-            onStop={() => { if (activeReviewThread.threadId) stopSending(activeReviewThread.threadId); }}
-            onSend={(draft) => {
+        inlineEdit={reviewArtifact ? {
+            threadId: activeReviewThread.threadId,
+            runtime: activeReviewThread.runtime,
+            liveTranscriptStore: getConversationLiveTranscriptStore(activeReviewThread.threadId ?? "review-loading"),
+            hasModels,
+            isAgentMode,
+            loading: activeReviewThread.loading,
+            errorMessage: activeReviewThread.errorMessage,
+            onRetry: activeReviewThread.retry,
+            onStop: () => { if (activeReviewThread.threadId) stopSending(activeReviewThread.threadId); },
+            onReverted: (result, scope) => {
+              if (!activeReviewThread.threadId) return Promise.reject(new Error("Review thread is unavailable"));
+              return recordArtifactUndo(activeReviewThread.threadId, scope, result);
+            },
+            onSend: (instruction, selection, scope) => {
               const conversationId = activeReviewThread.threadId;
               if (!conversationId) return Promise.resolve(false);
-              const current = reviewSession.getSnapshot();
-              const selection = current?.artifact.path === reviewArtifact.path && current.artifact.workdir === reviewArtifact.workdir
-                ? current : { artifact: reviewArtifact, selection: { type: "artifact", id: reviewArtifact.path, label: reviewArtifact.path } };
               return send({
                 conversationIdOverride: conversationId,
-                composerDraftOverride: draft,
+                textOverride: instruction,
                 uploadedFilesOverride: [],
                 artifactSelectionOverride: selection,
+                editScopeOverride: scope,
                 workdirOverride: reviewArtifact.workdir,
                 allowEmptyWorkdirOverride: false,
                 preserveComposerOnStart: true,
               });
-            }}
-          />
-        ) : null}
+            },
+        } : undefined}
       />
     </div>
   );

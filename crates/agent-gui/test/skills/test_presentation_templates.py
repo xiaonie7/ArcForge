@@ -121,6 +121,7 @@ class TemplateTests(unittest.TestCase):
         source[0]["text_edits"] = [{"shape_id": self.title_id, "text": "Changed"}]
         _, second = self.create(source)
         self.assertNotEqual(first["slide_fingerprints"], second["slide_fingerprints"])
+        self.assertEqual(first["shared_fingerprint"], second["shared_fingerprint"])
 
     def test_custom_show_cannot_keep_or_play_original_template_pages(self):
         deck = p.Presentation(self.template)

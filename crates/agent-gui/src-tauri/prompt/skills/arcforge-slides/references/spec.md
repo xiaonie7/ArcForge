@@ -116,6 +116,24 @@ A `<g id="metrics-table" data-role="table">…</g>` becomes one PPTX group and o
 
 The review API returns boxes in a normalized 1280×720 coordinate space. It exposes only semantic blocks, never arbitrary unmarked paths or connectors. Selecting a block provides context to the agent; it does not enable dragging, resizing, or editing text in the preview.
 
+## Scoped patch and undo
+
+`OfficeRuntime document=presentation action=patch` edits an existing deck linked by `.arcforge-build.json` to a schema 3 manifest. Supply `spec_path`, `output_path`, `slide_id`, optional `element_id`, and a string `replacement`:
+
+| Target | Replacement |
+| --- | --- |
+| SVG element | One complete node retaining its `id` and `data-role`; no SVG wrapper. Its children may change, but ids must remain unique. |
+| SVG page | Complete `<svg viewBox="0 0 1280 720">…</svg>` in the supported page subset. Omit `element_id`. |
+| Template text | JSON string `{"text":"New content"}`. |
+| Template table | JSON string `{"rows":[["A","B"],["1","2"]]}` with the original dimensions. |
+| Template page | JSON string `{"text_edits":[…],"table_edits":[…]}`. Omit `element_id`; geometry and source-slide changes are unsupported. |
+
+`input_path`, when present, must be the original linked template. A template shape name may contain spaces. The output reports `action: "patched"`, `edit` (id, target, before/after summaries and reverted status), and `deck` (changed page ids, patched page ids, shared-input flag and layout diagnostics). `patched_slide_ids` names the bounded target; `changed_slide_ids` also reflects source changes since the previous build. `shared_inputs_changed` invalidates all page previews.
+
+Snapshots live beside the manifest in `.arcforge-history/<edit_id>.json`. Reusing an `edit_id` on the same target updates the latest after value while preserving its first before value. To undo outside a scoped model turn, supply `revert: "<edit_id>"` instead of `replacement`. Undo refuses to overwrite a newer change to that target. It preserves edits to other targets, and marks the snapshot reverted.
+
+The runtime checks that other pages' sources remain unchanged. A journal restores source bytes, PPTX, build record and snapshot if publishing fails; the desktop also recovers that journal after stopping or timing out the process. Edits are serialized per manifest. The inline editor exposes only read tools and a locked OfficeRuntime; whole-deck scope restores normal tools and a complete rebuild has no single-edit undo.
+
 ## Layout and typography ladder
 
 - Canvas 1280 × 720; side margins 60, top and bottom margins 48; card gap at least 20.

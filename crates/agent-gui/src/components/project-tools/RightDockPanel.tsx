@@ -6,7 +6,6 @@ import {
   type PointerEvent as ReactPointerEvent,
   type WheelEvent as ReactWheelEvent,
   type RefObject,
-  type ReactNode,
   Suspense,
   useCallback,
   useEffect,
@@ -31,6 +30,7 @@ import { Loader2, X } from "../icons";
 import { Button } from "../ui/button";
 import { isReviewableArtifactPath, type SelectionContext } from "../../lib/artifactReview";
 import { ArtifactReviewPanel } from "../artifact-review/ArtifactReviewPanel";
+import type { InlineEditBridge } from "../artifact-review/InlineEditPopover";
 import type { WorkspaceFilePreviewOpenRequest } from "../workspace-editor/WorkspaceFilePreviewOverlay";
 import type { GitCommitContextPayload, GitFileContextPayload } from "./git-review";
 import type { LocalTunnelClient } from "./LocalTunnelPanel";
@@ -100,7 +100,7 @@ type RightDockPanelProps = {
   /** Artifact review: the unit the user is looking at, mirrored into the composer. */
   artifactSelection?: SelectionContext | null;
   onArtifactSelect?: (selection: SelectionContext | null) => void;
-  reviewChat?: ReactNode;
+  inlineEdit?: InlineEditBridge;
   onInsertCodeReviewSkill?: () => void;
   onInsertCommitMention?: (commit: GitCommitContextPayload) => void;
   onInsertGitFileMention?: (file: GitFileContextPayload) => void;
@@ -385,7 +385,7 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
     onCloseFilePreview,
     artifactSelection,
     onArtifactSelect,
-    reviewChat,
+    inlineEdit,
     onInsertCodeReviewSkill,
     onInsertCommitMention,
     onInsertGitFileMention,
@@ -809,7 +809,7 @@ export const RightDockPanel = memo(function RightDockPanel(props: RightDockPanel
                   selection={artifactSelection ?? null}
                   onSelect={onArtifactSelect ?? NOOP}
                   onRequestClose={onCloseFilePreview ?? NOOP}
-                  reviewChat={reviewChat}
+                  inlineEdit={inlineEdit}
                 />
               ) : filePreviewRequest ? (
                 <Suspense

@@ -74,6 +74,8 @@ import {
 } from "../../../lib/subagents";
 import { buildBuiltinToolRegistry } from "../../../lib/tools/builtinRegistry";
 import type { VisualReviewModelConfig } from "../../../lib/tools/visualReviewTools";
+import { buildScopedEditSystemPrompt } from "../../../lib/artifactReview/editScope";
+import type { ArtifactEditScope } from "../../../lib/artifactReview/types";
 import type { BuiltinToolExecutionContext } from "../../../lib/tools/builtinTypes";
 import { createFileToolState } from "../../../lib/tools/fileToolState";
 import type { SkillAccessPolicy } from "../../../lib/tools/skillAccessPolicy";
@@ -228,6 +230,8 @@ export type RunAgentConversationTurnParams = {
   principal?: PrincipalContext;
   /** Model behind the VisualReview tool (configured review slot or the chat model). */
   visualReview?: VisualReviewModelConfig;
+  /** Inline review edit: locks writes to one target and injects the scoped-edit prompt. */
+  editScope?: ArtifactEditScope;
   onManagedSkillsChanged?: (change: {
     action: "install" | "create";
     names: string[];
@@ -304,6 +308,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     memoryEnabled = true,
     principal,
     visualReview,
+    editScope,
     onManagedSkillsChanged,
     agentTemplates,
     selectedSystemToolIds,
@@ -399,6 +404,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     return parentMessageBusSnapshot;
   };
   const trustedPrincipalSystemPrompt = buildTrustedPrincipalSystemPrompt(principal);
+  const scopedEditSystemPrompt = editScope ? buildScopedEditSystemPrompt(editScope) : "";
   const withSubagentRuntimeContext = (context: Context): Context => {
     let systemPrompt = context.systemPrompt;
     if (
@@ -406,6 +412,9 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
       !(systemPrompt ?? "").includes("<trusted-wecom-principal-context>")
     ) {
       systemPrompt = appendSystemPrompt(systemPrompt, trustedPrincipalSystemPrompt);
+    }
+    if (scopedEditSystemPrompt && !(systemPrompt ?? "").includes(scopedEditSystemPrompt)) {
+      systemPrompt = appendSystemPrompt(systemPrompt, scopedEditSystemPrompt);
     }
     if (subagentReminder) {
       systemPrompt = appendSystemPrompt(systemPrompt, subagentReminder);
@@ -440,6 +449,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     skillAccessPolicy,
     principal,
     visualReview,
+    editScope,
     onManagedSkillsChanged,
     runtimeScope: "chat",
     currentChatModel: selectedModel,

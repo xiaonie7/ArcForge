@@ -75,6 +75,21 @@ pub struct OfficeRuntimeRequest {
     #[serde(default)]
     force: bool,
     timeout_ms: Option<u64>,
+    /// Presentation patch: the one page/element to replace, or the edit to revert.
+    #[serde(default)]
+    edit: Option<PresentationEditRequest>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationEditRequest {
+    slide_id: Option<String>,
+    element_id: Option<String>,
+    /// Replacement markup or JSON passed inline; the bridge stages it as a file for the runtime.
+    replacement: Option<String>,
+    edit_id: Option<String>,
+    /// Edit id to undo instead of applying a replacement.
+    revert: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +128,8 @@ struct PreparedInvocation {
     officecli_output: Option<OfficeCliOutput>,
     input_target: Option<PathBuf>,
     artifact_record: OfficeArtifactRecordInput,
+    /// Files staged for this invocation only (for example an inline patch replacement); removed on drop.
+    scratch_files: Vec<CleanupFile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +185,7 @@ struct CapturedOutput {
     truncated: bool,
 }
 
+#[derive(Debug)]
 struct CleanupFile(PathBuf);
 
 impl Drop for CleanupFile {
@@ -958,6 +976,8 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
     let mut arguments = vec![OsString::from(&document_type), OsString::from(&action)];
     let mut officecli_output = None;
     let mut input_target = None;
+    let mut scratch_files = Vec::new();
+    let mut artifact_input_path = input.input_path.clone();
 
     match (document_type.as_str(), action.as_str()) {
         ("spreadsheet", "create") => {
@@ -1094,6 +1114,117 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                 )?;
                 input_target = Some(template.clone());
                 push_path_argument(&mut arguments, "--template", template);
+            }
+        }
+        ("presentation", "patch") => {
+            reject_path(&input.script_path, "scriptPath")?;
+            let spec = resolve_existing_path(
+                &workspace,
+                &workspace,
+                required_path(&input.spec_path, "specPath")?,
+                "json",
+                "specPath",
+            )?;
+            if !presentation_spec_is_svg_deck(&spec) {
+                return Err(
+                    "Presentation patch requires a schema_version 3 SVG deck manifest".to_string(),
+                );
+            }
+            let template_override = input
+                .input_path
+                .as_deref()
+                .is_some_and(|path| !path.trim().is_empty());
+            let asset_cache = validate_presentation_assets(&spec, &workspace, template_override)?;
+            // A patch rewrites the deck that was built from this manifest; it never creates a new file.
+            let output = resolve_existing_path(
+                &workspace,
+                &workspace,
+                required_path(&input.output_path, "outputPath")?,
+                "pptx",
+                "outputPath",
+            )?;
+            let edit = input.edit.as_ref().ok_or_else(|| {
+                "presentation patch requires edit.slideId with edit.replacement, or edit.revert".to_string()
+            })?;
+            let link = find_deck_manifest(&workspace, &output, None)?;
+            if !same_file(&link.spec, &spec) {
+                return Err("Presentation patch must use the manifest linked to this output deck".to_string());
+            }
+            push_path_argument(&mut arguments, "--workspace", workspace.clone());
+            push_path_argument(&mut arguments, "--spec", spec);
+            push_path_argument(&mut arguments, "--output", output);
+            if let Some(asset_cache) = asset_cache {
+                push_path_argument(&mut arguments, "--asset-cache", asset_cache);
+            }
+            if let Some(raw_template) = input
+                .input_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                let template = resolve_existing_path(
+                    &workspace,
+                    &workspace,
+                    raw_template,
+                    "pptx",
+                    "inputPath",
+                )?;
+                if !link.template.as_deref().is_some_and(|original| same_file(original, &template)) {
+                    return Err("Presentation patch must use the original linked template".to_string());
+                }
+                push_path_argument(&mut arguments, "--template", template);
+            } else if let Some(template) = link.template {
+                push_path_argument(&mut arguments, "--template", template);
+            }
+            // The template is a read-only base, not the document being revised.
+            artifact_input_path = None;
+            let revert = edit.revert.as_deref().map(str::trim).filter(|value| !value.is_empty());
+            let replacement = edit.replacement.as_deref().filter(|value| !value.trim().is_empty());
+            let slide_id = edit.slide_id.as_deref().map(str::trim).filter(|value| !value.is_empty());
+            if let Some(slide_id) = slide_id {
+                validate_edit_identifier(slide_id, "edit.slideId", true)?;
+                arguments.push(OsString::from("--slide-id"));
+                arguments.push(OsString::from(slide_id));
+            }
+            if let Some(edit_id) = edit.edit_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                validate_edit_identifier(edit_id, "edit.editId", false)?;
+                arguments.push(OsString::from("--edit-id"));
+                arguments.push(OsString::from(edit_id));
+            }
+            match (revert, replacement) {
+                (Some(revert_id), None) => {
+                    validate_edit_identifier(revert_id, "edit.revert", false)?;
+                    if edit.element_id.as_deref().is_some_and(|value| !value.trim().is_empty()) {
+                        return Err("edit.elementId is not valid together with edit.revert".to_string());
+                    }
+                    arguments.push(OsString::from("--revert"));
+                    arguments.push(OsString::from(revert_id));
+                }
+                (None, Some(replacement)) => {
+                    if slide_id.is_none() {
+                        return Err("presentation patch requires edit.slideId".to_string());
+                    }
+                    if let Some(element_id) = edit.element_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                        validate_element_identifier(element_id)?;
+                        arguments.push(OsString::from("--element-id"));
+                        arguments.push(OsString::from(element_id));
+                    }
+                    if replacement.len() as u64 > PRESENTATION_MAX_SVG_BYTES {
+                        return Err("edit.replacement exceeds the 2 MiB page limit".to_string());
+                    }
+                    if replacement.trim_start().starts_with('<') {
+                        reject_unsafe_svg_markup(replacement, "edit.replacement")?;
+                    }
+                    let staged = stage_patch_replacement(request_id, replacement)?;
+                    push_path_argument(&mut arguments, "--replacement", staged.0.clone());
+                    scratch_files.push(staged);
+                }
+                (Some(_), Some(_)) => {
+                    return Err("edit.replacement and edit.revert are mutually exclusive".to_string())
+                }
+                (None, None) => {
+                    return Err("presentation patch requires edit.replacement or edit.revert".to_string())
+                }
             }
         }
         ("presentation", "validate") => {
@@ -1375,7 +1506,7 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
         }
         ("presentation", _) => {
             return Err(
-                "Presentation action must be create, inspect, validate, or render".to_string(),
+                "Presentation action must be create, patch, inspect, validate, or render".to_string(),
             )
         }
         ("word", _) => {
@@ -1413,7 +1544,7 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                 RuntimeBackend::ArcForge => "arcforge".to_string(),
                 RuntimeBackend::OfficeCli => "officecli".to_string(),
             },
-            input_path: input.input_path.clone(),
+            input_path: artifact_input_path,
             spec_path: input.spec_path.clone(),
             script_path: input.script_path.clone(),
             output_path: input.output_path.clone(),
@@ -1421,7 +1552,44 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
             source_revision: None,
             source_snapshot_path: None,
         },
+        scratch_files,
     })
+}
+
+fn validate_edit_identifier(value: &str, label: &str, allow_dot: bool) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') || (allow_dot && byte == b'.')
+        })
+    {
+        return Err(format!(
+            "{label} must use letters, digits, '_'{} or '-' (max 64 chars)",
+            if allow_dot { ", '.'" } else { "" }
+        ));
+    }
+    Ok(())
+}
+
+/// SVG ids carry no whitespace, but template shape names ("Title 1") do; both are valid targets.
+fn validate_element_identifier(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.chars().count() > 128
+        || value.chars().any(|character| character.is_control() || matches!(character, '<' | '>' | '"' | '\''))
+    {
+        return Err("edit.elementId must be 1-128 printable characters without quotes or angle brackets".to_string());
+    }
+    Ok(())
+}
+
+fn stage_patch_replacement(request_id: &str, replacement: &str) -> Result<CleanupFile, String> {
+    let path = std::env::temp_dir().join(format!("arcforge-patch-{request_id}.replacement"));
+    if path.exists() {
+        return Err("Patch staging path already exists; use a new requestId".to_string());
+    }
+    std::fs::write(&path, replacement)
+        .map_err(|error| format!("Failed to stage the patch replacement: {error}"))?;
+    Ok(CleanupFile(path))
 }
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
@@ -1984,7 +2152,7 @@ fn run_office_runtime(
             return Err("Office Runtime stdout reader failed".to_string());
         }
     };
-    let captured_stderr = match stderr_reader.join() {
+    let mut captured_stderr = match stderr_reader.join() {
         Ok(output) => output,
         Err(_) => {
             if let Some((temp, ..)) = &staged_output {
@@ -2005,6 +2173,21 @@ fn run_office_runtime(
     let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     let succeeded = status.success() && !timed_out && !was_cancelled;
+    // Killing Python bypasses its exception handlers. Restore a pending journal before
+    // publishing cancellation/failure so sources, the PPTX and undo history stay consistent.
+    if !succeeded && invocation.backend == RuntimeBackend::ArcForge
+        && arguments.first().is_some_and(|argument| argument == "presentation")
+        && arguments.get(1).is_some_and(|argument| argument == "patch")
+    {
+        let value_after = |flag: &str| arguments.windows(2)
+            .find(|pair| pair[0] == flag).map(|pair| pair[1].clone());
+        if let (Some(spec), Some(output)) = (value_after("--spec"), value_after("--output")) {
+            let recovery = vec!["presentation".into(), "recover-patch".into(), "--spec".into(), spec, "--output".into(), output, "--workspace".into(), invocation.workdir.as_os_str().to_owned()];
+            if let Err(error) = run_presentation_runtime_json(&invocation.workdir, &recovery, Duration::from_secs(30)) {
+                captured_stderr.text.push_str(&format!("\nPatch recovery failed: {error}"));
+            }
+        }
+    }
     if let Some((temp, target, expected)) = &staged_output {
         if succeeded {
             if let Err(error) =
@@ -2830,6 +3013,388 @@ pub async fn presentation_preview_page(
         .map_err(|error| format!("Slide preview worker failed: {error}"))?
 }
 
+// ---------------------------------------------------------------------------
+// Artifact review: scoped-edit context and edit history for a built deck
+// ---------------------------------------------------------------------------
+
+const PRESENTATION_CONTEXT_TIMEOUT: Duration = Duration::from_secs(90);
+const MANIFEST_SEARCH_MAX_DEPTH: usize = 6;
+const MANIFEST_SEARCH_MAX_ENTRIES: usize = 20_000;
+const BUILD_STAMP_FILE_NAME: &str = ".arcforge-build.json";
+const EDIT_HISTORY_DIR_NAME: &str = ".arcforge-history";
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationSelectionContextResponse {
+    path: String,
+    /// Workspace-relative manifest path with forward slashes.
+    manifest_path: String,
+    manifest_dir: String,
+    template_path: Option<String>,
+    svg_path: Option<String>,
+    /// The runtime's `selection-context` report (snake_case keys).
+    context: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationEditRecord {
+    edit_id: String,
+    slide_id: String,
+    element_id: Option<String>,
+    scope: String,
+    kind: String,
+    target: String,
+    created_at: String,
+    reverted: bool,
+    reverted_at: Option<String>,
+    before_text: String,
+    after_text: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresentationEditHistoryResponse {
+    path: String,
+    manifest_path: String,
+    edits: Vec<PresentationEditRecord>,
+}
+
+struct DeckManifestLink {
+    spec: PathBuf,
+    template: Option<PathBuf>,
+}
+
+fn workspace_relative(workspace: &Path, path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let relative = canonical
+        .strip_prefix(workspace)
+        .map(Path::to_path_buf)
+        .unwrap_or(canonical);
+    relative.to_string_lossy().replace('\\', "/")
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+fn manifest_declares_slide(spec: &Path, slide_id: Option<&str>) -> bool {
+    let Ok(raw) = std::fs::read_to_string(spec) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    if value.get("schema_version").and_then(serde_json::Value::as_u64) != Some(3) {
+        return false;
+    }
+    let Some(slides) = value.get("slides").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    match slide_id {
+        Some(slide_id) => slides.iter().any(|entry| {
+            entry.get("slide_id").and_then(serde_json::Value::as_str) == Some(slide_id)
+        }),
+        None => true,
+    }
+}
+
+/// A build record links one output deck to the manifest that produced it.
+fn manifest_from_stamp(stamp_path: &Path, deck: &Path, slide_id: Option<&str>) -> Option<DeckManifestLink> {
+    let raw = std::fs::read_to_string(stamp_path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let output = value.get("output").and_then(serde_json::Value::as_str)?;
+    if !same_file(Path::new(output), deck) {
+        return None;
+    }
+    let stamp_dir = stamp_path.parent()?;
+    let template = value
+        .get("template")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| path.is_file());
+    if let Some(spec) = value.get("spec").and_then(serde_json::Value::as_str) {
+        let spec = PathBuf::from(spec);
+        if spec.is_file() && manifest_declares_slide(&spec, slide_id) {
+            return Some(DeckManifestLink { spec, template });
+        }
+        return None;
+    }
+    // Records written before the manifest name was stored: any schema 3 manifest in that
+    // directory which declares the requested page.
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(stamp_dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                && path.file_name().and_then(OsStr::to_str) != Some(BUILD_STAMP_FILE_NAME)
+        })
+        .collect();
+    candidates.sort();
+    candidates
+        .into_iter()
+        .find(|path| manifest_declares_slide(path, slide_id))
+        .map(|spec| DeckManifestLink { spec, template })
+}
+
+fn find_deck_manifest(workspace: &Path, deck: &Path, slide_id: Option<&str>) -> Result<DeckManifestLink, String> {
+    let checked = |mut link: DeckManifestLink| -> Result<DeckManifestLink, String> {
+        link.spec = std::fs::canonicalize(&link.spec).map_err(|error| error.to_string())?;
+        ensure_within_workspace(&link.spec, workspace, "linked manifest")?;
+        if let Some(template) = link.template.as_mut() {
+            *template = std::fs::canonicalize(&template).map_err(|error| error.to_string())?;
+            ensure_within_workspace(template, workspace, "linked template")?;
+        }
+        Ok(link)
+    };
+    let mut visited = std::collections::HashSet::new();
+    if let Some(parent) = deck.parent() {
+        let stamp = parent.join(BUILD_STAMP_FILE_NAME);
+        visited.insert(stamp.clone());
+        if stamp.is_file() {
+            if let Some(link) = manifest_from_stamp(&stamp, deck, slide_id) {
+                return checked(link);
+            }
+        }
+    }
+    let skipped = [
+        ".git",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        "__pycache__",
+        svg_assets::ASSET_CACHE_DIR_NAME,
+        EDIT_HISTORY_DIR_NAME,
+    ];
+    let walker = walkdir::WalkDir::new(workspace)
+        .max_depth(MANIFEST_SEARCH_MAX_DEPTH)
+        .into_iter()
+        .filter_entry(|entry| {
+            !(entry.file_type().is_dir()
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| skipped.contains(&name)))
+        });
+    for entry in walker.filter_map(|entry| entry.ok()).take(MANIFEST_SEARCH_MAX_ENTRIES) {
+        if entry.file_type().is_file()
+            && entry.file_name().to_str() == Some(BUILD_STAMP_FILE_NAME)
+            && visited.insert(entry.path().to_path_buf())
+        {
+            if let Some(link) = manifest_from_stamp(entry.path(), deck, slide_id) {
+                return checked(link);
+            }
+        }
+    }
+    Err(
+        "This deck is not linked to an ArcForge manifest in the workspace (no build record names it as output). Scoped edits need a deck created from a schema_version 3 manifest; rebuild it with OfficeRuntime create first."
+            .to_string(),
+    )
+}
+
+/// Run one read-only runtime command and parse its JSON report.
+fn run_presentation_runtime_json(
+    workdir: &Path,
+    arguments: &[OsString],
+    timeout: Duration,
+) -> Result<serde_json::Value, String> {
+    let runtime = resolve_runtime_program()?;
+    let mut command = Command::new(&runtime.program);
+    command
+        .args(&runtime.prefix_arguments)
+        .args(arguments)
+        .current_dir(workdir)
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to start the ArcForge Office Runtime: {error}"))?;
+    let stdout = child.stdout.take().ok_or("Failed to capture Office Runtime stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture Office Runtime stderr")?;
+    let stdout_reader = thread::spawn(move || read_capped(stdout, STDOUT_LIMIT_BYTES));
+    let stderr_reader = thread::spawn(move || read_capped(stderr, STDERR_LIMIT_BYTES));
+    let cancelled = AtomicBool::new(false);
+    let result = wait_for_child(&mut child, timeout, &cancelled);
+    let output = stdout_reader.join().map(|captured| captured.text).unwrap_or_default();
+    let errors = stderr_reader.join().map(|captured| captured.text).unwrap_or_default();
+    let (status, timed_out, _) = result?;
+    if timed_out {
+        return Err("The Office Runtime timed out".to_string());
+    }
+    if !status.success() {
+        let detail = errors.trim().trim_start_matches("error: ").trim();
+        return Err(if detail.is_empty() {
+            "The Office Runtime failed".to_string()
+        } else {
+            detail.to_string()
+        });
+    }
+    serde_json::from_str(&output)
+        .map_err(|error| format!("The Office Runtime returned invalid JSON: {error}"))
+}
+
+fn presentation_selection_context_sync(
+    workdir: String,
+    path: String,
+    unit_id: Option<String>,
+    element_id: Option<String>,
+) -> Result<PresentationSelectionContextResponse, String> {
+    let (file, display) = resolve_presentation_for_review(&workdir, &path)?;
+    let workspace = std::fs::canonicalize(workdir.trim())
+        .map_err(|error| format!("workdir cannot be opened: {error}"))?;
+    let unit_id = unit_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let element_id = element_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    if let Some(unit_id) = unit_id.as_deref() {
+        validate_edit_identifier(unit_id, "unitId", true)?;
+    }
+    if let Some(element_id) = element_id.as_deref() {
+        validate_element_identifier(element_id)?;
+    }
+    let link = find_deck_manifest(&workspace, &file, unit_id.as_deref())?;
+    let mut arguments = vec![OsString::from("presentation"), OsString::from("selection-context")];
+    push_path_argument(&mut arguments, "--workspace", workspace.clone());
+    push_path_argument(&mut arguments, "--spec", link.spec.clone());
+    if let Some(unit_id) = &unit_id {
+        arguments.push(OsString::from("--slide-id"));
+        arguments.push(OsString::from(unit_id));
+    }
+    if let Some(element_id) = &element_id {
+        arguments.push(OsString::from("--element-id"));
+        arguments.push(OsString::from(element_id));
+    }
+    if let Some(template) = &link.template {
+        push_path_argument(&mut arguments, "--template", template.clone());
+    }
+    let context = run_presentation_runtime_json(&workspace, &arguments, PRESENTATION_CONTEXT_TIMEOUT)?;
+    let svg_path = context
+        .get("slide")
+        .and_then(|slide| slide.get("svg"))
+        .and_then(serde_json::Value::as_str)
+        .map(|svg| workspace_relative(&workspace, Path::new(svg)));
+    Ok(PresentationSelectionContextResponse {
+        path: display,
+        manifest_path: workspace_relative(&workspace, &link.spec),
+        manifest_dir: workspace_relative(&workspace, link.spec.parent().unwrap_or(&workspace)),
+        template_path: link
+            .template
+            .as_deref()
+            .map(|template| workspace_relative(&workspace, template)),
+        svg_path,
+        context,
+    })
+}
+
+fn presentation_edit_history_sync(workdir: String, path: String) -> Result<PresentationEditHistoryResponse, String> {
+    let (file, display) = resolve_presentation_for_review(&workdir, &path)?;
+    let workspace = std::fs::canonicalize(workdir.trim())
+        .map_err(|error| format!("workdir cannot be opened: {error}"))?;
+    let link = find_deck_manifest(&workspace, &file, None)?;
+    let mut edits = Vec::new();
+    let history = link.spec.parent().map(|dir| dir.join(EDIT_HISTORY_DIR_NAME));
+    if let Some(directory) = history.filter(|dir| dir.is_dir()) {
+        let directory = std::fs::canonicalize(directory).map_err(|error| error.to_string())?;
+        ensure_within_workspace(&directory, &workspace, "edit history")?;
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("Edit history cannot be read: {error}"))?;
+        for entry in entries.flatten() {
+            let record_path = entry.path();
+            let is_json = record_path
+                .extension()
+                .and_then(OsStr::to_str)
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"));
+            if !is_json {
+                continue;
+            }
+            let Ok(record_path) = std::fs::canonicalize(record_path) else { continue; };
+            ensure_within_workspace(&record_path, &workspace, "edit history record")?;
+            let Ok(raw) = std::fs::read_to_string(&record_path) else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
+            let text = |key: &str| {
+                value
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            };
+            let (Some(edit_id), Some(slide_id)) = (text("edit_id"), text("slide_id")) else {
+                continue;
+            };
+            if !text("output").is_some_and(|output| same_file(Path::new(&output), &file))
+                || text("spec").is_some_and(|spec| !same_file(Path::new(&spec), &link.spec)) {
+                continue;
+            }
+            edits.push(PresentationEditRecord {
+                edit_id,
+                slide_id,
+                element_id: text("element_id"),
+                scope: text("scope").unwrap_or_else(|| "unit".to_string()),
+                kind: text("kind").unwrap_or_default(),
+                target: text("target").unwrap_or_default(),
+                created_at: text("created_at").unwrap_or_default(),
+                reverted: value
+                    .get("reverted")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                reverted_at: text("reverted_at"),
+                before_text: text("before_text").unwrap_or_default(),
+                after_text: text("after_text").unwrap_or_default(),
+            });
+        }
+    }
+    edits.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.edit_id.cmp(&a.edit_id))
+    });
+    Ok(PresentationEditHistoryResponse {
+        path: display,
+        manifest_path: workspace_relative(&workspace, &link.spec),
+        edits,
+    })
+}
+
+#[tauri::command]
+pub async fn presentation_selection_context(
+    workdir: String,
+    path: String,
+    unit_id: Option<String>,
+    element_id: Option<String>,
+) -> Result<PresentationSelectionContextResponse, String> {
+    tokio::task::spawn_blocking(move || {
+        presentation_selection_context_sync(workdir, path, unit_id, element_id)
+    })
+    .await
+    .map_err(|error| format!("Selection context worker failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn presentation_edit_history(
+    workdir: String,
+    path: String,
+) -> Result<PresentationEditHistoryResponse, String> {
+    tokio::task::spawn_blocking(move || presentation_edit_history_sync(workdir, path))
+        .await
+        .map_err(|error| format!("Edit history worker failed: {error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2901,6 +3466,7 @@ mod tests {
             output_path: None,
             force: false,
             timeout_ms: Some(5_000),
+            edit: None,
         }
     }
 
@@ -2950,6 +3516,7 @@ mod tests {
             output_path: Some("result.xlsx".to_string()),
             force: false,
             timeout_ms: Some(5_000),
+            edit: None,
         })
         .expect("prepare SpreadsheetCode invocation");
         let arguments = invocation
@@ -2981,6 +3548,7 @@ mod tests {
             output_path: Some("result.xlsx".to_string()),
             force: false,
             timeout_ms: None,
+            edit: None,
         })
         .expect_err("parent path must be rejected");
         assert!(error.contains("scriptPath must not contain '..'"));
@@ -3313,6 +3881,7 @@ mod tests {
             output_path: None,
             force: false,
             timeout_ms: Some(5_000),
+            edit: None,
         }
     }
 
@@ -3577,6 +4146,172 @@ mod tests {
         put("ppt/slides/_rels/slide1.xml.rels", "<Relationships/>");
         put("ppt/theme/theme1.xml", "<a:theme/>");
         writer.finish().expect("finish pptx");
+    }
+
+    #[test]
+    fn scoped_edit_context_finds_the_manifest_through_the_build_record() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let deck_dir = temp.path().join("deck");
+        std::fs::create_dir_all(deck_dir.join("out")).unwrap();
+        write_review_pptx(&deck_dir.join("out").join("final.pptx"));
+        std::fs::write(
+            deck_dir.join("deck.json"),
+            r#"{"schema_version":3,"slides":[{"slide_id":"p-01","svg":"p-01.svg"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            deck_dir.join("other.json"),
+            r#"{"schema_version":3,"slides":[{"slide_id":"zzz","svg":"zzz.svg"}]}"#,
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(temp.path()).unwrap();
+        let deck = std::fs::canonicalize(deck_dir.join("out").join("final.pptx")).unwrap();
+        let json = |path: &Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+        assert!(find_deck_manifest(&workspace, &deck, Some("p-01")).is_err());
+
+        // A legacy record without a manifest name: scan its directory for a manifest naming the page.
+        std::fs::write(
+            deck_dir.join(".arcforge-build.json"),
+            format!(r#"{{"schema":1,"output":{},"slides":{{}}}}"#, json(&deck)),
+        )
+        .unwrap();
+        let link = find_deck_manifest(&workspace, &deck, Some("p-01")).expect("legacy link");
+        assert!(link.spec.ends_with("deck.json"));
+        assert!(link.template.is_none());
+        assert!(find_deck_manifest(&workspace, &deck, Some("missing")).is_err());
+
+        // A schema 2 record names the manifest and the template directly.
+        std::fs::write(deck_dir.join("template.pptx"), b"x").unwrap();
+        std::fs::write(
+            deck_dir.join(".arcforge-build.json"),
+            format!(
+                r#"{{"schema":2,"output":{},"spec":{},"template":{},"slides":{{}}}}"#,
+                json(&deck),
+                json(&deck_dir.join("deck.json")),
+                json(&deck_dir.join("template.pptx"))
+            ),
+        )
+        .unwrap();
+        let link = find_deck_manifest(&workspace, &deck, Some("p-01")).expect("schema 2 link");
+        assert!(link.spec.ends_with("deck.json"));
+        assert!(link.template.as_deref().is_some_and(|template| template.ends_with("template.pptx")));
+        assert_eq!(workspace_relative(&workspace, &link.spec), "deck/deck.json");
+
+        let history_dir = deck_dir.join(".arcforge-history");
+        std::fs::create_dir_all(&history_dir).unwrap();
+        std::fs::write(
+            history_dir.join("e-1.json"),
+            r#"{"edit_id":"e-1","slide_id":"p-01","element_id":"title","scope":"element","kind":"svg_element","target":"p-01.svg","created_at":"2026-09-16T10:00:00+00:00","reverted":false,"before_text":"a","after_text":"b"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            history_dir.join("e-2.json"),
+            r#"{"edit_id":"e-2","slide_id":"p-01","element_id":null,"scope":"unit","kind":"svg_page","target":"p-01.svg","created_at":"2026-09-16T11:00:00+00:00","reverted":true,"reverted_at":"2026-09-16T12:00:00+00:00","before_text":"","after_text":""}"#,
+        )
+        .unwrap();
+        for name in ["e-1.json", "e-2.json"] {
+            let path = history_dir.join(name);
+            let mut record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            record["output"] = serde_json::json!(deck);
+            std::fs::write(path, serde_json::to_vec(&record).unwrap()).unwrap();
+        }
+        std::fs::write(history_dir.join("other.json"), r#"{"edit_id":"other","slide_id":"p-01","output":"other.pptx"}"#).unwrap();
+        std::fs::write(history_dir.join("junk.json"), "not json").unwrap();
+        let history = presentation_edit_history_sync(
+            temp.path().to_string_lossy().into_owned(),
+            "deck/out/final.pptx".to_string(),
+        )
+        .expect("history");
+        assert_eq!(history.manifest_path, "deck/deck.json");
+        assert_eq!(
+            history.edits.iter().map(|edit| edit.edit_id.as_str()).collect::<Vec<_>>(),
+            ["e-2", "e-1"]
+        );
+        assert!(history.edits[0].reverted);
+        assert_eq!(history.edits[1].element_id.as_deref(), Some("title"));
+    }
+
+    #[test]
+    fn presentation_patch_stages_the_replacement_and_validates_the_edit() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("deck")).unwrap();
+        std::fs::write(
+            temp.path().join("deck").join("p-01.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720"><text id="title">x</text></svg>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("deck").join("deck.json"),
+            r#"{"schema_version":3,"slides":[{"slide_id":"p-01","svg":"p-01.svg"}]}"#,
+        )
+        .unwrap();
+        write_review_pptx(&temp.path().join("deck").join("final.pptx"));
+        std::fs::write(temp.path().join("deck/.arcforge-build.json"), serde_json::to_vec(&serde_json::json!({
+            "schema": 2, "spec": temp.path().join("deck/deck.json"), "output": temp.path().join("deck/final.pptx"), "slides": {}
+        })).unwrap()).unwrap();
+        let request = |edit: PresentationEditRequest| OfficeRuntimeRequest {
+            spec_path: Some("deck/deck.json".to_string()),
+            output_path: Some("deck/final.pptx".to_string()),
+            edit: Some(edit),
+            ..presentation_request(temp.path(), "patch")
+        };
+        let invocation = prepare_invocation(request(PresentationEditRequest {
+            slide_id: Some("p-01".to_string()),
+            element_id: Some("title".to_string()),
+            replacement: Some(r#"<text id="title">y</text>"#.to_string()),
+            edit_id: Some("e-1".to_string()),
+            revert: None,
+        }))
+        .expect("prepare patch");
+        let arguments = argument_strings(&invocation);
+        assert_eq!(&arguments[..2], ["presentation", "patch"]);
+        for flag in ["--spec", "--output", "--slide-id", "--element-id", "--edit-id", "--replacement"] {
+            assert!(arguments.iter().any(|value| value == flag), "missing {flag}");
+        }
+        assert!(invocation.artifact_record.input_path.is_none());
+        let staged = invocation.scratch_files[0].0.clone();
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), r#"<text id="title">y</text>"#);
+        drop(invocation);
+        assert!(!staged.exists(), "staged replacement is removed with the invocation");
+
+        let revert = prepare_invocation(request(PresentationEditRequest {
+            revert: Some("e-1".to_string()),
+            ..PresentationEditRequest::default()
+        }))
+        .expect("prepare revert");
+        assert!(argument_strings(&revert).windows(2).any(|pair| pair == ["--revert", "e-1"]));
+
+        for (edit, expected) in [
+            (PresentationEditRequest::default(), "replacement or edit.revert"),
+            (
+                PresentationEditRequest {
+                    slide_id: Some("p-01".to_string()),
+                    replacement: Some("<script>x</script>".to_string()),
+                    ..PresentationEditRequest::default()
+                },
+                "must not contain script",
+            ),
+            (
+                PresentationEditRequest {
+                    slide_id: Some("p 01".to_string()),
+                    replacement: Some("<text id=\"title\">y</text>".to_string()),
+                    ..PresentationEditRequest::default()
+                },
+                "edit.slideId must use",
+            ),
+            (
+                PresentationEditRequest {
+                    slide_id: Some("p-01".to_string()),
+                    replacement: Some("<text/>".to_string()),
+                    revert: Some("e-1".to_string()),
+                    ..PresentationEditRequest::default()
+                },
+                "mutually exclusive",
+            ),
+        ] {
+            let error = prepare_invocation(request(edit)).expect_err("invalid patch");
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

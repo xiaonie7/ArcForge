@@ -1,5 +1,21 @@
 # 更新日志
 
+## v0.3.9
+
+本次发布为 **功能版本**，Artifact Review 进入第三期：审阅面板内选中元素或整页后可直接发起"就地修改"，模型在一次受锁定的内联回合里只改选区目标、其余页面保持不动，并且每一步都可用面板一键撤销。
+
+### 新功能
+
+- **presentation patch 作用域化编辑（OfficeRuntime）**：新增 `document=presentation action=patch`——按 `.arcforge-build.json` 链接的 schema 3 清单对既有 PPTX 做受约束修改，而非整册重建。请求带 `spec_path`、`output_path`、`slide_id` 与可选 `element_id`，`replacement` 支持四类目标：单个 SVG 元素节点（保留 id 与 data-role）、整页 `<svg viewBox="0 0 1280 720">`、模板文本 `{"text":"…"}` / 模板表格 `{"rows":[[…]]}`、模板页 `{"text_edits":[…],"table_edits":[…]}`（保持原表格维度与几何）。Rust 桥接层校验清单与输出 PPTX、模板的链接一致性，模板只读不作为被修订文档；内联 replacement 由桥接层暂存为本次调用专用文件，调用结束即清理。
+- **一步撤销与编辑历史**：快照写入清单旁 `.arcforge-history/<edit_id>.json`，同一 `edit_id` 复用于同一目标时保留最初的 before 值、刷新 after 值；`revert: "<edit_id>"` 可在模型回合之外撤销单次编辑，拒绝覆盖该目标上更新的修改，保留其他目标的编辑并标记快照已撤销。发布失败时日志（journal）恢复源文件、PPTX、构建记录与快照；进程被停止或超时后桌面端也会恢复该日志；对同一清单的编辑串行执行。
+- **审阅面板内联编辑器**：删除独立的审阅会话侧栏，改为在预览图上弹出 `InlineEditPopover` 直接输入修改要求；面板新增"编辑历史"入口与修改前后对比视图，最近一次编辑的元素高亮、Esc 关闭，编辑期间自动刷新受影响页面。选区范围（元素 / 页 / 整册）在面板内切换：元素与页范围下模型只拿到只读工具加一把锁定的 OfficeRuntime，请求超出范围时返回 `SCOPE_TOO_NARROW` 提示用户放宽；整册范围恢复完整工具集。同一内联回合中的多轮修正共用同一 `edit_id`，保留最初内容供一步撤销；撤销由面板完成，模型不再调用 `revert`。
+- **arcforge-slides 规则更新**：技能侧对"Artifact review selection"的处理从"改源码后重跑 create"改为直接调用 `patch`；作用域内禁止重建未提及页面、禁止改编号与顺序；检查与校验限制在链接的源内，作用域内 PNG 渲染只写 `.arcforge-review/<edit_id>.png`，配合 `Read` / `VisualReview` 自查；报告 `patched_slide_ids`（有界目标）与 `changed_slide_ids`（含源自上次构建以来的变化），`shared_inputs_changed` 使全部页面预览失效。
+- **测试**：新增 `test_presentation_patch.py`（20 例：四类替换目标、撤销、快照与日志恢复）、`scoped-office-edit.test.mjs`（作用域锁定、备选写入路径全部封堵、共享输入失效、失败不发布成功事件）与 `artifact-edit-context.test.mjs`（编辑上下文注入与取消场景）。
+
+### 其他
+
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.9。
+
 ## v0.3.8
 
 本次发布为 **功能版本**，新增企微通道实时进度：外部聊天里等待回复时不再只是静态的"处理中"占位，而是原地刷新的动态内容，展示模型正在思考的摘要、正在使用的工具与运行时长。

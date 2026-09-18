@@ -35,7 +35,10 @@ import {
   mergePendingUploadedFiles,
   type PendingUploadedFile,
 } from "../../../lib/chat/messages/uploadedFiles";
-import type { SelectionContext } from "../../../lib/artifactReview/types";
+import { artifactPathsMatch, getArtifactAdapter } from "../../../lib/artifactReview";
+import { isRestrictedEditScope } from "../../../lib/artifactReview/editScope";
+import { artifactUndoMessage, prepareArtifactEdit } from "../../../lib/artifactReview/prepareEdit";
+import type { ArtifactEditResult, ArtifactEditScope, ArtifactUnitPreview, SelectionContext } from "../../../lib/artifactReview/types";
 import {
   BRANCH_CONVERSATION_DEFAULT_TITLE,
   buildFallbackConversationTitle,
@@ -278,6 +281,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     uploadedFilesOverride?: PendingUploadedFile[];
     conversationIdOverride?: string;
     artifactSelectionOverride?: SelectionContext | null;
+    editScopeOverride?: ArtifactEditScope;
     executionModeOverride?: ExecutionMode;
     workdirOverride?: string;
     allowEmptyWorkdirOverride?: boolean;
@@ -693,18 +697,62 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
       }
     }
 
-    const artifactSelection = gatewayBridgeRequest
+    let artifactSelection = gatewayBridgeRequest
       ? null
       : overrides?.artifactSelectionOverride !== undefined
         ? overrides.artifactSelectionOverride
         : conversationId === currentConversationIdRef.current
           ? (getArtifactSelection?.() ?? null)
           : null;
+    let editScope: ArtifactEditScope | undefined;
+    let editInstruction: string | undefined;
+    let editPreview: ArtifactUnitPreview | undefined;
+    if (overrides?.editScopeOverride) {
+      if (!effectiveIsAgentMode || gatewayBridgeRequest || !artifactSelection) {
+        setConversationErrorState("Inline editing requires Agent mode and a selected artifact.");
+        gatewayBridgeEvents.close();
+        return false;
+      }
+      const preparation = new AbortController();
+      setConversationAbortController(conversationId, preparation);
+      setConversationSendingState(conversationId, true);
+      setConversationErrorState(null);
+      let onAbort: (() => void) | undefined;
+      try {
+        const prepared = await Promise.race([
+          prepareArtifactEdit({
+            scope: overrides.editScopeOverride,
+            selection: artifactSelection,
+            workdir: effectiveWorkdir,
+            adapter: getArtifactAdapter(overrides.editScopeOverride.artifact.artifactType),
+            includeImage: runtimeModel.input.includes("image"),
+          }),
+          new Promise<never>((_, reject) => {
+            onAbort = () => reject(new DOMException("Cancelled", "AbortError"));
+            preparation.signal.addEventListener("abort", onAbort, { once: true });
+          }),
+        ]);
+        if (preparation.signal.aborted) return false;
+        editScope = prepared.scope;
+        editInstruction = prepared.instruction;
+        editPreview = prepared.preview;
+        artifactSelection = prepared.selection;
+      } catch (error) {
+        setConversationErrorState(preparation.signal.aborted ? "Cancelled" : asErrorMessage(error, "Could not prepare this edit."));
+        gatewayBridgeEvents.close();
+        return false;
+      } finally {
+        if (onAbort) preparation.signal.removeEventListener("abort", onAbort);
+        setConversationAbortController(conversationId, null);
+        setConversationSendingState(conversationId, false);
+      }
+    }
     const userMessage = createUserMessageWithUploads(
       text,
       uploadedFiles,
       Date.now(),
       artifactSelection,
+      editInstruction,
     );
     if (!userMessage) {
       if (gatewayBridgeRequest) {
@@ -717,6 +765,12 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     const pendingUserMessage = userMessage;
     const content =
       typeof pendingUserMessage.content === "string" ? pendingUserMessage.content : "";
+    if (editPreview) {
+      pendingUserMessage.content = [
+        { type: "text", text: content },
+        { type: "image", data: editPreview.data, mimeType: editPreview.mimeType },
+      ];
+    }
 
     const titleSourceText = text || uploadedFiles.map((file) => file.fileName).join(", ");
 
@@ -1269,7 +1323,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     const hookScope = createHookRunScope({
       // Hooks can execute arbitrary local scripts or HTTP requests and are not
       // represented by ChannelPermissionPolicy. Trusted channel runs deny them.
-      hooks: principal ? [] : getAutomationState().hooks.hooks,
+      hooks: principal || isRestrictedEditScope(editScope) ? [] : getAutomationState().hooks.hooks,
       conversationId,
       workdir: effectiveWorkdir,
       onWarning: (warning) => {
@@ -1409,6 +1463,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             memoryExtractionStatusText,
             memoryEnabled: effectiveMemoryEnabled,
             effectiveWorkdir,
+            editScope,
             allowEmptyWorkdir: workdirResolution.allowEmptyWorkdir,
             effectiveSkillsEnabled,
             showSilentMemoryExtraction: effectiveIsAgentDevExecutionMode,
@@ -1615,5 +1670,45 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
     }
   }
 
-  return { send };
+  async function recordArtifactUndo(
+    conversationId: string,
+    scope: ArtifactEditScope,
+    result: ArtifactEditResult,
+  ): Promise<void> {
+    await withConversationAdmission({
+      conversationId,
+      token: `undo-note:${globalThis.crypto.randomUUID()}`,
+      queued: false,
+      originSourceId: "desktop",
+    }, async () => {
+      const entry = conversationRuntimeCacheRef.current.get(conversationId);
+      const review = entry?.state.meta.review;
+      if (!entry || entry.isSending || !review ||
+          !artifactPathsMatch(review.workdir, scope.artifact.workdir) ||
+          !artifactPathsMatch(review.artifactPath, scope.artifact.path)) {
+        throw new Error("The edit was reverted, but its review conversation is not available to record the undo.");
+      }
+      const note = createUserMessageWithUploads(artifactUndoMessage(scope, result), [], Date.now());
+      if (!note) return false;
+      const state = appendMessagesToConversation(entry.state, [note]);
+      updateConversationRuntimeEntry(conversationId, (current) => ({ ...current, state }));
+      const summary = sidebarStore.peek(conversationId);
+      const saved = await persistConversationWithHistorySync({
+        conversationId,
+        sessionId: entry.sessionId,
+        providerId: entry.selectedModel?.customProviderId ?? summary?.providerId ?? "",
+        model: entry.selectedModel?.model ?? summary?.model ?? "",
+        selectedModel: entry.selectedModel,
+        cwd: entry.workdir,
+        state,
+        fallbackTitle: summary?.title ?? `${t("chat.review.threadTitlePrefix")}${scope.artifact.path.split(/[\\/]/).pop()}`,
+        createdAt: entry.createdAt,
+        titlePromise: null,
+      });
+      if (!saved) throw new Error("The edit was reverted, but the undo note could not be saved. The current session has been updated.");
+      return true;
+    });
+  }
+
+  return { send, recordArtifactUndo };
 }

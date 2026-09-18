@@ -58,12 +58,17 @@ test("OfficeRuntime is registered as a structured builtin tool", () => {
   assert.match(toolSource, /Type\.Literal\("validate"\)/);
   assert.match(toolSource, /document=word/);
   assert.match(toolSource, /HTML\/PNG render/);
-  assert.match(toolSource, /tools: \[officeRuntimeTool, spreadsheetCodeTool\]/);
+  const { createOfficeRuntimeTools } = createTsModuleLoader().loadModule("src/lib/tools/officeRuntimeTools.ts");
+  assert.deepEqual(createOfficeRuntimeTools({ workdir: "E:/work" }).tools.map(tool => tool.name), ["OfficeRuntime", "SpreadsheetCode"]);
   assert.match(toolSource, /scriptPath: args\.script_path/);
   assert.match(toolSource, /office_runtime_execute/);
   assert.match(toolSource, /office_runtime_cancel/);
   assert.match(registrySource, /createOfficeRuntimeTools/);
-  assert.match(registrySource, /createOfficeRuntimeTools\(\{ workdir: params\.workdir \}\)/);
+  assert.match(
+    registrySource,
+    /createOfficeRuntimeTools\(\{ workdir: params\.workdir, editScope: params\.editScope \}\)/,
+  );
+  assert.match(registrySource, /createOfficeRuntimeTools\(\{ workdir: params\.workdir, editScope \}\)/);
 });
 
 test("successful OfficeRuntime outputs become native generated-file artifacts", async () => {

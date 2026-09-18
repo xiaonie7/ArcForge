@@ -1,27 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
-  createConversationStateFromContext,
+  type ConversationRuntimeEntry,
+  createConversationRuntimeEntry,
+  setConversationRuntimeCacheEntry,
+} from "../../pages/chat/runtime/chatPageRuntime";
+import {
   type ConversationViewState,
+  createConversationStateFromContext,
 } from "../chat/conversation/conversationState";
 import {
+  type ChatHistorySummary,
   getChatHistory,
   persistConversationState,
-  type ChatHistorySummary,
 } from "../chat/history/chatHistory";
 import { createConversationIdentity } from "../chat/page/chatPageHelpers";
 import {
   parseSelectedModelJson,
-  serializeSelectedModelJson,
   type SelectedModel,
+  serializeSelectedModelJson,
 } from "../settings";
-import {
-  createConversationRuntimeEntry,
-  setConversationRuntimeCacheEntry,
-  type ConversationRuntimeEntry,
-} from "../../pages/chat/runtime/chatPageRuntime";
-import { artifactBasename, type ArtifactRef } from "./types";
-import { getReviewThreadBinding, setReviewThreadBinding } from "./session";
 import { artifactPathsMatch } from "./events";
+import { getReviewThreadBinding, setReviewThreadBinding } from "./session";
+import { type ArtifactRef, artifactBasename } from "./types";
 
 export type ReviewThreadOptions = {
   artifact: ArtifactRef;

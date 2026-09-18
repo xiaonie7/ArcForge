@@ -302,7 +302,7 @@ test("trusted channel runs require and consume a frozen permission profile", () 
 test("trusted channel runs cannot trigger global command or HTTP hooks", () => {
   assert.match(
     sendTurnSource,
-    /hooks:\s*principal\s*\?\s*\[\]\s*:\s*getAutomationState\(\)\.hooks\.hooks/,
+    /hooks:\s*principal\s*\|\|\s*isRestrictedEditScope\(editScope\)\s*\?\s*\[\]\s*:\s*getAutomationState\(\)\.hooks\.hooks/,
   );
 });
 

@@ -2,13 +2,15 @@ import type { Tool, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai";
 import { invoke } from "@tauri-apps/api/core";
 import { Type } from "typebox";
 
-import { emitArtifactChange } from "../artifactReview/events";
+import { isRestrictedEditScope, parseArtifactEditResult } from "../artifactReview/editScope";
+import { artifactPathsMatch, emitArtifactChange } from "../artifactReview/events";
+import type { ArtifactEditScope } from "../artifactReview/types";
 import {
   type BuiltinToolBundle,
   createBuiltinMetadataMap,
-  type DocumentArtifactSummary,
   type DisplayFileItemDetails,
   type DisplayFilePreviewKind,
+  type DocumentArtifactSummary,
 } from "./builtinTypes";
 import { ToolPathResolver } from "./pathUtils";
 
@@ -50,7 +52,7 @@ type DescribeWorkspaceArtifactsResponse = {
 
 const OFFICE_RUNTIME_TOOL_NAME = "OfficeRuntime";
 
-/** `deck.changed_slide_ids` from a presentation create result → review units. */
+/** `deck.changed_slide_ids` from a presentation create/patch result → review units. */
 function extractChangedUnits(parsedOutput: unknown): { type: string; id: string }[] | undefined {
   if (!parsedOutput || typeof parsedOutput !== "object") return undefined;
   const deck = (parsedOutput as { deck?: unknown }).deck;
@@ -61,6 +63,16 @@ function extractChangedUnits(parsedOutput: unknown): { type: string; id: string 
     .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
     .map((id) => ({ type: "slide", id }));
 }
+
+function sharedInputsChanged(parsedOutput: unknown) {
+  if (!parsedOutput || typeof parsedOutput !== "object") return false;
+  const deck = (parsedOutput as { deck?: unknown }).deck;
+  return Boolean(
+    deck &&
+      typeof deck === "object" &&
+      (deck as { shared_inputs_changed?: unknown }).shared_inputs_changed === true,
+  );
+}
 const SPREADSHEET_CODE_TOOL_NAME = "SpreadsheetCode";
 const OFFICE_RUNTIME_ARGUMENTS = new Set([
   "document",
@@ -70,7 +82,19 @@ const OFFICE_RUNTIME_ARGUMENTS = new Set([
   "output_path",
   "force",
   "timeout_seconds",
+  "slide_id",
+  "element_id",
+  "replacement",
+  "edit_id",
+  "revert",
 ]);
+const PRESENTATION_PATCH_ARGUMENTS = [
+  "slide_id",
+  "element_id",
+  "replacement",
+  "edit_id",
+  "revert",
+] as const;
 const SPREADSHEET_CODE_ARGUMENTS = new Set([
   "script_path",
   "input_path",
@@ -87,8 +111,9 @@ const officeRuntimeTool: Tool = {
     "create (a schema_version 3 deck manifest, optionally with input_path as the template PPTX; " +
     "reuse original template pages with source_slide plus text_edits/table_edits using shape ids from inspect, or author SVG pages; " +
     "manifest assets may be raster pictures or SVG icons/logos that become native shapes), " +
+    "patch (change ONE page or ONE element of a deck built from a manifest: spec_path=manifest, output_path=the built deck, slide_id, optional element_id, and replacement = the complete new SVG element / page SVG / JSON template edit; the runtime snapshots the old content, rebuilds, and reports changed_slide_ids; revert=<edit_id> undoes an edit), " +
     "validate (layout and resource relationships, also normalizes SVG assets into .arcforge-assets/), inspect (editable elements, layouts, protected regions, theme, relationship errors), and render " +
-    "(.pdf via LibreOffice or .png page previews via OfficeCLI; spec_path may hold {\"pages\":\"2\"}). " +
+    '(.pdf via LibreOffice or .png page previews via OfficeCLI; spec_path may hold {"pages":"2"}). ' +
     "Use document=word for DOCX create/patch/inspect/validate and HTML/PNG render. " +
     "Paths must stay inside the current workspace.",
   parameters: Type.Object(
@@ -133,6 +158,34 @@ const officeRuntimeTool: Tool = {
           minimum: 1,
           maximum: 600,
           description: "Execution timeout in seconds; defaults to 180.",
+        }),
+      ),
+      slide_id: Type.Optional(
+        Type.String({
+          description: "presentation patch: manifest slide_id of the page to change.",
+        }),
+      ),
+      element_id: Type.Optional(
+        Type.String({
+          description:
+            "presentation patch: SVG element id (or template shape name) inside that page; omit to replace the whole page.",
+        }),
+      ),
+      replacement: Type.Optional(
+        Type.String({
+          description:
+            'presentation patch: the complete new content. One SVG element keeping the same id and data-role for an element; the whole page SVG for a page; {"text": ...} or {"rows": [...]} for a template shape.',
+        }),
+      ),
+      edit_id: Type.Optional(
+        Type.String({
+          description: "presentation patch: stable id for the snapshot; generated when omitted.",
+        }),
+      ),
+      revert: Type.Optional(
+        Type.String({
+          description:
+            "presentation patch: undo the edit with this id instead of applying a replacement.",
         }),
       ),
     },
@@ -239,8 +292,130 @@ function resultText(result: OfficeRuntimeResponse) {
   );
 }
 
-export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinToolBundle {
+export function createOfficeRuntimeTools(params: {
+  workdir: string;
+  /** Inline review edit lock: patch may target only this unit/element; create is refused. */
+  editScope?: ArtifactEditScope;
+}): BuiltinToolBundle {
   const pathResolver = new ToolPathResolver({ workdir: params.workdir });
+  const lock = isRestrictedEditScope(params.editScope) ? params.editScope : null;
+
+  /** Enforce the scope lock before anything reaches the runtime. */
+  function applyEditScope(args: Record<string, unknown>) {
+    const isPresentation = args.document === "presentation";
+    const usesPatchArguments = PRESENTATION_PATCH_ARGUMENTS.some((key) => args[key] !== undefined);
+    if (usesPatchArguments && !(isPresentation && args.action === "patch")) {
+      throw new Error(
+        "slide_id, element_id, replacement, edit_id and revert are only valid for document=presentation action=patch",
+      );
+    }
+    if (!lock) return;
+    if (!artifactPathsMatch(params.workdir, lock.artifact.workdir) || !lock.manifestPath) {
+      throw new Error("The scoped edit must use the reviewed workspace and its linked manifest.");
+    }
+    if (!isPresentation) {
+      throw new Error(
+        "Only the presentation being reviewed can change during a scoped inline edit.",
+      );
+    }
+    if (!["patch", "inspect", "validate", "render"].includes(String(args.action))) {
+      throw new Error(
+        `Scoped inline edit: use action=patch with slide_id="${lock.unitId}"${lock.elementId ? ` and element_id="${lock.elementId}"` : ""} instead of rebuilding the deck with create.`,
+      );
+    }
+    if (args.action === "inspect") {
+      if (
+        typeof args.input_path !== "string" ||
+        ![lock.artifact.path, lock.templatePath].some(
+          (path) => path && artifactPathsMatch(args.input_path as string, path),
+        ) ||
+        args.output_path !== undefined ||
+        args.spec_path !== undefined
+      ) {
+        throw new Error("Scoped inspection may only read the reviewed deck or its template.");
+      }
+      return;
+    }
+    if (args.action === "render") {
+      const previewPath = `.arcforge-review/${lock.editId}.png`;
+      if (
+        typeof args.input_path !== "string" ||
+        !artifactPathsMatch(args.input_path, lock.artifact.path) ||
+        args.spec_path !== undefined ||
+        (args.output_path !== undefined &&
+          !artifactPathsMatch(String(args.output_path), previewPath))
+      ) {
+        throw new Error(`Scoped rendering may only preview the reviewed deck into ${previewPath}.`);
+      }
+      args.output_path = previewPath;
+      args.force = true;
+      return;
+    }
+    if (args.action === "validate") {
+      if (
+        typeof args.spec_path !== "string" ||
+        !artifactPathsMatch(args.spec_path, lock.manifestPath) ||
+        args.output_path !== undefined ||
+        (args.input_path !== undefined &&
+          (!lock.templatePath || !artifactPathsMatch(String(args.input_path), lock.templatePath)))
+      ) {
+        throw new Error("Scoped validation must use the linked manifest and original template.");
+      }
+      args.input_path = lock.templatePath;
+      args.force = false;
+      return;
+    }
+    if (args.revert !== undefined) {
+      throw new Error(
+        "Reverting edits is done from the review panel, not inside a scoped edit turn.",
+      );
+    }
+    const slideId = typeof args.slide_id === "string" ? args.slide_id.trim() : "";
+    const elementId = typeof args.element_id === "string" ? args.element_id.trim() : "";
+    if (slideId !== lock.unitId) {
+      throw new Error(
+        `Scope violation: this edit is locked to slide_id "${lock.unitId}"; "${slideId || "(none)"}" was refused and nothing changed.`,
+      );
+    }
+    if (lock.kind === "element" && elementId !== lock.elementId) {
+      throw new Error(
+        `Scope violation: this edit is locked to element_id "${lock.elementId}" on slide "${lock.unitId}"; "${elementId || "(whole page)"}" was refused and nothing changed.`,
+      );
+    }
+    if (lock.kind === "unit" && elementId) {
+      throw new Error(
+        "A page-scoped edit must replace the whole page: omit element_id. Corrections share one undo record.",
+      );
+    }
+    const outputPath = typeof args.output_path === "string" ? args.output_path.trim() : "";
+    if (!artifactPathsMatch(outputPath, lock.artifact.path)) {
+      throw new Error(
+        `Scope violation: output_path must be the reviewed deck "${lock.artifact.path}".`,
+      );
+    }
+    if (lock.manifestPath) {
+      const specPath = typeof args.spec_path === "string" ? args.spec_path.trim() : "";
+      if (!artifactPathsMatch(specPath, lock.manifestPath)) {
+        throw new Error(
+          `Scope violation: spec_path must be the deck manifest "${lock.manifestPath}".`,
+        );
+      }
+    }
+    if (
+      args.input_path !== undefined &&
+      (typeof args.input_path !== "string" ||
+        !lock.templatePath ||
+        !artifactPathsMatch(args.input_path, lock.templatePath))
+    ) {
+      throw new Error("Scope violation: input_path must be the deck's original template.");
+    }
+    if (args.edit_id !== undefined && args.edit_id !== lock.editId) {
+      throw new Error("Scope violation: edit_id must match the current inline edit.");
+    }
+    // Corrections to this target preserve the first snapshot and update its latest result.
+    args.edit_id = lock.editId;
+    args.input_path = lock.templatePath;
+  }
 
   async function describeGeneratedOutput(outputPath: unknown): Promise<DisplayFileItemDetails> {
     if (typeof outputPath !== "string" || !outputPath.trim()) {
@@ -325,13 +500,18 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const isSpreadsheetCode = toolCall.name === SPREADSHEET_CODE_TOOL_NAME;
+      if (lock && isSpreadsheetCode)
+        throw new Error("SpreadsheetCode is unavailable during a scoped presentation edit.");
       const args = validateArguments(
-        toolCall.arguments,
+        { ...toolCall.arguments },
         toolCall.name,
         isSpreadsheetCode ? SPREADSHEET_CODE_ARGUMENTS : OFFICE_RUNTIME_ARGUMENTS,
       );
+      if (!isSpreadsheetCode) applyEditScope(args);
       const timeoutSeconds =
         typeof args.timeout_seconds === "number" ? args.timeout_seconds : undefined;
+      const isPresentationPatch =
+        !isSpreadsheetCode && args.document === "presentation" && args.action === "patch";
       const result = await invoke<OfficeRuntimeResponse>("office_runtime_execute", {
         input: {
           requestId,
@@ -344,6 +524,17 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
           outputPath: args.output_path,
           force: args.force === true,
           timeoutMs: timeoutSeconds === undefined ? undefined : timeoutSeconds * 1_000,
+          ...(isPresentationPatch
+            ? {
+                edit: {
+                  slideId: args.slide_id,
+                  elementId: args.element_id,
+                  replacement: args.replacement,
+                  editId: args.edit_id,
+                  revert: args.revert,
+                },
+              }
+            : {}),
         },
       });
       let parsedOutput: unknown;
@@ -377,10 +568,11 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
         ? { ...generatedFile, artifact: result.artifact }
         : generatedFile;
       const changedUnits = extractChangedUnits(parsedOutput);
+      const editResult = isPresentationPatch ? parseArtifactEditResult(parsedOutput) : null;
       if (
         result.success &&
         args.document === "presentation" &&
-        args.action === "create" &&
+        (args.action === "create" || args.action === "patch") &&
         typeof args.output_path === "string" &&
         args.output_path.trim()
       ) {
@@ -388,7 +580,8 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
           workdir: params.workdir,
           path: args.output_path.trim(),
           artifactType: "pptx",
-          changedUnits: changedUnits ?? "all",
+          changedUnits: !changedUnits || sharedInputsChanged(parsedOutput) ? "all" : changedUnits,
+          ...(editResult ? { edit: editResult } : {}),
         });
       }
       return {
@@ -401,10 +594,11 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
               ...result,
               parsedOutput,
               changedUnits,
+              editResult,
               kind: "display_file",
               files: [generatedFileWithArtifact],
             }
-          : { ...result, parsedOutput, changedUnits, previewError },
+          : { ...result, parsedOutput, changedUnits, editResult, previewError },
         isError: !result.success,
         timestamp,
       };
@@ -425,7 +619,27 @@ export function createOfficeRuntimeTools(params: { workdir: string }): BuiltinTo
 
   return {
     groupId: "office",
-    tools: [officeRuntimeTool, spreadsheetCodeTool],
+    tools: lock
+      ? [
+          {
+            ...officeRuntimeTool,
+            description: `Edit only ${lock.unitId}${lock.elementId ? ` / ${lock.elementId}` : ""} in ${lock.artifact.path}. Use patch; create and revert are unavailable. Inspect the reviewed deck or template, validate the linked manifest, or render the deck into .arcforge-review/${lock.editId}.png. Repeated patches share one undo record.`,
+            parameters: Type.Object(
+              {
+                ...(officeRuntimeTool.parameters as { properties: Record<string, any> }).properties,
+                document: Type.Literal("presentation"),
+                action: Type.Union([
+                  Type.Literal("patch"),
+                  Type.Literal("inspect"),
+                  Type.Literal("validate"),
+                  Type.Literal("render"),
+                ]),
+              },
+              { additionalProperties: false },
+            ),
+          },
+        ]
+      : [officeRuntimeTool, spreadsheetCodeTool],
     executeToolCall,
     metadataByName: createBuiltinMetadataMap([
       [

@@ -68,7 +68,7 @@ def print_help() -> None:
         "Usage:\n"
         "  arcforge-office-runtime doctor\n"
         "  arcforge-office-runtime spreadsheet <create|patch|code|inspect> [options]\n"
-        "  arcforge-office-runtime presentation <create|validate|inspect|render|render-png|prepare-preview> [options]"
+        "  arcforge-office-runtime presentation <create|patch|validate|inspect|render|render-png|prepare-preview|selection-context> [options]"
     )
 
 

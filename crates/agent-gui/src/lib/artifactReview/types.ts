@@ -83,6 +83,103 @@ export type ArtifactSelection = {
 export type SelectionContext = {
   artifact: ArtifactRef;
   selection: ArtifactSelection;
+  /** Present when the message is a scoped inline edit: the runtime lock for that turn. */
+  edit?: ArtifactEditScope;
+  /** Pre-rendered instruction text (scoped edits); replaces the generic selection note. Not persisted. */
+  instruction?: string;
+};
+
+export type EditScopeKind = "element" | "unit" | "artifact";
+
+/**
+ * Lock for one inline edit turn. The tool layer rejects writes outside it and the runtime
+ * records the edit under `editId` so it can be reverted.
+ */
+export type ArtifactEditScope = {
+  editId: string;
+  kind: EditScopeKind;
+  artifact: ArtifactRef;
+  unitId?: string;
+  elementId?: string;
+  /** Workspace-relative manifest path the patch must use; resolved from the build record. */
+  manifestPath?: string;
+  templatePath?: string;
+};
+
+export type ReplacementKind =
+  | "svg_element"
+  | "svg_page"
+  | "template_text"
+  | "template_table"
+  | "template_page"
+  | "deck";
+
+/** What the runtime reports about the selected target before a scoped edit is sent. */
+export type ScopedEditContext = {
+  manifestPath: string;
+  templatePath?: string;
+  mode?: string;
+  stage?: string;
+  slideCount?: number;
+  slideIds?: string[];
+  replacementKind: ReplacementKind;
+  slide?: {
+    slideId: string;
+    index: number;
+    svgPath?: string;
+    sourceSlide?: number;
+    textEdits?: unknown[];
+    tableEdits?: unknown[];
+    notes?: string;
+  };
+  element?: {
+    id: string;
+    role?: string;
+    snippet?: string;
+    truncated?: boolean;
+    text?: string;
+    sizeBytes?: number;
+    shapeId?: number;
+    shapePath?: number[];
+    name?: string;
+    templateValue?: unknown;
+    currentEdit?: unknown;
+  };
+  page?: { snippet: string; truncated: boolean; sizeBytes: number };
+};
+
+/** One applied (or reverted) scoped edit, as reported by the runtime. */
+export type ArtifactEditResult = {
+  editId: string;
+  unitId: string;
+  elementId?: string;
+  scope: "element" | "unit";
+  kind: string;
+  reverted: boolean;
+  beforeText: string;
+  afterText: string;
+  /** Units whose rendering changed since the previous build (drives preview refresh). */
+  changedUnitIds: string[];
+  /** Units this edit itself touched: exactly the locked target. */
+  patchedUnitIds: string[];
+  sharedInputsChanged: boolean;
+  textOverflows: unknown[];
+  outOfBounds: unknown[];
+};
+
+/** A snapshot record from the runtime's edit history directory. */
+export type ArtifactEditRecord = {
+  editId: string;
+  unitId: string;
+  elementId?: string;
+  scope: "element" | "unit";
+  kind: string;
+  target: string;
+  createdAt: string;
+  reverted: boolean;
+  revertedAt?: string;
+  beforeText: string;
+  afterText: string;
 };
 
 /** Emitted by runtimes/tools after an edit so views refresh only what changed. */
@@ -93,6 +190,8 @@ export type ArtifactChange = {
   /** `"all"` when the producer cannot tell which units changed. */
   changedUnits: { type: string; id: string }[] | "all";
   removedUnits?: { type: string; id: string }[];
+  /** Set when the change came from a scoped patch or revert. */
+  edit?: ArtifactEditResult;
 };
 
 export type ArtifactUnitPreview = {
@@ -123,6 +222,18 @@ export type ArtifactAdapter = {
     artifact: ArtifactRef,
     unit: Pick<ArtifactUnit, "id" | "order">,
   ) => Promise<ArtifactElementsResult>;
+  /** Everything a scoped edit turn needs to know about one target; rejects unlinked artifacts. */
+  selectionContext?: (
+    artifact: ArtifactRef,
+    target: { unitId?: string; elementId?: string },
+  ) => Promise<ScopedEditContext>;
+  /** Snapshot records of scoped edits, newest first. */
+  editHistory?: (artifact: ArtifactRef) => Promise<ArtifactEditRecord[]>;
+  /** Undo one scoped edit through the runtime (no model turn involved). */
+  revertEdit?: (
+    artifact: ArtifactRef,
+    request: { editId: string; manifestPath: string; templatePath?: string },
+  ) => Promise<ArtifactEditResult>;
 };
 
 /** Binding between a review thread (a normal conversation) and the artifact it reviews. */
@@ -156,6 +267,9 @@ export function selectionTitle(context: SelectionContext) {
 
 /** Text appended to the user message so the model knows the review scope. */
 export function buildSelectionInstruction(context: SelectionContext) {
+  if (typeof context.instruction === "string" && context.instruction.trim()) {
+    return context.instruction.trim();
+  }
   const { artifact, selection } = context;
   const lines = [
     "Artifact review selection: the user is looking at this unit and the request refers to it.",
@@ -191,6 +305,18 @@ export function isSelectionContext(value: unknown): value is SelectionContext {
   const record = value as Record<string, unknown>;
   const artifact = record.artifact as Record<string, unknown> | undefined;
   const selection = record.selection as Record<string, unknown> | undefined;
+  const edit = record.edit as Record<string, unknown> | undefined;
+  if (
+    edit !== undefined &&
+    !(
+      edit &&
+      typeof edit === "object" &&
+      typeof edit.editId === "string" &&
+      (edit.kind === "element" || edit.kind === "unit" || edit.kind === "artifact")
+    )
+  ) {
+    return false;
+  }
   return (
     !!artifact &&
     typeof artifact.path === "string" &&

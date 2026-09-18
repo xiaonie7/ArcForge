@@ -7,6 +7,9 @@ import { containedImageRect, elementBoxPercent } from "./selectionState";
 /** Semantic context targets only: no drag handles or in-place document editing. */
 export function ElementOverlay(props: {
   imageSrc: string;
+  comparisonSrc?: string;
+  editing?: string;
+  highlighted?: string;
   label: string;
   elements: ArtifactElementsResult | null;
   selectedId: string | null;
@@ -53,11 +56,23 @@ export function ElementOverlay(props: {
           setNatural({ src: imageSrc, width: image.naturalWidth, height: image.naturalHeight });
         }}
       />
+      {props.comparisonSrc ? (
+        <img
+          src={props.comparisonSrc}
+          alt={`${label} — before`}
+          className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain"
+          draggable={false}
+        />
+      ) : null}
       {rect ? (
         <div className="pointer-events-none absolute" style={rect}>
           <button
             type="button"
-            className="pointer-events-auto absolute inset-0 rounded-sm focus-visible:outline-2 focus-visible:outline-primary"
+            className={cn(
+              "pointer-events-auto absolute inset-0 rounded-sm focus-visible:outline-2 focus-visible:outline-primary",
+              props.editing === "page" && "animate-pulse ring-2 ring-primary",
+              props.highlighted === "page" && "ring-2 ring-emerald-500",
+            )}
             aria-label={label}
             onClick={onSelectUnit}
             disabled={loading}
@@ -81,6 +96,8 @@ export function ElementOverlay(props: {
                       selected
                         ? "border-primary bg-primary/10 shadow-[0_0_0_1px_white]"
                         : "border-transparent hover:border-primary/70 hover:bg-primary/10",
+                      props.editing === element.id && "animate-pulse ring-2 ring-primary/60",
+                      props.highlighted === element.id && "ring-2 ring-emerald-500",
                     )}
                     style={box}
                     onClick={() => onSelect(element)}

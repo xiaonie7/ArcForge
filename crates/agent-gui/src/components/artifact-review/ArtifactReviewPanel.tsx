@@ -1,8 +1,9 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useLocale } from "../../i18n";
 import {
   type ArtifactChange,
+  type ArtifactEditScope,
   type ArtifactElementsResult,
   type ArtifactRef,
   type ArtifactUnit,
@@ -17,6 +18,11 @@ import { AlertTriangle, ChevronRight, Loader2, RefreshCw, X } from "../icons";
 import type { WorkspaceFilePreviewOpenRequest } from "../workspace-editor/WorkspaceFilePreviewOverlay";
 import { ElementOverlay } from "./ElementOverlay";
 import {
+  type EditPreviewSnapshot,
+  type InlineEditBridge,
+  InlineEditPopover,
+} from "./InlineEditPopover";
+import {
   elementSelection,
   reconcileReviewSelection,
   sameReviewArtifact,
@@ -27,13 +33,13 @@ import {
 const THUMBNAIL_WIDTH = 320;
 const PREVIEW_WIDTH = 1600;
 
-type UnitImage = { blobUrl: string; version: number; unitId: string };
+type UnitImage = { blobUrl: string; version: number; unitId: string; source?: string };
 type PanelProps = {
   request: WorkspaceFilePreviewOpenRequest;
   selection: SelectionContext | null;
   onSelect: (selection: SelectionContext | null) => void;
   onRequestClose: () => void;
-  reviewChat?: ReactNode;
+  inlineEdit?: InlineEditBridge;
 };
 
 function base64ToBlobUrl(data: string, mimeType: string) {
@@ -64,7 +70,7 @@ function ArtifactReviewView({
   selection,
   onSelect,
   onRequestClose,
-  reviewChat,
+  inlineEdit,
 }: PanelProps) {
   const { t } = useLocale();
   const adapter = useMemo(() => getArtifactAdapterForPath(request.path), [request.path]);
@@ -83,6 +89,10 @@ function ArtifactReviewView({
   const [previewLoading, setPreviewLoading] = useState(false);
   const [elements, setElements] = useState<ArtifactElementsResult | null>(null);
   const [versions, setVersions] = useState<Record<string, number>>({});
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [comparison, setComparison] = useState<EditPreviewSnapshot | null>(null);
+  const [editingScope, setEditingScope] = useState<ArtifactEditScope | null>(null);
+  const [lastEdit, setLastEdit] = useState<ArtifactChange["edit"]>();
   const panelRef = useRef<HTMLDivElement>(null);
   const unitsRef = useRef<ArtifactUnit[]>([]);
   const selectionRef = useRef(selection);
@@ -225,21 +235,35 @@ function ArtifactReviewView({
   useEffect(() => {
     if (!artifact) return;
     return subscribeArtifactChanges((change) => {
-      if (sameReviewArtifact(change, artifact)) void loadUnits(change);
+      if (sameReviewArtifact(change, artifact)) {
+        setLastEdit(change.edit);
+        void loadUnits(change);
+      }
     });
   }, [artifact, loadUnits]);
 
   useEffect(() => {
+    if (!lastEdit || previewLoading || inlineEdit?.runtime?.isSending) return;
+    const timer = window.setTimeout(() => setLastEdit(undefined), 4000);
+    return () => window.clearTimeout(timer);
+  }, [lastEdit, previewLoading, inlineEdit?.runtime?.isSending]);
+
+  useEffect(() => {
     const clearOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || !panelRef.current?.contains(event.target as Node)) return;
+      if (
+        event.defaultPrevented ||
+        event.key !== "Escape" ||
+        !panelRef.current?.contains(event.target as Node)
+      )
+        return;
       if (!selectionRef.current) return;
       event.preventDefault();
       event.stopPropagation();
       publishSelection(null);
       setNotice(null);
     };
-    window.addEventListener("keydown", clearOnEscape, true);
-    return () => window.removeEventListener("keydown", clearOnEscape, true);
+    window.addEventListener("keydown", clearOnEscape);
+    return () => window.removeEventListener("keydown", clearOnEscape);
   }, [publishSelection]);
 
   // Progressive cache: metadata reloads do not refetch images for unchanged units.
@@ -302,6 +326,7 @@ function ArtifactReviewView({
           blobUrl: base64ToBlobUrl(image.data, image.mimeType),
           version: activeVersion,
           unitId: unit.id,
+          source: `data:${image.mimeType};base64,${image.data}`,
         };
         if (previewRef.current) URL.revokeObjectURL(previewRef.current.blobUrl);
         previewRef.current = next;
@@ -365,6 +390,16 @@ function ArtifactReviewView({
             {t("artifactReview.subtitle").replace("{count}", String(units.length))}
           </div>
         </div>
+        {inlineEdit ? (
+          <button
+            type="button"
+            className="rounded-md px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-expanded={historyOpen}
+            onClick={() => setHistoryOpen((value) => !value)}
+          >
+            {t("artifactReview.editHistory")}
+          </button>
+        ) : null}
         <button
           type="button"
           className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-45"
@@ -407,7 +442,7 @@ function ArtifactReviewView({
         </div>
       ) : null}
 
-      <div className={cn("flex min-h-0 flex-1", reviewChat && "basis-1/2")}>
+      <div className="flex min-h-0 flex-1">
         <div className="artifact-review-navigator flex w-32 shrink-0 flex-col gap-2 overflow-y-auto border-r border-border bg-muted/20 p-2">
           {unitsLoading && units.length === 0 ? (
             <div className="flex flex-1 items-center justify-center">
@@ -460,10 +495,19 @@ function ArtifactReviewView({
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/25 p-3">
+          <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-muted/25 p-3">
             {currentPreview && activeUnit ? (
               <ElementOverlay
                 imageSrc={currentPreview.blobUrl}
+                comparisonSrc={comparison?.unitId === activeUnitId ? comparison.src : undefined}
+                editing={
+                  editingScope?.unitId === activeUnitId
+                    ? (editingScope.elementId ?? "page")
+                    : undefined
+                }
+                highlighted={
+                  lastEdit?.unitId === activeUnitId ? (lastEdit.elementId ?? "page") : undefined
+                }
                 label={activeUnit.label}
                 elements={currentElements}
                 selectedId={
@@ -480,6 +524,24 @@ function ArtifactReviewView({
               />
             ) : previewLoading ? (
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            ) : null}
+            {inlineEdit ? (
+              <InlineEditPopover
+                artifact={artifact}
+                adapter={adapter}
+                selection={ownSelection}
+                elements={currentElements}
+                bridge={inlineEdit}
+                capturePreview={() =>
+                  currentPreview?.source
+                    ? { unitId: currentPreview.unitId, src: currentPreview.source }
+                    : null
+                }
+                onCompare={setComparison}
+                onActivity={setEditingScope}
+                historyOpen={historyOpen}
+                onHistoryClose={() => setHistoryOpen(false)}
+              />
             ) : null}
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 border-t border-border bg-muted/35 px-2 py-1 text-xs text-muted-foreground">
@@ -553,11 +615,6 @@ function ArtifactReviewView({
           </div>
         </div>
       </div>
-      {reviewChat ? (
-        <div className="flex min-h-0 flex-1 basis-1/2 flex-col border-t border-border">
-          {reviewChat}
-        </div>
-      ) : null}
     </div>
   );
 }

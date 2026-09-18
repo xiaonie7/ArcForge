@@ -99,6 +99,8 @@ macro_rules! app_invoke_handler {
             commands::office_runtime::presentation_preview_page,
             commands::office_runtime::presentation_units,
             commands::office_runtime::presentation_elements,
+            commands::office_runtime::presentation_selection_context,
+            commands::office_runtime::presentation_edit_history,
             // Subagent worktrees
             commands::subagent_worktree::subagent_worktree_create,
             commands::subagent_worktree::subagent_worktree_status,

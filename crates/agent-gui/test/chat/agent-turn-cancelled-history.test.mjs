@@ -103,6 +103,9 @@ const runtimeEnvironmentSnapshot = {
 let runtimeEnvironmentResolveCalls = 0;
 let runnerRuntimeEnvironment = null;
 let registryRuntimeEnvironment = null;
+let runnerContext = null;
+let registryEditScope = null;
+const editScope = { editId: "inline-1", kind: "element", artifact: { artifactType: "pptx", workdir: "C:/workspace", path: "deck.pptx" }, unitId: "p-02", elementId: "title", manifestPath: "deck.json" };
 
 const loader = createTsModuleLoader({
   mocks: {
@@ -112,6 +115,7 @@ const loader = createTsModuleLoader({
       // real runner in agent-runner.test.mjs.
       async runAssistantWithTools(params) {
         runnerRuntimeEnvironment = params.runtimeEnvironment;
+        runnerContext = params.context;
         params.onTurnStart?.(1);
         params.onToolCall?.(parentToolCall, 1);
         params.onToolCall?.(cardToolCall, 1);
@@ -145,6 +149,7 @@ const loader = createTsModuleLoader({
     [builtinRegistryPath]: {
       async buildBuiltinToolRegistry(params) {
         registryRuntimeEnvironment = params.runtimeEnvironment;
+        registryEditScope = params.editScope;
         return {
           tools: [],
           async executeToolCall() {
@@ -214,6 +219,7 @@ test("agent turn preserves suppressed parent Agent trace for cancellation persis
     },
     selectedModel: { customProviderId: "codex", model: "gpt-5" },
     effectiveWorkdir: "C:/workspace",
+    editScope,
     effectiveSkillsEnabled: false,
     showSilentMemoryExtraction: false,
     agentTemplates: [],
@@ -289,4 +295,8 @@ test("agent turn preserves suppressed parent Agent trace for cancellation persis
   assert.equal(runtimeEnvironmentResolveCalls, 1);
   assert.equal(registryRuntimeEnvironment, runtimeEnvironmentSnapshot);
   assert.equal(runnerRuntimeEnvironment, runtimeEnvironmentSnapshot);
+  assert.equal(registryEditScope, editScope);
+  assert.match(runnerContext.systemPrompt, /Scoped Inline Edit/);
+  assert.match(runnerContext.systemPrompt, /slide_id="p-02", element_id="title"/);
+  assert.match(runnerContext.systemPrompt, /SCOPE_TOO_NARROW/);
 });

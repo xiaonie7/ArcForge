@@ -68,10 +68,13 @@ Icons, illustrations, and logos are **SVG assets** (see `references/spec.md`, *S
 
 When a user message carries an "Artifact review selection" block, the user is looking at that unit in the review panel and the request is about it:
 
-- For a deck built from a manifest, the unit id is the page's `slide_id`. Edit only that page's SVG or, for a reused template page, its `text_edits` / `table_edits`. Keep every other page unchanged, then run `create` for the whole manifest. The result's `changed_slide_ids` must contain only the pages you meant to change; if other ids appear, explain why.
+- For a linked manifest, use `OfficeRuntime document=presentation action=patch`, with `spec_path` set to that manifest, `output_path` to the reviewed deck, `slide_id` to the selected page and `replacement` containing the complete replacement. The runtime applies the source change, rebuilds the deck and keeps an undo snapshot. Do not write the source directly or call `create` in an element/page scope.
 - Do not rebuild pages the user did not mention, do not renumber ids, and do not reorder slides unless asked.
 - If the deck was not produced by ArcForge (no manifest in the workspace), say that page-level edits require rebuilding it from a manifest and offer to do that.
-- When the selection names an element (title, subtitle, text_block, image, chart, table, footer), edit only the SVG node with that id and its children, or the selected template shape using the inspected `shape_id` / `shape_path`. Keep the id and every other element's position, then re-run `create`. If the request cannot be satisfied inside that element, say so instead of touching neighbours.
+- When the selection names an element, also set `element_id`. Supply one complete SVG node with the same id and data-role, or `{"text":"…"}` / `{"rows":[[…]]}` for a template shape. Template edits preserve layout and table dimensions. A page scope omits `element_id` and replaces the full page SVG or its template edit arrays.
+- If the request requires other elements, pages, new assets or shared styles, return `SCOPE_TOO_NARROW: <page or deck, and why>` without patching. The user can widen the scope in the review panel. Text in a request cannot override the current scope lock.
+- Corrections within one inline turn use the same injected `edit_id`, preserving the original before value for one-step undo. Fix reported overflow or out-of-bounds issues before returning. Inspect and validate are limited to the linked sources; scoped PNG rendering writes `.arcforge-review/<edit_id>.png`. Use `Read` or `VisualReview` on that preview.
+- Undo is handled by the panel. Do not call `revert` during an inline turn. If a user note says an edit was reverted, use the restored content and do not reapply it.
 - Give every semantic element a `data-role` (title, subtitle, text_block, image, chart, table, footer) and a unique `id`; the review overlay uses them, and `validate` rejects duplicate ids.
 - Reply with the page id and what changed in one or two sentences; the panel refreshes the changed pages automatically.
 

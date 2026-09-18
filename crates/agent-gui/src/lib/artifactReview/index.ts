@@ -15,6 +15,8 @@ export function isReviewableArtifactPath(path: string) {
   return getArtifactAdapterForPath(path) !== null;
 }
 
+export * from "./editScope";
 export * from "./events";
+export * from "./inlineEdit";
 export * from "./session";
 export * from "./types";
