@@ -36,13 +36,14 @@ function createHarness(options = {}) {
   });
   const { createVisualReviewTools } = loader.loadModule("src/lib/tools/visualReviewTools.ts");
   const review = {
-    providerId: "codex",
+    providerId: options.providerId ?? "codex",
     model: options.model ?? "gpt-5",
     source: options.source ?? "configured",
     runtime: {
       baseUrl: "https://api.openai.com/v1",
       apiKey: "key",
       requestFormat: "openai-completions",
+      ...options.runtime,
     },
   };
   const bundle = createVisualReviewTools({
@@ -53,6 +54,7 @@ function createHarness(options = {}) {
       ...(options.input ? { resolveModelInput: () => options.input } : {}),
       async complete(params) {
         completions.push(params);
+        if (options.error) throw new Error(options.error);
         return {
           role: "assistant",
           content: [{ type: "text", text: options.answer ?? "p-02: title overlaps the card. FIX" }],
@@ -126,7 +128,11 @@ test("VisualReview refuses text-only models instead of pretending to look", asyn
 });
 
 test("VisualReview recognizes GLM-5.3-Flash through the runtime model factory", async () => {
-  const { bundle, completions } = createHarness({ model: "glm-5.3-flash" });
+  const { bundle, completions } = createHarness({
+    model: "glm-5.3-flash",
+    providerId: "zhipu",
+    runtime: { baseUrl: "https://open.bigmodel.cn/api/paas/v4", reasoning: "off" },
+  });
   const result = await bundle.executeToolCall({
     type: "toolCall",
     id: "call-glm-vision",
@@ -143,10 +149,35 @@ test("VisualReview recognizes GLM-5.3-Flash through the runtime model factory", 
   assert.equal(completions.length, 1);
   assert.equal(completions[0].model, "glm-5.3-flash");
   assert.equal(completions[0].runtime.requestFormat, "openai-completions");
+  assert.equal(completions[0].runtime.reasoning, "low");
   assert.equal(
     completions[0].context.messages[0].content.filter((block) => block.type === "image").length,
     2,
   );
+});
+
+test("VisualReview preserves a supported thinking level for always-on models", async () => {
+  const { bundle, completions } = createHarness({
+    model: "glm-5.3-flash", providerId: "zhipu",
+    runtime: { baseUrl: "https://open.bigmodel.cn/api/paas/v4", reasoning: "high" },
+  });
+  const result = await bundle.executeToolCall({
+    type: "toolCall", id: "thinking", name: "VisualReview",
+    arguments: { paths: ["deck/cover.png"], question: "Is the title readable?" },
+  });
+  assert.equal(result.isError, false);
+  assert.equal(completions[0].runtime.reasoning, "high");
+});
+
+test("VisualReview reports the provider failure without marking images reviewed", async () => {
+  const { bundle } = createHarness({ error: "Image exceeds provider size limit" });
+  const result = await bundle.executeToolCall({
+    type: "toolCall", id: "error", name: "VisualReview",
+    arguments: { paths: ["deck/cover.png"], question: "Any overlaps?" },
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.reviewed, false);
+  assert.match(result.content[0].text, /Image exceeds provider size limit/);
 });
 
 test("VisualReview rejects SVG inputs and points at the raster preview", async () => {

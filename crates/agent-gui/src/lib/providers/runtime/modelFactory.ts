@@ -206,6 +206,7 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   if (isOfficialOpenAIBaseUrl(compatBaseUrl)) return undefined;
 
   const normalizedModelId = params.modelId.trim().toLowerCase();
+  const isGlm53 = normalizedModelId === "glm-5.3" || normalizedModelId === "glm-5.3-flash";
   const isXiaomiMimo = isXiaomiMimoModelId(normalizedModelId);
   const isZai = compatBaseUrl.includes("api.z.ai");
   const isZhipu = compatBaseUrl.includes("open.bigmodel.cn");
@@ -263,19 +264,34 @@ function resolveCodexOpenAICompletionsOverrides(params: {
   } else if (isOpenRouter) {
     compat.thinkingFormat = "openrouter";
   }
+  // GLM-5.3 models require thinking and accept only low/high/max. The bundled
+  // catalog may predate them: https://github.com/zai-org/GLM-5/blob/main/README_zh.md
+  if (isGlm53) compat.supportsReasoningEffort = true;
   return {
     compat,
-    ...(isGroq && normalizedModelId === "qwen/qwen3-32b"
+    ...(isGlm53
       ? {
           thinkingLevelMap: {
-            minimal: "default",
-            low: "default",
-            medium: "default",
-            high: "default",
-            xhigh: "default",
+            off: null,
+            minimal: null,
+            low: "low",
+            medium: null,
+            high: "high",
+            xhigh: null,
+            max: "max",
           },
         }
-      : {}),
+      : isGroq && normalizedModelId === "qwen/qwen3-32b"
+        ? {
+            thinkingLevelMap: {
+              minimal: "default",
+              low: "default",
+              medium: "default",
+              high: "default",
+              xhigh: "default",
+            },
+          }
+        : {}),
   };
 }
 

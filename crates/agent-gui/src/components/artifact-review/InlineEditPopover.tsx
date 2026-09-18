@@ -101,6 +101,7 @@ export function InlineEditPopover({
   const [failure, setFailure] = useState<string | null>(null);
   const [records, setRecords] = useState<ArtifactEditRecord[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [contextRevision, setContextRevision] = useState(0);
   const [capability, setCapability] = useState<{
     key: string;
     context?: ScopedEditContext;
@@ -172,7 +173,7 @@ export function InlineEditPopover({
     return () => {
       disposed = true;
     };
-  }, [adapter, artifact, contextKey, kind, running, selection]);
+  }, [adapter, artifact, contextKey, kind, running, selection, contextRevision]);
   useEffect(() => {
     onActivity(running ? (pending?.scope ?? null) : null);
   }, [running, pending, onActivity]);
@@ -702,8 +703,16 @@ export function InlineEditPopover({
                       : !bridge.isAgentMode
                         ? label("请切换到 Agent 模式后修改。", "Switch to Agent mode to edit.")
                         : label("编辑上下文暂不可用。", "Edit context is unavailable.")}
-                  {bridge.onRetry ? (
-                    <button type="button" className={button} onClick={bridge.onRetry}>
+                  {contextError || bridge.onRetry ? (
+                    <button
+                      type="button"
+                      className={button}
+                      onClick={() => {
+                        setCapability(null);
+                        setContextRevision((value) => value + 1);
+                        if (!contextError) bridge.onRetry?.();
+                      }}
+                    >
                       {label("重试", "Retry")}
                     </button>
                   ) : null}

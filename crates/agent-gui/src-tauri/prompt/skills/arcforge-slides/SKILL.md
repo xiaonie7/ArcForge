@@ -28,7 +28,7 @@ Work through five stages. Each stage writes one reviewable file into the workspa
 ## Two modes
 
 - **No template.** Use `mode: "blank"` and design freely on the 16:9 canvas with one of the built-in style packs or a palette the user describes.
-- **Template provided.** When the user attaches a `.pptx`, first copy it into the workspace, `inspect` it, and render the relevant original pages. Use `mode: "template"` with `template` pointing at that copy (or pass it as `input_path`). Prefer `source_slide` to preserve the chosen original page's composition, pictures, groups, native tables, layout and theme. If the user only wants the company colors, extract the palette and stay in blank mode.
+- **Template provided.** When the user attaches a `.pptx`, first copy it into the workspace, `inspect` it, and render the relevant original pages. Use `mode: "template"` with `template` pointing at that copy (or pass it as `input_path`). Prefer `source_slide` to preserve the chosen original page's composition, pictures, groups, native tables, layout and theme. If the user only wants the company colors, extract the palette and stay in blank mode. Keep the template, manifest, page SVGs, assets, `.arcforge-build.json`, and `.arcforge-sources/` after delivery: they are source files needed for inline editing and undo, not temporary files to delete.
 
 ## Template reuse workflow
 

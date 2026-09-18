@@ -1506,8 +1506,10 @@ def load_deck_manifest(
         seen_ids.add(slide_id)
         source_slide = entry.get("source_slide")
         if "source_slide" in entry:
-            if type(source_slide) is not int or source_slide < 1 or mode != "template":
+            if type(source_slide) is not int or source_slide < 1:
                 raise PresentationError(slide_id + ": source_slide must be a positive template page number")
+            if mode != "template":
+                raise PresentationError(slide_id + ": source_slide requires template mode; restore the original template and pass --template")
         svg_path = None
         if "svg" in entry:
             raw_svg = entry["svg"]
@@ -3014,6 +3016,30 @@ def read_build_stamp(spec_dir: Path) -> Dict[str, str]:
     return read_build_stamp_record(spec_dir)["slides"]
 
 
+def preserve_template_source(spec_dir: Path, template: Path) -> Path:
+    """Keep the original template available after agents clean up temporary inputs."""
+    content = template.read_bytes()
+    directory = spec_dir / ".arcforge-sources"
+    if not directory.resolve().is_relative_to(spec_dir.resolve()):
+        raise PresentationError("Template source cache escapes the manifest directory")
+    directory.mkdir(exist_ok=True)
+    snapshot = directory / (hashlib.sha256(content).hexdigest() + ".pptx")
+    if snapshot.is_symlink():
+        raise PresentationError("Template source snapshot must not be a symbolic link")
+    if snapshot.is_file() and snapshot.read_bytes() == content:
+        return snapshot
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+        os.replace(temporary, snapshot)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
+    return snapshot
+
+
 def write_build_stamp(
     spec_path: Path,
     output_path: Path,
@@ -3021,13 +3047,18 @@ def write_build_stamp(
     shared_fingerprint: Optional[str] = None,
     template: Optional[Path] = None,
     strict: bool = False,
+    template_snapshot: Optional[Path] = None,
 ) -> None:
     stamp = spec_path.parent / BUILD_STAMP_NAME
+    # Template preservation is required for editable output, even for a first build.
+    if template is not None and template_snapshot is None:
+        template_snapshot = preserve_template_source(spec_path.parent, template)
     payload = {
         "schema": 2,
         "spec": str(spec_path),
         "output": str(output_path),
         "template": str(template) if template else None,
+        "template_snapshot": str(template_snapshot) if template_snapshot else None,
         "shared": shared_fingerprint,
         "slides": dict(fingerprints),
     }
@@ -4151,14 +4182,17 @@ def run_create(args: argparse.Namespace) -> Dict[str, Any]:
     spec = apply_template_override(spec, getattr(args, "template", None))
     if is_svg_deck_spec(spec):
         presentation, deck = create_svg_deck(spec, spec_path.parent, resolve_asset_cache(args))
-        atomic_save(presentation, output_path, args.force)
         template = (spec_path.parent / Path(spec["template"]).expanduser()).resolve() if spec.get("template") else None
+        template_snapshot = preserve_template_source(spec_path.parent, template) if template else None
+        atomic_save(presentation, output_path, args.force)
         write_build_stamp(
             spec_path,
             output_path,
             deck.pop("slide_fingerprints", {}),
             deck.pop("shared_fingerprint", None),
             template,
+            strict=True,
+            template_snapshot=template_snapshot,
         )
         return {
             "action": "created",

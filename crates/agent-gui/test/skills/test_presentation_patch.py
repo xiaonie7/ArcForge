@@ -318,6 +318,40 @@ class TemplatePatchTests(unittest.TestCase):
         self.assertEqual(context["element"]["template_value"], "Original title")
         self.assertEqual(context["element"]["current_edit"]["text"], "Quarterly")
 
+    def test_template_snapshot_supports_context_patch_and_undo_after_source_cleanup(self):
+        # Real-world manifest: source_slide with its template supplied only via inputPath.
+        spec = json.loads(self.spec.read_text(encoding="utf-8"))
+        spec.pop("mode")
+        spec.pop("template")
+        self.spec.write_text(json.dumps(spec), encoding="utf-8")
+        template = self.root / "template.pptx"
+        p.run_create(Args(spec=str(self.spec), output=str(self.output), template=str(template), force=True))
+        stamp = json.loads((self.root / p.BUILD_STAMP_NAME).read_text(encoding="utf-8"))
+        snapshot = Path(stamp["template_snapshot"])
+        self.assertEqual(snapshot.read_bytes(), template.read_bytes())
+        self.assertEqual(snapshot.parent.resolve(), (self.root / ".arcforge-sources").resolve())
+        template.unlink()
+        context = p.run_selection_context(Args(spec=str(self.spec), slide_id="cover", template=str(snapshot), workspace=str(self.root)))
+        self.assertEqual(context["replacement_kind"], "template_page")
+        self.assertEqual(context["mode"], "template")
+        replacement = self.root / "r.json"
+        replacement.write_text(json.dumps({"text": "Edited after cleanup"}), encoding="utf-8")
+        result = p.run_patch(Args(spec=str(self.spec), output=str(self.output), template=str(snapshot),
+                                  slide_id="cover", element_id="headline", edit_id="saved-template", replacement=str(replacement)))
+        self.assertEqual(result["deck"]["changed_slide_ids"], ["cover"])
+        self.assertFalse(result["deck"]["shared_inputs_changed"])
+        self.assertEqual(p.Presentation(self.output).slides[0].shapes[0].text, "Edited after cleanup")
+        p.run_patch(Args(spec=str(self.spec), output=str(self.output), template=str(snapshot), revert="saved-template"))
+        self.assertEqual(p.Presentation(self.output).slides[0].shapes[0].text, "Quarterly")
+        self.assertEqual(len(list(snapshot.parent.glob("*.pptx"))), 1)
+
+    def test_missing_template_mode_is_not_reported_as_an_invalid_page_number(self):
+        spec = json.loads(self.spec.read_text(encoding="utf-8"))
+        spec.pop("mode")
+        spec.pop("template")
+        with self.assertRaisesRegex(p.PresentationError, "source_slide requires template mode"):
+            p.load_deck_manifest(spec, self.root)
+
 
 if __name__ == "__main__":
     unittest.main()

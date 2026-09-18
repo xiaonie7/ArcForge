@@ -609,6 +609,21 @@ test("GLM-5.3-Flash image inference does not apply to other GLM-5 models", () =>
   }
 });
 
+test("GLM-5.3 thinking levels and wire payload work on official and relay endpoints", async () => {
+  for (const baseUrl of ["https://open.bigmodel.cn/api/paas/v4", "https://api.z.ai/api/paas/v4", "https://relay.example.test/v1"]) {
+    const model = providers.createModelFromConfig("zhipu", "glm-5.3-flash", baseUrl, "openai-completions");
+    assert.equal(providers.isThinkingAlwaysOnForModel("zhipu", model.id, baseUrl), true);
+    assert.deepEqual(providers.getAvailableThinkingLevelsForModel("zhipu", model.id, baseUrl), ["low", "high", "max"]);
+    for (const reasoning of ["low", "max"]) {
+      const payload = await captureArcForgeOpenAIPayload(model, {
+        messages: [{ role: "user", content: "Check slide", timestamp: 1 }],
+      }, { reasoning });
+      assert.equal(payload.reasoning_effort, reasoning, baseUrl);
+      assert.notEqual(payload.thinking?.type, "disabled", baseUrl);
+    }
+  }
+});
+
 test("GLM-5.3-Flash Chat Completions wire payload retains image blocks", async () => {
   const model = providers.createModelFromConfig(
     "codex",

@@ -1,5 +1,24 @@
 # 更新日志
 
+## v0.3.10
+
+本次发布为 **修复版本**，聚焦三类问题：模板 PPT 源文件被清理后内联编辑/撤销失效、GLM-5.3 系列模型的思考等级映射，以及视觉评审强制关闭 thinking 导致部分模型请求失败。
+
+### 修复
+
+- **模板源快照持久化（arcforge-slides / OfficeRuntime）**：构建即把原始模板内容快照到清单旁 `.arcforge-sources/<sha256>.pptx`（原子写入、防符号链接逃逸），构建记录（`.arcforge-build.json`）新增 `template_snapshot` 字段。原模板被删除后，presentation patch 与一步撤销自动回退到快照源继续工作；原模板与快照同时缺失时给出明确的中文报错提示。SKILL.md 明确要求交付后保留模板、清单、页面 SVG、资产与 `.arcforge-build.json` / `.arcforge-sources/`，它们是内联编辑与撤销的源文件而非临时文件。清单校验放宽 `template` 必填：作用域编辑按链接源推导模板，`source_slide` 在非模板模式下给出"需恢复原模板并传 --template"的明确错误，而非笼统的页码报错。
+- **GLM-5.3 思考等级映射（modelFactory）**：`glm-5.3` / `glm-5.3-flash` 强制开启思考且仅接受 low / high / max 三档：声明 `supportsReasoningEffort`，thinking 级别映射 off/minimal/medium/xhigh 归一为 null 并从请求中剔除。
+- **视觉评审按模型能力选择思考档位（visualReviewTools）**：不再对所有模型硬编码 `reasoning: "off"`，改为解析模型实际支持的思考档位——支持 off 则维持关闭，否则回落到模型首选或首个支持档位，修复 GLM-5.3-Flash 等无法关闭 thinking 的视觉模型请求被拒。
+- **内联编辑上下文重试（InlineEditPopover）**：编辑上下文加载失败时也显示"重试"按钮，点击后清除失效的能力快照并强制刷新上下文（`contextRevision`），不再需要重开弹窗。
+
+### 测试
+
+- `office_runtime.rs` 新增模板快照回退用例（原模板删除后 patch 使用 `.arcforge-sources` 快照、manifest 缺 template 字段同样可用）；`test_presentation_patch.py`、`request-options.test.mjs`、`visual-review-tools.test.mjs` 补充对应断言。
+
+### 其他
+
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.10。
+
 ## v0.3.9
 
 本次发布为 **功能版本**，Artifact Review 进入第三期：审阅面板内选中元素或整页后可直接发起"就地修改"，模型在一次受锁定的内联回合里只改选区目标、其余页面保持不动，并且每一步都可用面板一键撤销。

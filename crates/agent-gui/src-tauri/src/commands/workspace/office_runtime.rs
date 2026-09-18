@@ -531,7 +531,7 @@ fn validate_svg_deck_manifest(
             return Err("specPath stage must be plan or design".to_string());
         }
     }
-    if let Some(template) = value.get("template") {
+    if let Some(template) = value.get("template").filter(|_| !template_override) {
         let Some(template) = template.as_str() else {
             return Err("specPath template must be a workspace .pptx path".to_string());
         };
@@ -1130,11 +1130,6 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
                     "Presentation patch requires a schema_version 3 SVG deck manifest".to_string(),
                 );
             }
-            let template_override = input
-                .input_path
-                .as_deref()
-                .is_some_and(|path| !path.trim().is_empty());
-            let asset_cache = validate_presentation_assets(&spec, &workspace, template_override)?;
             // A patch rewrites the deck that was built from this manifest; it never creates a new file.
             let output = resolve_existing_path(
                 &workspace,
@@ -1150,6 +1145,7 @@ fn prepare_invocation(input: OfficeRuntimeRequest) -> Result<PreparedInvocation,
             if !same_file(&link.spec, &spec) {
                 return Err("Presentation patch must use the manifest linked to this output deck".to_string());
             }
+            let asset_cache = validate_presentation_assets(&spec, &workspace, link.template.is_some())?;
             push_path_argument(&mut arguments, "--workspace", workspace.clone());
             push_path_argument(&mut arguments, "--spec", spec);
             push_path_argument(&mut arguments, "--output", output);
@@ -3111,11 +3107,19 @@ fn manifest_from_stamp(stamp_path: &Path, deck: &Path, slide_id: Option<&str>) -
         return None;
     }
     let stamp_dir = stamp_path.parent()?;
-    let template = value
+    let original_template = value
         .get("template")
         .and_then(serde_json::Value::as_str)
-        .map(PathBuf::from)
-        .filter(|path| path.is_file());
+        .map(PathBuf::from);
+    let snapshot = value
+        .get("template_snapshot")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    let template = original_template.as_ref().filter(|path| path.is_file()).cloned()
+        .or_else(|| snapshot.as_ref().filter(|path| path.is_file()).cloned())
+        // Preserve missing paths so the caller reports the missing source, not a page-number error.
+        .or(original_template)
+        .or(snapshot);
     if let Some(spec) = value.get("spec").and_then(serde_json::Value::as_str) {
         let spec = PathBuf::from(spec);
         if spec.is_file() && manifest_declares_slide(&spec, slide_id) {
@@ -3148,6 +3152,12 @@ fn find_deck_manifest(workspace: &Path, deck: &Path, slide_id: Option<&str>) -> 
         link.spec = std::fs::canonicalize(&link.spec).map_err(|error| error.to_string())?;
         ensure_within_workspace(&link.spec, workspace, "linked manifest")?;
         if let Some(template) = link.template.as_mut() {
+            if !template.is_file() {
+                return Err(format!(
+                    "用于编辑的原始 PPT 模板已缺失：{}。请将生成时使用的模板恢复到此路径后重试。",
+                    template.display()
+                ));
+            }
             *template = std::fs::canonicalize(&template).map_err(|error| error.to_string())?;
             ensure_within_workspace(template, workspace, "linked template")?;
         }
@@ -4390,6 +4400,49 @@ mod tests {
         )
         .expect_err("missing file must be rejected");
         assert!(error.contains("does not exist"), "{error}");
+    }
+
+    #[test]
+    fn presentation_scoped_edit_uses_saved_template_after_original_is_deleted() {
+        let temp = tempfile::tempdir().expect("workspace");
+        let workspace = std::fs::canonicalize(temp.path()).unwrap();
+        let deck = workspace.join("deck.pptx");
+        let spec = workspace.join("deck.json");
+        let original = workspace.join("deleted-template.pptx");
+        let snapshot = workspace.join(".arcforge-sources").join("saved.pptx");
+        write_review_pptx(&deck);
+        std::fs::write(&spec, r#"{"schema_version":3,"mode":"template","template":"deleted-template.pptx","slides":[{"slide_id":"cover","source_slide":1}]}"#).unwrap();
+        let mut stamp = serde_json::json!({"schema":2,"spec":spec,"output":deck,"template":original});
+        let stamp_path = workspace.join(BUILD_STAMP_FILE_NAME);
+        std::fs::write(&stamp_path, stamp.to_string()).unwrap();
+        let error = find_deck_manifest(&workspace, &deck, Some("cover")).err().expect("missing source");
+        assert!(error.contains("原始 PPT 模板已缺失"), "{error}");
+        assert!(error.contains("deleted-template.pptx"), "{error}");
+
+        std::fs::create_dir(snapshot.parent().unwrap()).unwrap();
+        write_review_pptx(&snapshot);
+        stamp["template_snapshot"] = serde_json::json!(snapshot);
+        std::fs::write(&stamp_path, stamp.to_string()).unwrap();
+        let link = find_deck_manifest(&workspace, &deck, Some("cover")).expect("saved source");
+        assert!(same_file(link.template.as_deref().unwrap(), &snapshot));
+
+        for manifest_has_template in [true, false] {
+            if !manifest_has_template {
+                std::fs::write(&spec, r#"{"schema_version":3,"slides":[{"slide_id":"cover","source_slide":1}]}"#).unwrap();
+            }
+            let mut request = presentation_request(&workspace, "patch");
+            request.spec_path = Some("deck.json".to_string());
+            request.output_path = Some("deck.pptx".to_string());
+            request.edit = Some(PresentationEditRequest {
+                slide_id: Some("cover".to_string()), element_id: None,
+                replacement: Some(r#"{"text_edits":[]}"#.to_string()),
+                edit_id: Some("saved-source".to_string()), revert: None,
+            });
+            let invocation = prepare_invocation(request).expect("patch uses the linked template before validation");
+            let args = invocation.arguments.iter().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+            let flag = args.iter().position(|arg| arg == "--template").expect("template flag");
+            assert!(same_file(Path::new(&args[flag + 1]), &snapshot));
+        }
     }
 
     /// Manual probe: `ARCFORGE_PPTX_PREVIEW_PROBE=<workspace>/<deck.pptx> cargo test -- --ignored

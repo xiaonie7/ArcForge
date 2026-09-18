@@ -6,6 +6,7 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 import {
@@ -57,10 +58,26 @@ type ReadImageResponse = {
 type VisualReviewDeps = {
   complete: typeof completeAssistantMessage;
   resolveModelInput: (config: VisualReviewModelConfig) => readonly string[];
+  resolveReasoning: (config: VisualReviewModelConfig) => ProviderRuntimeConfig["reasoning"];
 };
 
 const defaultDeps: VisualReviewDeps = {
   complete: completeAssistantMessage,
+  resolveReasoning: (config) => {
+    const model = createModelFromConfig(
+      config.providerId,
+      config.model,
+      config.runtime.baseUrl,
+      config.runtime.requestFormat,
+      config.runtime.modelConfig,
+      config.runtime.baseUrl,
+    );
+    const levels = getSupportedThinkingLevels(model);
+    // Some vision models (including GLM-5.3-Flash) cannot disable thinking.
+    if (levels.includes("off")) return "off";
+    const preferred = config.runtime.reasoning;
+    return preferred && levels.includes(preferred) ? preferred : levels[0];
+  },
   resolveModelInput: (config) =>
     createModelFromConfig(
       config.providerId,
@@ -268,7 +285,7 @@ export function createVisualReviewTools(params: {
         model: review.model,
         runtime: {
           ...review.runtime,
-          reasoning: "off",
+          reasoning: deps.resolveReasoning(review),
           promptCachingEnabled: false,
           nativeWebSearchEnabled: false,
         },
