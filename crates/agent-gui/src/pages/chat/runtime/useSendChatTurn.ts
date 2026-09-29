@@ -1,3 +1,4 @@
+import { resolveMemoryAccessContext } from "../../../lib/memory/api";
 import type { Context, UserMessage } from "@earendil-works/pi-ai";
 import { invoke } from "@tauri-apps/api/core";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
@@ -307,6 +308,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
 
     const gatewayBridgeRequest = overrides?.gatewayBridgeRequestOverride ?? null;
     const principal = gatewayBridgeRequest?.principal;
+    const memoryContext = resolveMemoryAccessContext(conversationId, principal);
     const permissionPolicy = gatewayBridgeRequest?.permissionProfile
       ? normalizeChannelPermissionPolicy(gatewayBridgeRequest.permissionProfile.policy)
       : null;
@@ -1309,7 +1311,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
 
     if (effectiveMemoryEnabled) {
       try {
-        memoryPrompt = await runWithinChannelDeadline(buildMemoryOverviewSection(effectiveWorkdir));
+        memoryPrompt = await runWithinChannelDeadline(buildMemoryOverviewSection(effectiveWorkdir, memoryContext));
       } catch (error) {
         if (channelDeadline?.isTimedOut()) {
           await failBeforeRuntimeStart(error, "读取 Memory 概览超时");
@@ -1462,6 +1464,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
             memoryEnabled: effectiveMemoryEnabled,
+            memoryContext,
             effectiveWorkdir,
             editScope,
             allowEmptyWorkdir: workdirResolution.allowEmptyWorkdir,
@@ -1577,6 +1580,7 @@ export function useSendChatTurn(params: UseSendChatTurnParams) {
             onMemoryExtractionModelFailure: handleMemoryExtractionModelFailure,
             memoryExtractionStatusText,
             memoryEnabled: effectiveMemoryEnabled,
+            memoryContext,
             sessionId,
             conversationId,
             conversationCwd,

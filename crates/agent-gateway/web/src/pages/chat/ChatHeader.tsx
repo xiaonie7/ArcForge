@@ -231,7 +231,10 @@ export const ChatHeader = memo(function ChatHeader(props: {
                       onChange={(event) => setModelSearch(event.target.value)}
                       placeholder={t("chat.searchModel")}
                       className="min-w-0 flex-1 bg-transparent text-xs text-foreground outline-none placeholder:text-muted-foreground/60"
-                      onKeyDown={(event) => event.stopPropagation()}
+                      onKeyDown={(event) => {
+                        // Let Popover dismiss on Escape and restore trigger focus.
+                        if (event.key !== "Escape") event.stopPropagation();
+                      }}
                     />
                   </div>
                 </div>

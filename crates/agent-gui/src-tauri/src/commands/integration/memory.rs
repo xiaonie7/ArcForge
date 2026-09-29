@@ -1,21 +1,48 @@
 use std::sync::Arc;
 
+use serde_json::Value;
 use tauri::State;
 
 use crate::{
     commands::chat_history,
     services::memory::{
-        MemoryAcceptArgs, MemoryBatchArgs, MemoryBatchResponse, MemoryDeleteArgs,
-        MemoryDeleteProjectArgs, MemoryDeleteProjectResponse, MemoryListArgs, MemoryListResponse,
-        MemoryMutationResponse, MemoryOrganizeDueClaimArgs, MemoryOrganizeDueClaimResponse,
-        MemoryOrganizeRun, MemoryOrganizeRunClearHistoryResponse, MemoryOrganizeRunCreateArgs,
-        MemoryOrganizeRunCreateResponse, MemoryOrganizeRunListArgs, MemoryOrganizeRunListResponse,
-        MemoryOrganizeRunReadArgs, MemoryOrganizeRunUpdateArgs, MemoryOverviewResponse,
-        MemoryPathsInfo, MemoryQuotaSummaryArgs, MemoryQuotaSummaryResponse, MemoryReadArgs,
-        MemoryReadResponse, MemoryRecentRejectionsArgs, MemoryRecentRejectionsResponse,
-        MemorySearchArgs, MemorySearchResponse, MemoryStore, MemoryUpdateArgs, MemoryWriteArgs,
+        MemoryAcceptArgs, MemoryAccessContext, MemoryBatchArgs, MemoryBatchResponse,
+        MemoryDeleteArgs, MemoryDeleteProjectArgs, MemoryDeleteProjectResponse, MemoryListArgs,
+        MemoryListResponse, MemoryMutationResponse, MemoryOrganizeDueClaimArgs,
+        MemoryOrganizeDueClaimResponse, MemoryOrganizeRun, MemoryOrganizeRunClearHistoryResponse,
+        MemoryOrganizeRunCreateArgs, MemoryOrganizeRunCreateResponse, MemoryOrganizeRunListArgs,
+        MemoryOrganizeRunListResponse, MemoryOrganizeRunReadArgs, MemoryOrganizeRunUpdateArgs,
+        MemoryOverviewResponse, MemoryPathsInfo, MemoryQuotaSummaryArgs,
+        MemoryQuotaSummaryResponse, MemoryReadArgs, MemoryReadResponse, MemoryRecentRejectionsArgs,
+        MemoryRecentRejectionsResponse, MemorySearchArgs, MemorySearchResponse, MemorySpaceInfo,
+        MemoryStore, MemoryStoreRegistry, MemoryUpdateArgs, MemoryWriteArgs,
     },
 };
+
+/// WeCom calls carry a conversation reference, never a caller-selected owner
+/// or storage path. The registry resolves and authorizes the durable binding.
+#[tauri::command]
+pub async fn memory_scoped(
+    state: State<'_, Arc<MemoryStoreRegistry>>,
+    context: MemoryAccessContext,
+    command: String,
+    args: Value,
+) -> Result<Value, String> {
+    let registry = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || registry.execute(context, &command, args))
+        .await
+        .map_err(|e| format!("memory_scoped join 失败：{e}"))?
+}
+
+#[tauri::command]
+pub async fn memory_spaces_list(
+    state: State<'_, Arc<MemoryStoreRegistry>>,
+) -> Result<Vec<MemorySpaceInfo>, String> {
+    let registry = Arc::clone(&state);
+    tauri::async_runtime::spawn_blocking(move || registry.list_spaces())
+        .await
+        .map_err(|e| format!("memory_spaces_list join 失败：{e}"))?
+}
 
 #[tauri::command]
 pub async fn memory_list(

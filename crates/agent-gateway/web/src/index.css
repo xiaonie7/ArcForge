@@ -566,11 +566,6 @@
     @apply text-foreground/90;
   }
 
-  /* Hide the retained Streamdown caret without removing its inline slot. */
-  .chat-markdown--caret-off > *:last-child::after {
-    opacity: 0;
-  }
-
   /* Headings */
   .chat-markdown [data-streamdown="heading-1"] {
     @apply mb-2 mt-6 text-xl font-semibold tracking-tight text-foreground;

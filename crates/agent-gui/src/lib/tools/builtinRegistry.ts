@@ -3,6 +3,7 @@ import { homeDir } from "@tauri-apps/api/path";
 import { isRestrictedEditScope } from "../artifactReview/editScope";
 import type { ArtifactEditScope } from "../artifactReview/types";
 import type { RuntimeEnvironmentSnapshot, RuntimePlatform } from "../runtimePlatform";
+import { type MemoryAccessContext, resolveMemoryAccessContext } from "../memory/api";
 import type { PrincipalContext } from "../security/principalContext";
 import {
   type McpSettings,
@@ -213,6 +214,8 @@ type BuildBuiltinBaseToolRegistryParams = {
   /** Dedicated Memory capability gate for channel and unattended runs. */
   memoryEnabled?: boolean;
   memoryToolMode?: "rw" | "ro";
+  memoryContext?: MemoryAccessContext;
+  conversationId?: string;
   /** Frozen system-tool identifiers for this run; undefined preserves local behavior. */
   allowedSystemTools?: readonly string[];
   remoteWebTunnelsEnabled?: boolean;
@@ -410,6 +413,10 @@ async function buildBaseBuiltinToolBundles(params: BuildBuiltinBaseToolRegistryP
         createMemoryTools({
           workdir: params.workdir,
           mode: params.memoryToolMode ?? "rw",
+          conversationId: params.conversationId,
+          memoryContext: resolveMemoryAccessContext(
+            params.conversationId, params.principal, params.memoryContext,
+          ),
         }),
       );
     }

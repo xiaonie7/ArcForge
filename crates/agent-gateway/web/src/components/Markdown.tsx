@@ -448,11 +448,6 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
           "chat-markdown max-w-none break-words",
           MARKDOWN_EMBED_CLASSNAME,
           streaming ? "chat-markdown--streaming" : "chat-markdown--static",
-          // Streamdown's memo equality does not include `caret` in its check,
-          // so toggling the caret prop alone does not invalidate the render.
-          // Mirror the visibility into a className modifier to force a re-render
-          // that recomputes the inline `--streamdown-caret` style.
-          showCaret ? "chat-markdown--caret-on" : "chat-markdown--caret-off",
           className,
         )}
         plugins={streamdownPlugins}
@@ -464,7 +459,6 @@ export const Markdown = memo(function Markdown(props: MarkdownProps) {
         parseIncompleteMarkdown
         normalizeHtmlIndentation
         isAnimating={showCaret}
-        caret={streaming ? "block" : undefined}
         animated={false}
         linkSafety={{
           enabled: !readOnly,

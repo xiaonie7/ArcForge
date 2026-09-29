@@ -253,6 +253,7 @@ export function RemoteSection(props: SettingsSectionProps) {
 
     void invoke<GatewayRuntimeStatus>("gateway_status")
       .then((next) => {
+        if (!next) throw new Error("Gateway runtime status is unavailable");
         if (!cancelled) {
           setStatus(next);
         }
@@ -291,7 +292,7 @@ export function RemoteSection(props: SettingsSectionProps) {
     let dispose: (() => void) | null = null;
 
     void listen<GatewayRuntimeStatus>("gateway:status", (event) => {
-      if (!cancelled) {
+      if (!cancelled && event.payload) {
         setStatus(event.payload);
       }
     }).then((unlisten) => {

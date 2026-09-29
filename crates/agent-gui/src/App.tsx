@@ -38,7 +38,8 @@ import {
 } from "./lib/wecomPermissionProfile";
 import { ChatPage } from "./pages/ChatPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import type { SectionId } from "./pages/settings/types";
+import type { SectionId, SettingsRuntimeSources } from "./pages/settings/types";
+import { useSettingsFocus } from "./pages/settings/useSettingsFocus";
 
 function getDefaultContext(): Context {
   return {
@@ -136,7 +137,9 @@ function applyRuntimeSystemDefaults(settings: AppSettings, defaultWorkdir: strin
 
 export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<SectionId>("system");
+  const { backgroundRef, settingsSurfaceRef } = useSettingsFocus(settingsOpen);
+  const [settingsSection, setSettingsSection] = useState<SectionId>();
+  const [settingsRuntimeSources, setSettingsRuntimeSources] = useState<SettingsRuntimeSources | null>(null);
   const [openConversationRequest, setOpenConversationRequest] = useState<{
     id: string;
     sequence: number;
@@ -395,7 +398,7 @@ export default function App() {
   }, [setSettings]);
 
   const openSettings = useCallback(
-    (section: SectionId = "system") => {
+    (section?: SectionId) => {
       setSettingsSection(section);
       setSettingsOpen(true);
       setOverlay("entering");
@@ -411,6 +414,11 @@ export default function App() {
   );
 
   const closeSettings = useCallback(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setSettingsOpen(false);
+      setOverlay("closed");
+      return;
+    }
     setOverlay("leaving");
   }, []);
 
@@ -534,24 +542,31 @@ export default function App() {
         <CronPromptRunner settings={settings} />
         <AutomationRunToastHost />
         <MemoryOrganizerHost settings={settings} setSettings={setSettings} />
-        <AppErrorBoundary>
-          <ChatPage
-            settings={settings}
-            setSettings={setSettings}
-            getMcpSettings={getMcpSettings}
-            context={context}
-            setContext={setContext}
-            onOpenSettings={openSettings}
-            onToggleTheme={toggleTheme}
-            openConversationRequest={openConversationRequest}
-          />
-        </AppErrorBoundary>
+        <div ref={backgroundRef} className="h-full outline-none" tabIndex={-1}>
+          <AppErrorBoundary>
+            <ChatPage
+              settings={settings}
+              setSettings={setSettings}
+              getMcpSettings={getMcpSettings}
+              context={context}
+              setContext={setContext}
+              onSettingsRuntimeSources={setSettingsRuntimeSources}
+              onOpenSettings={openSettings}
+              onToggleTheme={toggleTheme}
+              openConversationRequest={openConversationRequest}
+            />
+          </AppErrorBoundary>
+        </div>
         {visible && (
           <div
-            className={`absolute inset-0 z-50 transition-all duration-300 ease-out ${
-              active ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"
+            ref={settingsSurfaceRef}
+            tabIndex={-1}
+            className={`absolute inset-0 z-50 transition-all duration-150 ease-out motion-reduce:transition-none ${
+              active ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"
             }`}
-            onTransitionEnd={handleTransitionEnd}
+            onTransitionEnd={(event) => {
+              if (event.target === event.currentTarget) handleTransitionEnd();
+            }}
           >
             <AppErrorBoundary>
               <SettingsPage
@@ -560,6 +575,7 @@ export default function App() {
                 saveState={settingsSaveState}
                 onBack={closeSettings}
                 onOpenConversation={openArchivedConversation}
+                runtimeSources={settingsRuntimeSources}
                 initialSection={settingsSection}
               />
             </AppErrorBoundary>

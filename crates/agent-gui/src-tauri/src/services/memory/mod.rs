@@ -179,3 +179,6 @@ include!("content.rs");
 include!("schema.rs");
 include!("search.rs");
 include!("tests.rs");
+
+mod registry;
+pub use registry::{MemoryAccessContext, MemorySpaceInfo, MemoryStoreRegistry};

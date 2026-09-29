@@ -7,6 +7,7 @@
 
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown } from "../../../components/icons";
+import type { MemoryAccessContext } from "../../../lib/memory/api";
 
 export {
   AlertTriangle,
@@ -36,7 +37,7 @@ export { AgentActivationSwitch } from "../shared";
  *  connected desktop agent, so Run Now always reports the queued-remote path. */
 export const canRunOrganizerLocally = false;
 
-export function pokeMemoryOrganizer() {
+export function pokeMemoryOrganizer(_memoryContext?: MemoryAccessContext) {
   return false;
 }
 

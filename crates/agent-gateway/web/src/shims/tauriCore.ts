@@ -55,6 +55,7 @@ async function readGatewayStatus(): Promise<GatewayRuntimeStatus> {
 
 async function invokeGatewayMemory<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   const payloadArgs =
+    command !== "memory_scoped" &&
     args && typeof args.args === "object" && args.args !== null && !Array.isArray(args.args)
       ? (args.args as Record<string, unknown>)
       : (args ?? {});

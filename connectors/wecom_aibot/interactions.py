@@ -147,7 +147,9 @@ def _short(value: str, limit: int) -> str:
     return value[: max(1, limit - 1)] + "…"
 
 
-def render_numbered_questions(questions: tuple[InteractionQuestion, ...]) -> str:
+def render_numbered_questions(
+    questions: tuple[InteractionQuestion, ...], *, card_available: bool = False
+) -> str:
     lines = ["### 需要你的选择"]
     for question_index, question in enumerate(questions, start=1):
         lines.append("")
@@ -157,10 +159,12 @@ def render_numbered_questions(questions: tuple[InteractionQuestion, ...]) -> str
             description = f" - {option.description}" if option.description else ""
             lines.append(f"{option_index}. {option.label}{recommendation}{description}")
     lines.append("")
-    if len(questions) == 1:
-        lines.append("请点击卡片提交，或直接回复选项序号，例如 `1`。")
+    if card_available:
+        lines.append("请直接点击卡片中的选项按钮。")
+    elif len(questions) == 1:
+        lines.append("请直接回复选项序号，例如 `1`。")
     else:
-        lines.append("请点击卡片提交，或按题目顺序回复选项序号，例如 `1,2`。")
+        lines.append("请按题目顺序回复选项序号，例如 `1,2`。")
     return "\n".join(lines)
 
 
@@ -479,14 +483,13 @@ class InteractionCoordinator:
             self._by_interaction[interaction_id] = pending
             self._by_task[task_id] = pending
 
-        markdown = render_numbered_questions(questions)
         card_method = getattr(wecom, "reply_stream_with_card", None)
         if callable(card_method):
             try:
                 acknowledgement = await card_method(
                     frame,
                     stream_id,
-                    markdown,
+                    render_numbered_questions(questions, card_available=True),
                     False,
                     template_card=card,
                 )
@@ -499,6 +502,7 @@ class InteractionCoordinator:
             except Exception:
                 logger.warning("WeCom input card failed; using Markdown fallback")
         try:
+            markdown = render_numbered_questions(questions)
             acknowledgement = await wecom.reply_stream(frame, stream_id, markdown, False)
             if _ack_rejected(acknowledgement):
                 raise RuntimeError("WeCom rejected the Markdown input prompt")
@@ -569,6 +573,7 @@ class InteractionCoordinator:
         text: str,
         channel: Any,
     ) -> str | None:
+        """Return None for ordinary text, or a reply (empty for silent success)."""
         async with self._lock:
             self._sweep_locked()
             pending = self._by_session.get(session_key)
@@ -584,7 +589,7 @@ class InteractionCoordinator:
             return "该选择已经处理或过期，请等待桌面端继续。"
         outcome = await self._finish_answer(pending, channel, selections)
         if outcome == "accepted":
-            return "选择已提交，桌面端正在继续处理。"
+            return ""
         if outcome in {"resolved", "expired"}:
             return "该选择已经处理或过期，请等待桌面端继续。"
         return "选择提交失败，请重新回复选项序号。"
@@ -778,11 +783,13 @@ class InteractionCoordinator:
         elif status in {"cancelled", "canceled"}:
             content = "本次选择已取消。"
         else:
-            content = "选择已完成，桌面端正在继续处理。"
+            # The original turn resumes and supplies the next progress/result.
+            # Successful selections do not need another chat acknowledgement.
+            return True
         # A resolved frame is not a WeCom callback frame, so it cannot be used
         # with update_template_card (that API requires the original click
-        # request id). The text stream remains the reliable cross-client
-        # acknowledgement; the next card click receives an already-processed
+        # request id). Report timeout/cancellation on the original stream;
+        # the next card click receives an already-processed
         # response using its own callback frame.
         try:
             await wecom.reply_stream(pending.frame, pending.stream_id, content, False)

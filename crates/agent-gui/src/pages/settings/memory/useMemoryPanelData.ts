@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import {
   formatMemoryError,
+  type MemoryAccessContext,
   type MemoryMeta,
   type MemoryOrganizeRun,
   type MemoryOrganizeRunStatus,
@@ -50,8 +51,12 @@ export type MemoryEditDraft = {
   appendBody: string;
 };
 
-export function useMemoryPanelData(input: { workdir?: string; t: (key: string) => string }) {
-  const { workdir, t } = input;
+export function useMemoryPanelData(input: {
+  workdir?: string;
+  t: (key: string) => string;
+  memoryContext?: MemoryAccessContext;
+}) {
+  const { workdir, t, memoryContext } = input;
   const [entries, setEntries] = useState<MemoryMeta[]>([]);
   const [quota, setQuota] = useState<MemoryQuota | null>(null);
   const [selected, setSelected] = useState<MemoryReadResponse | null>(null);
@@ -72,8 +77,11 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
     setError(null);
     try {
       const [list, info] = await Promise.all([
-        memoryList({ workdir, includeAllProjects: true, includeDaily: true, limit: 1000 }),
-        memoryPathsInfo(),
+        memoryList(
+          { workdir, includeAllProjects: true, includeDaily: true, limit: 1000 },
+          memoryContext,
+        ),
+        memoryPathsInfo(memoryContext),
       ]);
       setEntries(list.entries);
       setQuota(list.quota);
@@ -101,12 +109,15 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
   async function openEntry(entry: MemoryMeta) {
     setError(null);
     try {
-      const read = await memoryRead({
-        slug: entry.slug,
-        scope: entry.scope,
-        workdir: selectedEntryWorkdir(entry, workdir),
-        workdirHash: entry.scope === "project" ? entry.workdirHash : undefined,
-      });
+      const read = await memoryRead(
+        {
+          slug: entry.slug,
+          scope: entry.scope,
+          workdir: selectedEntryWorkdir(entry, workdir),
+          workdirHash: entry.scope === "project" ? entry.workdirHash : undefined,
+        },
+        memoryContext,
+      );
       setSelected(read);
       setSelectedEntry(entry);
       setEditDraft({
@@ -127,15 +138,18 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
       if (draft.scope === "project" && !workdir) {
         throw new Error(t("settings.memoryProjectRequiresWorkdir"));
       }
-      const result = await memoryWrite({
-        slug: draft.slug,
-        scope: draft.scope,
-        workdir,
-        memoryType: draft.memoryType,
-        description: draft.description,
-        body: draft.body,
-        actor: "user",
-      });
+      const result = await memoryWrite(
+        {
+          slug: draft.slug,
+          scope: draft.scope,
+          workdir,
+          memoryType: draft.memoryType,
+          description: draft.description,
+          body: draft.body,
+          actor: "user",
+        },
+        memoryContext,
+      );
       await reload(result.slug);
       return true;
     } catch (err) {
@@ -152,16 +166,19 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
     setError(null);
     try {
       const isDaily = selected.memoryType === "daily";
-      const result = await memoryUpdate({
-        slug: selected.slug,
-        scope: selected.scope,
-        workdir: selectedEntryWorkdir(selectedEntry, workdir),
-        workdirHash: selectedEntry?.scope === "project" ? selectedEntry.workdirHash : undefined,
-        description: isDaily ? undefined : editDraft.description,
-        body: isDaily ? editDraft.appendBody : editDraft.body,
-        mode: isDaily ? "append" : "replace",
-        actor: "user",
-      });
+      const result = await memoryUpdate(
+        {
+          slug: selected.slug,
+          scope: selected.scope,
+          workdir: selectedEntryWorkdir(selectedEntry, workdir),
+          workdirHash: selectedEntry?.scope === "project" ? selectedEntry.workdirHash : undefined,
+          description: isDaily ? undefined : editDraft.description,
+          body: isDaily ? editDraft.appendBody : editDraft.body,
+          mode: isDaily ? "append" : "replace",
+          actor: "user",
+        },
+        memoryContext,
+      );
       setEditDraft((prev) => ({ ...prev, appendBody: "" }));
       await reload(selectedEntry ? entryKey(selectedEntry) : result.slug);
     } catch (err) {
@@ -176,12 +193,15 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
     setSaving(true);
     setError(null);
     try {
-      await memoryAccept({
-        slug: selected.slug,
-        scope: selected.scope,
-        workdir: selectedEntryWorkdir(selectedEntry, workdir),
-        workdirHash: selectedEntry?.scope === "project" ? selectedEntry.workdirHash : undefined,
-      });
+      await memoryAccept(
+        {
+          slug: selected.slug,
+          scope: selected.scope,
+          workdir: selectedEntryWorkdir(selectedEntry, workdir),
+          workdirHash: selectedEntry?.scope === "project" ? selectedEntry.workdirHash : undefined,
+        },
+        memoryContext,
+      );
       await reload(selectedEntry ? entryKey(selectedEntry) : selected.slug);
     } catch (err) {
       setError(formatMemoryError(err));
@@ -195,13 +215,16 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
     setSaving(true);
     setError(null);
     try {
-      await memoryDelete({
-        slug: selected.slug,
-        scope: selected.scope,
-        workdir: selectedEntryWorkdir(selectedEntry, workdir),
-        workdirHash: selectedEntry?.scope === "project" ? selectedEntry.workdirHash : undefined,
-        actor: "user",
-      });
+      await memoryDelete(
+        {
+          slug: selected.slug,
+          scope: selected.scope,
+          workdir: selectedEntryWorkdir(selectedEntry, workdir),
+          workdirHash: selectedEntry?.scope === "project" ? selectedEntry.workdirHash : undefined,
+          actor: "user",
+        },
+        memoryContext,
+      );
       setSelected(null);
       setSelectedEntry(null);
       await reload();
@@ -217,7 +240,7 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
     setSaving(true);
     setError(null);
     try {
-      const info = await memoryWipeAll();
+      const info = await memoryWipeAll(memoryContext);
       setPathsInfo(info);
       setEntries([]);
       setQuota((prev) =>
@@ -248,7 +271,7 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
 
     async function pollRun() {
       try {
-        const run = await memoryOrganizeRunRead({ runId: watchedRunId });
+        const run = await memoryOrganizeRunRead({ runId: watchedRunId }, memoryContext);
         if (cancelled || (run && isOrganizerRunActive(run))) return;
         setOrganizerWatchRunId(null);
         await reload();
@@ -265,14 +288,14 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [organizerWatchRunId]);
+  }, [organizerWatchRunId, memoryContext]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reload identity changes every render; workdir is the trigger
   useEffect(() => {
     setSelected(null);
     setSelectedEntry(null);
     void reload(null);
-  }, [workdir]);
+  }, [workdir, memoryContext]);
 
   return {
     entries,
@@ -296,8 +319,11 @@ export function useMemoryPanelData(input: { workdir?: string; t: (key: string) =
   };
 }
 
-export function useOrganizeRunHistory(input: { statusFilter: "all" | MemoryOrganizeRunStatus }) {
-  const { statusFilter } = input;
+export function useOrganizeRunHistory(input: {
+  statusFilter: "all" | MemoryOrganizeRunStatus;
+  memoryContext?: MemoryAccessContext;
+}) {
+  const { statusFilter, memoryContext } = input;
   const [runs, setRuns] = useState<MemoryOrganizeRun[]>([]);
   const [selectedRun, setSelectedRun] = useState<MemoryOrganizeRun | null>(null);
   const [loading, setLoading] = useState(false);
@@ -313,16 +339,19 @@ export function useOrganizeRunHistory(input: { statusFilter: "all" | MemoryOrgan
       setError(null);
     }
     try {
-      const response = await memoryOrganizeRunList({
-        status: statusFilter === "all" ? undefined : statusFilter,
-        limit: 80,
-      });
+      const response = await memoryOrganizeRunList(
+        {
+          status: statusFilter === "all" ? undefined : statusFilter,
+          limit: 80,
+        },
+        memoryContext,
+      );
       setRuns(response.runs);
       const nextId =
         selectRunId ||
         (options?.keepSelection === false ? undefined : selectedRun?.runId) ||
         response.runs[0]?.runId;
-      const next = nextId ? await memoryOrganizeRunRead({ runId: nextId }) : null;
+      const next = nextId ? await memoryOrganizeRunRead({ runId: nextId }, memoryContext) : null;
       setSelectedRun(next ?? response.runs[0] ?? null);
     } catch (err) {
       setError(formatMemoryError(err));
@@ -336,7 +365,7 @@ export function useOrganizeRunHistory(input: { statusFilter: "all" | MemoryOrgan
   // biome-ignore lint/correctness/useExhaustiveDependencies: reload identity changes every render; statusFilter is the trigger
   useEffect(() => {
     void reload();
-  }, [statusFilter]);
+  }, [statusFilter, memoryContext]);
 
   const hasActiveRun = runs.some(isOrganizerRunActive) || isOrganizerRunActive(selectedRun);
 
@@ -349,7 +378,7 @@ export function useOrganizeRunHistory(input: { statusFilter: "all" | MemoryOrgan
       void reload(selectedRun?.runId, { quiet: true });
     }, PANEL_RUN_POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [hasActiveRun, selectedRun?.runId, statusFilter]);
+  }, [hasActiveRun, selectedRun?.runId, statusFilter, memoryContext]);
 
   return {
     runs,

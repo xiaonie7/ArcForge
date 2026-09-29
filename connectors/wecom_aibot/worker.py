@@ -641,7 +641,10 @@ async def _maintain_reply_stream(
         if not refresh_allowed.is_set():
             if wake is not None:
                 wake.clear()
-            continue
+            # A refresh is already due. Wait for the choice to finish instead
+            # of starting another full interval that could expire the stream.
+            while not stop.is_set() and not refresh_allowed.is_set():
+                await _wait_for_refresh_trigger(stop, refresh_allowed, interval_seconds)
 
         async with send_lock:
             if stop.is_set() or not refresh_allowed.is_set():
@@ -1098,7 +1101,7 @@ async def _handle_message(
             logger.warning(
                 "WeCom callback message ID was reused with a different payload"
             )
-        if existing and existing.completed:
+        if existing and existing.completed and existing.text:
             await reply_immediately(existing.text)
         return
 
@@ -1115,7 +1118,7 @@ async def _handle_message(
                 text=interaction_reply,
                 status="completed",
             )
-            if owns_claim:
+            if owns_claim and interaction_reply:
                 await reply_immediately(interaction_reply)
             return
 
@@ -1353,8 +1356,8 @@ async def _handle_message(
                     async with stream_send_lock:
                         await interactions.handle_resolved(resolved, wecom=wecom)
                 finally:
-                    # Resolution itself updates the stream. Resume the regular
-                    # four-minute cadence only after that update is complete.
+                    # Resume progress/keepalive after the selection resolves,
+                    # including successful answers with no acknowledgement.
                     refresh_allowed.set()
 
             result = await _submit_with_input_handlers(

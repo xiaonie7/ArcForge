@@ -116,6 +116,8 @@ macro_rules! app_invoke_handler {
             commands::mcp::mcp_restart_server,
             // Memory
             commands::memory::memory_list,
+            commands::memory::memory_scoped,
+            commands::memory::memory_spaces_list,
             commands::memory::memory_read,
             commands::memory::memory_search,
             commands::memory::memory_write,
@@ -514,6 +516,10 @@ pub fn run() {
     let memory_store = Arc::new(
         services::memory::MemoryStore::open().expect("failed to initialize ArcForge memory store"),
     );
+    let memory_registry = Arc::new(
+        services::memory::MemoryStoreRegistry::open()
+            .expect("failed to initialize ArcForge channel memory registry"),
+    );
     let power_activity = Arc::new(services::power_activity::PowerActivityManager::default());
     let managed_process_registry =
         Arc::new(runtime::managed_process::ManagedProcessRegistry::open());
@@ -545,6 +551,7 @@ pub fn run() {
         .manage(Arc::new(commands::mcp::McpRuntimeManager::default()))
         .manage(commands::execution_broker::ExecutionBrokerState::default())
         .manage(Arc::clone(&memory_store))
+        .manage(Arc::clone(&memory_registry))
         .manage(Arc::clone(&power_activity))
         .manage(Arc::new(runtime::shell_runner::ShellRunRegistry::default()))
         .manage(Arc::new(

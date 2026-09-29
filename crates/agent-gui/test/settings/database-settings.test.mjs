@@ -40,7 +40,7 @@ test("database profile modal opts into the visible settings modal state", () => 
 
 test("database settings are navigable and explain transient user or Skill connections", () => {
   assert.match(settingsTypesSource, /\| "database"/);
-  assert.match(settingsPageSource, /id: "database"/);
+  assert.match(source("src/pages/settings/overviewModel.ts"), /section: "database"/);
   assert.match(settingsPageSource, /<DatabaseSection \/>/);
   assert.match(i18nSource, /用户消息或 Skill 明确提供的临时连接只用于当次只读调用/);
   assert.match(i18nSource, /temporary connection explicitly supplied in a user message or Skill/);

@@ -45,6 +45,33 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("queued extraction snapshots the channel context before another conversation is selected", async () => {
+  const conversationId = `wecom:${newConversationId()}`;
+  const gate = deferred();
+  const calls = [];
+  __setMemoryExtractionEngineForTests(async (params) => {
+    calls.push(params);
+    if (calls.length === 1) await gate.promise;
+    return okResult();
+  });
+  try {
+    const first = memoryExtraction.requestExtraction(baseRequest(conversationId));
+    const context = { conversationId };
+    const queued = { ...baseRequest(conversationId, "另一个偏好：回答保持简洁"), memoryContext: context };
+    await memoryExtraction.requestExtraction(queued);
+    context.conversationId = "wecom:different-user";
+    gate.resolve();
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every((call) => call.memoryContext.conversationId === conversationId));
+    assert.ok(calls.every((call) => Object.isFrozen(call.memoryContext)));
+  } finally {
+    __setMemoryExtractionEngineForTests(null);
+    memoryExtraction.dispose(conversationId);
+  }
+});
+
 test("atomic claim: two synchronous requests → one run + one coalesce", async () => {
   const conversationId = newConversationId();
   const gate = deferred();

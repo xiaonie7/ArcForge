@@ -17,6 +17,57 @@ import type {
   OrganizerScope,
 } from "./schema";
 
+/** Routing hint only. Rust resolves the persisted, trusted conversation binding. */
+export type MemoryAccessContext = Readonly<{ conversationId: string }>;
+
+export type MemorySpaceInfo = {
+  spaceId: string;
+  conversationId: string;
+  label: string;
+  workdir?: string;
+};
+
+/** Snapshot once per run; a resumed WeCom conversation stays scoped without a live principal. */
+export function resolveMemoryAccessContext(
+  conversationId?: string,
+  principal?: { channel: string } | null,
+  context?: MemoryAccessContext,
+): MemoryAccessContext | undefined {
+  const id = (context?.conversationId ?? conversationId ?? "").trim();
+  if (!context && principal?.channel !== "wecom" && !id.startsWith("wecom:")) return undefined;
+  if (!id) throw new Error("Channel memory requires a conversation binding.");
+  return Object.freeze({ conversationId: id });
+}
+
+function invokeMemory<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  context?: MemoryAccessContext,
+): Promise<T> {
+  // Audit-bearing mutation payloads also identify resumed channel conversations.
+  // Do not let a caller that omitted context write those into the local library.
+  const payload = args?.args as { conversationId?: unknown } | undefined;
+  const resolved = context ?? (
+    typeof payload?.conversationId === "string"
+      ? resolveMemoryAccessContext(payload.conversationId)
+      : undefined
+  );
+  if (resolved) {
+    const conversationId = resolved.conversationId.trim();
+    if (!conversationId) return Promise.reject(new Error("Channel memory requires a conversation binding."));
+    return invoke<T>("memory_scoped", {
+      context: { conversationId },
+      command,
+      args: args ?? {},
+    });
+  }
+  return invoke<T>(command, args);
+}
+
+export async function memorySpacesList() {
+  return invoke<MemorySpaceInfo[]>("memory_spaces_list");
+}
+
 export type MemoryHistoryTimeMode = "message" | "updated" | "conversation";
 
 export type MemoryMeta = {
@@ -314,8 +365,8 @@ export async function memoryList(args: {
   includeDaily?: boolean;
   limit?: number;
   offset?: number;
-}) {
-  return invoke<MemoryListResponse>("memory_list", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryListResponse>("memory_list", { args }, context);
 }
 
 export async function memoryRead(args: {
@@ -325,8 +376,8 @@ export async function memoryRead(args: {
   workdirHash?: string;
   offset?: number;
   length?: number;
-}) {
-  return invoke<MemoryReadResponse>("memory_read", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryReadResponse>("memory_read", { args }, context);
 }
 
 export async function memorySearch(args: {
@@ -340,8 +391,8 @@ export async function memorySearch(args: {
   historyUntil?: number;
   historyDateLocal?: string;
   historyTimeMode?: MemoryHistoryTimeMode;
-}) {
-  return invoke<MemorySearchResponse>("memory_search", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemorySearchResponse>("memory_search", { args }, context);
 }
 
 export async function memoryWrite(args: {
@@ -355,8 +406,8 @@ export async function memoryWrite(args: {
   conversationId?: string;
   model?: string;
   evidence?: MemoryEvidenceFields;
-}) {
-  return invoke<MemoryMutationResponse>("memory_write", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryMutationResponse>("memory_write", { args }, context);
 }
 
 export async function memoryUpdate(args: {
@@ -372,8 +423,8 @@ export async function memoryUpdate(args: {
   conversationId?: string;
   model?: string;
   evidence?: MemoryEvidenceFields;
-}) {
-  return invoke<MemoryMutationResponse>("memory_update", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryMutationResponse>("memory_update", { args }, context);
 }
 
 export async function memoryDelete(args: {
@@ -385,16 +436,16 @@ export async function memoryDelete(args: {
   reason?: string;
   conversationId?: string;
   model?: string;
-}) {
-  return invoke<MemoryMutationResponse>("memory_delete", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryMutationResponse>("memory_delete", { args }, context);
 }
 
 export async function memoryDeleteProject(args: {
   workdir: string;
   actor?: "user" | "tool" | "extractor" | "reconcile";
   reason?: string;
-}) {
-  return invoke<MemoryDeleteProjectResponse>("memory_delete_project", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryDeleteProjectResponse>("memory_delete_project", { args }, context);
 }
 
 export async function memoryAccept(args: {
@@ -402,8 +453,8 @@ export async function memoryAccept(args: {
   scope: MemoryScope;
   workdir?: string;
   workdirHash?: string;
-}) {
-  return invoke<MemoryMutationResponse>("memory_accept", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryMutationResponse>("memory_accept", { args }, context);
 }
 
 export async function memoryApplyBatch(args: {
@@ -416,8 +467,8 @@ export async function memoryApplyBatch(args: {
     bullet: string;
   };
   decisions?: ApplyDecision[];
-}) {
-  return invoke<MemoryBatchResponse>("memory_apply_batch", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryBatchResponse>("memory_apply_batch", { args }, context);
 }
 
 export async function memoryOrganizeRunCreate(args: {
@@ -426,8 +477,8 @@ export async function memoryOrganizeRunCreate(args: {
   model?: unknown;
   scope?: OrganizerScope;
   mode?: OrganizerMode;
-}) {
-  return invoke<MemoryOrganizeRunCreateResponse>("memory_organize_run_create", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOrganizeRunCreateResponse>("memory_organize_run_create", { args }, context);
 }
 
 export async function memoryOrganizeRunUpdate(args: {
@@ -455,25 +506,25 @@ export async function memoryOrganizeRunUpdate(args: {
   quotaHeadroomAtStart?: number;
   overrideReviewed?: boolean;
   report?: unknown;
-}) {
-  return invoke<MemoryOrganizeRun | null>("memory_organize_run_update", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOrganizeRun | null>("memory_organize_run_update", { args }, context);
 }
 
 export async function memoryOrganizeRunList(args?: {
   status?: MemoryOrganizeRunStatus;
   limit?: number;
-}) {
-  return invoke<MemoryOrganizeRunListResponse>("memory_organize_run_list", {
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOrganizeRunListResponse>("memory_organize_run_list", {
     args: args ?? {},
-  });
+  }, context);
 }
 
-export async function memoryOrganizeRunRead(args: { runId: string }) {
-  return invoke<MemoryOrganizeRun | null>("memory_organize_run_read", { args });
+export async function memoryOrganizeRunRead(args: { runId: string }, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOrganizeRun | null>("memory_organize_run_read", { args }, context);
 }
 
-export async function memoryOrganizeRunClearHistory() {
-  return invoke<MemoryOrganizeRunClearHistoryResponse>("memory_organize_run_clear_history");
+export async function memoryOrganizeRunClearHistory(context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOrganizeRunClearHistoryResponse>("memory_organize_run_clear_history", undefined, context);
 }
 
 export async function memoryOrganizeDueClaim(args: {
@@ -483,48 +534,47 @@ export async function memoryOrganizeDueClaim(args: {
   model?: unknown;
   scope?: OrganizerScope;
   mode?: OrganizerMode;
-}) {
-  return invoke<MemoryOrganizeDueClaimResponse>("memory_organize_due_claim", { args });
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOrganizeDueClaimResponse>("memory_organize_due_claim", { args }, context);
 }
 
 export async function memoryOrganizeDueComplete(
-  args: Parameters<typeof memoryOrganizeRunUpdate>[0],
-) {
-  return invoke<MemoryOrganizeRun | null>("memory_organize_due_complete", { args });
+  args: Parameters<typeof memoryOrganizeRunUpdate>[0], context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOrganizeRun | null>("memory_organize_due_complete", { args }, context);
 }
 
-export async function memoryIndexOverview(workdir?: string) {
-  return invoke<MemoryOverviewResponse>("memory_index_overview", { workdir });
+export async function memoryIndexOverview(workdir?: string, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryOverviewResponse>("memory_index_overview", { workdir }, context);
 }
 
 export async function memoryRecentRejections(args?: {
   sinceDays?: number;
   limit?: number;
   workdir?: string;
-}) {
-  return invoke<MemoryRecentRejectionsResponse>("memory_recent_rejections", {
+}, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryRecentRejectionsResponse>("memory_recent_rejections", {
     args: args ?? {},
-  });
+  }, context);
 }
 
-export async function memoryQuotaSummary(args?: { workdir?: string }) {
-  return invoke<MemoryQuotaSummaryResponse>("memory_quota_summary", {
+export async function memoryQuotaSummary(args?: { workdir?: string }, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryQuotaSummaryResponse>("memory_quota_summary", {
     args: args ?? {},
-  });
+  }, context);
 }
 
-export async function memoryPathsInfo() {
-  return invoke<MemoryPathsInfo>("memory_paths_info");
+export async function memoryPathsInfo(context?: MemoryAccessContext) {
+  return invokeMemory<MemoryPathsInfo>("memory_paths_info", undefined, context);
 }
 
-export async function memoryTodayLocalDate(rolloverHour?: number) {
-  return invoke<string>("memory_today_local_date", { rolloverHour });
+export async function memoryTodayLocalDate(rolloverHour?: number, context?: MemoryAccessContext) {
+  return invokeMemory<string>("memory_today_local_date", { rolloverHour }, context);
 }
 
-export async function memoryTodayDaily(rolloverHour?: number) {
-  return invoke<MemoryReadResponse | null>("memory_today_daily", { rolloverHour });
+export async function memoryTodayDaily(rolloverHour?: number, context?: MemoryAccessContext) {
+  return invokeMemory<MemoryReadResponse | null>("memory_today_daily", { rolloverHour }, context);
 }
 
-export async function memoryWipeAll() {
-  return invoke<MemoryPathsInfo>("memory_wipe_all");
+export async function memoryWipeAll(context?: MemoryAccessContext) {
+  return invokeMemory<MemoryPathsInfo>("memory_wipe_all", undefined, context);
 }

@@ -15,7 +15,9 @@ import type {
 } from "@earendil-works/pi-ai";
 import type { StreamDebugLogger } from "../../debug/agentDebug";
 import {
+  type MemoryAccessContext,
   type MemoryMeta,
+  resolveMemoryAccessContext,
   memoryApplyBatch,
   memoryList,
   memoryRecentRejections,
@@ -105,6 +107,7 @@ export type MemoryExtractionEngineParams = {
   sessionId: string;
   conversationId: string;
   workdir?: string;
+  memoryContext?: MemoryAccessContext;
   reviewerMode?: MemoryReviewerMode;
   /** Snapshot of the conversation messages at turn end. */
   messages: readonly Message[];
@@ -212,27 +215,28 @@ function collectCandidateEntries(entries: readonly MemoryMeta[]): ExtractionCand
   return all.slice(0, EXTRACTION_CANDIDATE_LIMIT);
 }
 
-async function loadCandidates(workdir: string) {
+async function loadCandidates(workdir: string, memoryContext?: MemoryAccessContext) {
   try {
     const response = await memoryList({
       workdir: workdir || undefined,
       includeDaily: false,
       limit: EXTRACTION_CANDIDATE_LIMIT * 3,
-    });
+    }, memoryContext);
     return collectCandidateEntries(response.entries);
   } catch (error) {
     console.warn("Failed to load memory extraction candidates:", error);
+    if (memoryContext) throw error;
     return [];
   }
 }
 
-async function loadRejections(workdir: string): Promise<ExtractionRejectionEntry[]> {
+async function loadRejections(workdir: string, memoryContext?: MemoryAccessContext): Promise<ExtractionRejectionEntry[]> {
   try {
     const response = await memoryRecentRejections({
       sinceDays: EXTRACTION_REJECTION_DAYS,
       limit: 30,
       workdir: workdir || undefined,
-    });
+    }, memoryContext);
     return response.entries.map((entry) => ({
       slug: entry.slug,
       rejectedAt: entry.rejectedAt,
@@ -240,13 +244,14 @@ async function loadRejections(workdir: string): Promise<ExtractionRejectionEntry
     }));
   } catch (error) {
     console.warn("Failed to load memory extraction rejections:", error);
+    if (memoryContext) throw error;
     return [];
   }
 }
 
-async function resolveLocalDate() {
+async function resolveLocalDate(memoryContext?: MemoryAccessContext) {
   try {
-    return await memoryTodayLocalDate();
+    return await memoryTodayLocalDate(undefined, memoryContext);
   } catch (error) {
     console.warn("Failed to resolve memory local date for extraction", error);
     const now = new Date();
@@ -332,6 +337,7 @@ async function runExtractionRound(params: {
   workdir: string;
   sessionId: string;
   conversationId: string;
+  memoryContext?: MemoryAccessContext;
   planContext: Parameters<typeof validateSubmittedPlan>[1];
   signal: AbortSignal;
   debugLogger?: StreamDebugLogger;
@@ -343,6 +349,7 @@ async function runExtractionRound(params: {
     mode: "ro",
     actor: "extractor",
     conversationId: params.conversationId,
+    memoryContext: params.memoryContext,
     model: params.model.model,
   });
   const planTool = createSubmitMemoryPlanTool();
@@ -442,14 +449,19 @@ async function runExtractionRound(params: {
 export async function runMemoryExtraction(
   params: MemoryExtractionEngineParams,
 ): Promise<MemoryExtractionResult> {
+  const memoryContext = resolveMemoryAccessContext(params.conversationId, undefined, params.memoryContext);
   const workdir = params.workdir?.trim() ?? "";
   const statusText = params.statusText ?? defaultStatusText;
 
-  const [localDate, candidates, rejections] = await Promise.all([
-    resolveLocalDate(),
-    loadCandidates(workdir),
-    loadRejections(workdir),
-  ]);
+  const loaded = await Promise.all([
+    resolveLocalDate(memoryContext),
+    loadCandidates(workdir, memoryContext),
+    loadRejections(workdir, memoryContext),
+  ]).catch(() => null);
+  // A missing or revoked binding must stop extraction, including writes based
+  // on an apparently empty candidate/rejection set.
+  if (!loaded) return { ok: false, ...EMPTY_RESULT };
+  const [localDate, candidates, rejections] = loaded;
 
   // Confirmation deferral: the controller claimed this run only because the
   // short reply may answer a memory confirmation. With candidates loaded we
@@ -511,6 +523,7 @@ export async function runMemoryExtraction(
       workdir,
       sessionId: params.sessionId,
       conversationId: params.conversationId,
+      memoryContext,
       planContext,
       signal: timeout.signal,
       debugLogger: params.debugLogger,
@@ -556,6 +569,7 @@ export async function runMemoryExtraction(
         workdir,
         sessionId: params.sessionId,
         conversationId: params.conversationId,
+        memoryContext,
         planContext,
         signal: timeout.signal,
         debugLogger: params.debugLogger,
@@ -606,7 +620,7 @@ export async function runMemoryExtraction(
         localDate,
         dailyAppend: batch.dailyAppend,
         decisions: batch.decisions.length > 0 ? batch.decisions : undefined,
-      });
+      }, memoryContext);
       const applied = new Set([...response.created, ...response.updated, ...response.deleted]);
       for (const slug of applied) {
         if (!slug.startsWith("daily-")) writtenSlugs.push(slug);

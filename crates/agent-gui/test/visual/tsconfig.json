@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": ["../../src", "./settings-preview.tsx"],
+  "references": []
+}

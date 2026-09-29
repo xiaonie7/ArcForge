@@ -10,6 +10,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   formatMemoryError,
+  type MemoryAccessContext,
   type MemoryQuotaSummaryResponse,
   memoryOrganizeRunCreate,
   memoryQuotaSummary,
@@ -60,6 +61,8 @@ export function MemorySettingsDrawer(props: {
   settings: AppSettings;
   setSettings: (updater: (prev: AppSettings) => AppSettings) => void;
   workdir?: string;
+  memoryContext?: MemoryAccessContext;
+  spaceLabel: string;
   saving: boolean;
   t: (key: string) => string;
   onClose: () => void;
@@ -72,6 +75,8 @@ export function MemorySettingsDrawer(props: {
     settings,
     setSettings,
     workdir,
+    memoryContext,
+    spaceLabel,
     saving,
     t,
     onClose,
@@ -97,7 +102,7 @@ export function MemorySettingsDrawer(props: {
 
   useEffect(() => {
     let cancelled = false;
-    void memoryQuotaSummary({ workdir })
+    void memoryQuotaSummary({ workdir }, memoryContext)
       .then((summary) => {
         if (!cancelled) setQuotaSummary(summary);
       })
@@ -107,7 +112,7 @@ export function MemorySettingsDrawer(props: {
     return () => {
       cancelled = true;
     };
-  }, [workdir]);
+  }, [workdir, memoryContext]);
 
   useEffect(() => {
     committedTimeLocalRef.current = committedTimeLocal;
@@ -253,12 +258,15 @@ export function MemorySettingsDrawer(props: {
     }
     setOrganizerSubmitting(true);
     try {
-      const response = await memoryOrganizeRunCreate({
-        trigger: "manual",
-        model: settings.memory.organizerModel,
-        scope: settings.memory.organizerScope,
-        mode: settings.memory.organizerMode,
-      });
+      const response = await memoryOrganizeRunCreate(
+        {
+          trigger: "manual",
+          model: settings.memory.organizerModel,
+          scope: settings.memory.organizerScope,
+          mode: settings.memory.organizerMode,
+        },
+        memoryContext,
+      );
       const runId = response.run?.runId ?? response.activeRun?.runId;
       if (runId) {
         onOrganizerRunQueued?.(runId);
@@ -268,7 +276,7 @@ export function MemorySettingsDrawer(props: {
         setHistoryOpen(true);
         return;
       }
-      const runnerPoked = canRunOrganizerLocally ? pokeMemoryOrganizer() : false;
+      const runnerPoked = canRunOrganizerLocally ? pokeMemoryOrganizer(memoryContext) : false;
       setOrganizerFeedback(
         t(runnerPoked ? "settings.memoryOrganizerQueued" : "settings.memoryOrganizerQueuedRemote"),
       );
@@ -561,6 +569,8 @@ export function MemorySettingsDrawer(props: {
         <OrganizerHistoryModal
           t={t}
           workdir={workdir}
+          memoryContext={memoryContext}
+          spaceLabel={spaceLabel}
           onClose={() => setHistoryOpen(false)}
           onMemoryChanged={onMemoryChanged}
         />
@@ -587,6 +597,7 @@ export function MemorySettingsDrawer(props: {
                 </div>
                 <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
                   {t("settings.memoryWipeConfirmDescription")}
+                  <div className="mt-2 font-medium">当前空间：{spaceLabel}</div>
                 </div>
               </div>
             </div>

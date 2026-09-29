@@ -10,6 +10,7 @@
 // (the engine reads conversation state at run time, so one queued run covers
 // every turn that landed meanwhile).
 
+import { resolveMemoryAccessContext } from "../../memory/api";
 import {
   EXTRACTION_CONVERSATION_STATE_LIMIT,
   EXTRACTION_WRITTEN_SLUG_LIMIT,
@@ -160,7 +161,10 @@ export const memoryExtraction = {
     if (!key) {
       return Promise.resolve({ ...SKIPPED_RESULT, skipped: "missing-conversation-id" });
     }
-    return process(key, request);
+    return process(key, {
+      ...request,
+      memoryContext: resolveMemoryAccessContext(key, undefined, request.memoryContext),
+    });
   },
 
   /** New user turn: reset per-turn dedup state. Does NOT abort in-flight

@@ -184,6 +184,7 @@ async function buildRegistry(
     runtimeScope: "chat",
     workspaceAccess,
     principal,
+    conversationId: principal ? "wecom:conversation-1" : "conversation-1",
     selectedSystemToolIds,
     visualReview,
     allowedSystemTools,

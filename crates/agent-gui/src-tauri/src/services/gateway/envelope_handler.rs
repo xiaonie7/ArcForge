@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 use crate::commands::chat_history::{self};
 use crate::commands::settings::{
@@ -962,8 +962,17 @@ impl GatewayController {
                 self.spawn_uploaded_image_preview_response(request_id, request)
             }
             Some(proto::gateway_envelope::Payload::MemoryManage(request)) => {
-                match gateway_bridge::handle_memory_manage(Arc::clone(&self.memory_store), request)
-                    .await
+                let memory_registry = Arc::clone(
+                    &self
+                        .app_handle
+                        .state::<Arc<crate::services::memory::MemoryStoreRegistry>>(),
+                );
+                match gateway_bridge::handle_memory_manage(
+                    Arc::clone(&self.memory_store),
+                    memory_registry,
+                    request,
+                )
+                .await
                 {
                     Ok(response) => {
                         self.send_agent_envelope(proto::AgentEnvelope {

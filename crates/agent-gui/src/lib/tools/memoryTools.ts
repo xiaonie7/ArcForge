@@ -14,6 +14,8 @@ import {
   type MemoryMutationResponse,
   type MemoryReadResponse,
   type MemorySearchResponse,
+  type MemoryAccessContext,
+  resolveMemoryAccessContext,
   memoryAccept,
   memoryDelete,
   memoryList,
@@ -428,8 +430,10 @@ export function createMemoryTools(params: {
   mode?: MemoryToolMode;
   actor?: "tool" | "extractor";
   conversationId?: string;
+  memoryContext?: MemoryAccessContext;
   model?: string;
 }): BuiltinToolBundle {
+  const memoryContext = resolveMemoryAccessContext(params.conversationId, undefined, params.memoryContext);
   const mode = params.mode ?? "rw";
   const actor = params.actor ?? "tool";
   const toolMemoryManager: Tool = {
@@ -487,7 +491,7 @@ export function createMemoryTools(params: {
         const result = await memoryList({
           ...listArgs,
           includeDaily: args.include_daily === true || listArgs.memoryType === "daily",
-        });
+        }, memoryContext);
         return {
           role: "toolResult",
           toolCallId: toolCall.id,
@@ -505,7 +509,7 @@ export function createMemoryTools(params: {
           workdir: params.workdir,
           offset: optionalInt(args.offset),
           length: optionalInt(args.length),
-        });
+        }, memoryContext);
         return {
           role: "toolResult",
           toolCallId: toolCall.id,
@@ -520,7 +524,7 @@ export function createMemoryTools(params: {
         const result = await memorySearch({
           query: requireQuery(args),
           ...buildArgs(args, params.workdir),
-        });
+        }, memoryContext);
         return {
           role: "toolResult",
           toolCallId: toolCall.id,
@@ -543,7 +547,7 @@ export function createMemoryTools(params: {
           conversationId: params.conversationId,
           model: params.model,
           evidence: evidenceFromArgs(args),
-        });
+        }, memoryContext);
         return {
           role: "toolResult",
           toolCallId: toolCall.id,
@@ -581,7 +585,7 @@ export function createMemoryTools(params: {
           conversationId: params.conversationId,
           model: params.model,
           evidence,
-        });
+        }, memoryContext);
         return {
           role: "toolResult",
           toolCallId: toolCall.id,
@@ -604,7 +608,7 @@ export function createMemoryTools(params: {
           actor: deleteActor,
           conversationId: params.conversationId,
           model: params.model,
-        });
+        }, memoryContext);
         return {
           role: "toolResult",
           toolCallId: toolCall.id,
@@ -620,7 +624,7 @@ export function createMemoryTools(params: {
           slug: requireSlug(args),
           scope: requireWriteScope(args.scope),
           workdir: params.workdir,
-        });
+        }, memoryContext);
         return {
           role: "toolResult",
           toolCallId: toolCall.id,

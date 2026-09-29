@@ -1,6 +1,11 @@
 impl MemoryStore {
     pub fn open() -> Result<Self, String> {
-        let root = memory_root_dir()?;
+        Self::open_at(memory_root_dir()?)
+    }
+
+    // Only the backend registry selects roots for channel memory. IPC callers
+    // never supply a filesystem location.
+    fn open_at(root: PathBuf) -> Result<Self, String> {
         ensure_root_dirs(&root)?;
         let db_path = root.join(DB_FILENAME);
         let conn = open_memory_connection(&db_path)?;

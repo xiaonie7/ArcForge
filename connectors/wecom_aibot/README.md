@@ -138,7 +138,35 @@ or rejected, users can reply with option numbers (`1` for one question or
 `1,2` in question order for two questions). Invalid, duplicate, expired, and
 already-resolved replies are handled without starting a second desktop turn.
 
+Card prompts direct users to click a button, which sends an interaction callback
+without a separate user text message. Manually sent option numbers remain in
+WeCom chat history; the connector cannot hide them. Successful submissions are
+consumed silently, including duplicate callbacks, and the original reply stream
+continues with progress and the final result. Submission failures and timeout
+or cancellation notices remain visible.
+
 The desktop may also answer the same question from its local card. In that case
-the connector receives a resolved notification, marks the WeCom card complete,
-and stops intercepting subsequent text. The default response window is three
+the connector receives a resolved notification, records completion locally,
+and stops intercepting subsequent text without sending a success notice. A
+subsequent click updates the original card to its processed state. The default response window is three
 minutes, matching the desktop tool's timeout behavior.
+
+## Per-user memory
+
+Only WeCom conversations use isolated memory spaces. The desktop resolves a
+space from its persisted, trusted installation and user binding; group chats
+also include the group ID. New sessions keep the same space, while ordinary
+desktop and browser conversations continue using the existing local library.
+
+WeCom memory lives under `~/.arcforge/channel-memory/<space-hash>/`, with its
+own Markdown files and SQLite index. Recall, MemoryManager operations, delayed
+extraction and organizer runs use the same captured context. Missing bindings
+or a disabled memory policy fail closed, and scoped historical-chat search is
+disabled until the shared history index supports owner filtering. Existing
+local memories are not copied into new WeCom spaces.
+
+The memory settings panel can select a local or WeCom space for inspection and
+cleanup. It currently lists spaces with an active binding and memory enabled;
+archived-only or disabled spaces remain on disk but are omitted from this list
+and scheduled organizing. This isolates the memory feature; unrestricted local
+shell/filesystem access is still governed by the deployment's tool permissions.

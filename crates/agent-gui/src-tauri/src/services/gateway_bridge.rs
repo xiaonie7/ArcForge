@@ -24,10 +24,12 @@ use crate::services::automation::{
 };
 use crate::services::gateway::proto;
 use crate::services::memory::{
-    MemoryAcceptArgs, MemoryBatchArgs, MemoryDeleteArgs, MemoryDeleteProjectArgs, MemoryListArgs,
-    MemoryOrganizeDueClaimArgs, MemoryOrganizeRunCreateArgs, MemoryOrganizeRunListArgs,
-    MemoryOrganizeRunReadArgs, MemoryOrganizeRunUpdateArgs, MemoryQuotaSummaryArgs, MemoryReadArgs,
-    MemoryRecentRejectionsArgs, MemorySearchArgs, MemoryStore, MemoryUpdateArgs, MemoryWriteArgs,
+    MemoryAcceptArgs, MemoryAccessContext, MemoryBatchArgs, MemoryDeleteArgs,
+    MemoryDeleteProjectArgs, MemoryListArgs, MemoryOrganizeDueClaimArgs,
+    MemoryOrganizeRunCreateArgs, MemoryOrganizeRunListArgs, MemoryOrganizeRunReadArgs,
+    MemoryOrganizeRunUpdateArgs, MemoryQuotaSummaryArgs, MemoryReadArgs,
+    MemoryRecentRejectionsArgs, MemorySearchArgs, MemoryStore, MemoryStoreRegistry,
+    MemoryUpdateArgs, MemoryWriteArgs,
 };
 use crate::services::skills::system_manage_skill_sync;
 
@@ -760,19 +762,28 @@ pub async fn handle_uploaded_image_preview(
 
 pub async fn handle_memory_manage(
     memory_store: Arc<MemoryStore>,
+    memory_registry: Arc<MemoryStoreRegistry>,
     request: proto::MemoryManageRequest,
 ) -> Result<proto::MemoryManageResponse, String> {
-    tauri::async_runtime::spawn_blocking(move || handle_memory_manage_sync(memory_store, request))
-        .await
-        .map_err(|e| format!("gateway memory manage join failed: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        handle_memory_manage_sync(memory_store, memory_registry, request)
+    })
+    .await
+    .map_err(|e| format!("gateway memory manage join failed: {e}"))?
 }
 
 fn handle_memory_manage_sync(
     memory_store: Arc<MemoryStore>,
+    memory_registry: Arc<MemoryStoreRegistry>,
     request: proto::MemoryManageRequest,
 ) -> Result<proto::MemoryManageResponse, String> {
     let command = request.command.trim();
     let result = match command {
+        "memory_scoped" => {
+            let scoped = parse_memory_args::<ScopedMemoryRequest>(&request.args_json, command)?;
+            Ok(memory_registry.execute(scoped.context, &scoped.command, scoped.args)?)
+        }
+        "memory_spaces_list" => serde_json::to_value(memory_registry.list_spaces()?),
         "memory_list" => {
             let args = parse_memory_args::<MemoryListArgs>(&request.args_json, command)?;
             serde_json::to_value(memory_store.list(args)?)
@@ -904,6 +915,15 @@ fn handle_memory_manage_sync(
     let result_json = serde_json::to_string(&result)
         .map_err(|e| format!("serialize {command} result JSON failed: {e}"))?;
     Ok(proto::MemoryManageResponse { result_json })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedMemoryRequest {
+    context: MemoryAccessContext,
+    command: String,
+    #[serde(default)]
+    args: Value,
 }
 
 fn parse_memory_args<T>(raw: &str, command: &str) -> Result<T, String>

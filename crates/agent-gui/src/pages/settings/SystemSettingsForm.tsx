@@ -1,7 +1,6 @@
 import { useState } from "react";
 import {
   CheckCircle2,
-  Cpu,
   Globe,
   LogOut,
   MessageSquare,
@@ -10,8 +9,6 @@ import {
   Moon,
   ScanText,
   Sun,
-  Terminal,
-  Wrench,
 } from "../../components/icons";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -25,7 +22,6 @@ import {
 import { SUPPORTED_LOCALES, useLocale } from "../../i18n";
 import {
   CLOSE_WINDOW_BEHAVIOR_OPTIONS,
-  type ExecutionMode,
   type FontScaleSettings,
   isValidSystemProxyHost,
   type SystemProxyConfig,
@@ -37,6 +33,7 @@ import {
 } from "../../lib/settings";
 import { AgentActivationSwitch } from "./shared";
 import { AutoArchiveSection } from "./AutoArchiveSection";
+import { SettingsModeSelector } from "./SettingsModeSelector";
 import type { SettingsSectionProps } from "./types";
 
 const FONT_SCALE_OPTIONS = [0.9, 1, 1.1, 1.2] as const;
@@ -46,7 +43,6 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
   const { t } = useLocale();
 
   const executionMode = settings.system.executionMode;
-  const isClassicAgentMode = executionMode === "tools";
   const isAgentDevMode = executionMode === "agent-dev";
   const appearanceIcon =
     settings.theme === "system" ? (
@@ -152,120 +148,29 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
 
   return (
     <div className="space-y-6">
-      <div className="space-y-3">
-        <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-          <Terminal className="h-4 w-4 text-muted-foreground" />
-          {t("settings.executionMode")}
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-          <button
-            type="button"
-            onClick={() =>
-              setSettings((prev) => updateSystem(prev, { executionMode: "text" as ExecutionMode }))
-            }
-            className={`group relative flex flex-col items-start gap-3 rounded-xl border-2 p-4 text-left transition-all ${
-              executionMode === "text"
-                ? "border-primary bg-primary/5 shadow-sm shadow-primary/10"
-                : "border-transparent bg-muted/40 hover:border-border hover:bg-muted/60"
-            }`}
-          >
-            <div
-              className={`flex h-10 w-10 items-center justify-center rounded-xl transition-colors ${
-                executionMode === "text"
-                  ? "bg-primary/10 text-primary"
-                  : "bg-muted text-muted-foreground group-hover:bg-accent"
-              }`}
-            >
-              <MessageSquare className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-sm font-semibold">{t("settings.chatMode")}</div>
-              <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                {t("settings.chatModeDesc")}
-              </div>
-            </div>
-            {executionMode === "text" ? (
-              <div className="absolute right-3 top-3">
-                <CheckCircle2 className="h-4.5 w-4.5 text-primary" />
-              </div>
-            ) : null}
-          </button>
-
-          <button
-            type="button"
-            onClick={() =>
-              setSettings((prev) => updateSystem(prev, { executionMode: "tools" as ExecutionMode }))
-            }
-            className={`group relative flex flex-col items-start gap-3 rounded-xl border-2 p-4 text-left transition-all ${
-              isClassicAgentMode
-                ? "border-primary bg-primary/5 shadow-sm shadow-primary/10"
-                : "border-transparent bg-muted/40 hover:border-border hover:bg-muted/60"
-            }`}
-          >
-            <div
-              className={`flex h-10 w-10 items-center justify-center rounded-xl transition-colors ${
-                isClassicAgentMode
-                  ? "bg-primary/10 text-primary"
-                  : "bg-muted text-muted-foreground group-hover:bg-accent"
-              }`}
-            >
-              <Wrench className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-sm font-semibold">{t("settings.agentMode")}</div>
-              <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                {t("settings.agentModeDesc")}
-              </div>
-            </div>
-            {isClassicAgentMode ? (
-              <div className="absolute right-3 top-3">
-                <CheckCircle2 className="h-4.5 w-4.5 text-primary" />
-              </div>
-            ) : null}
-          </button>
-
-          <button
-            type="button"
-            onClick={() =>
+      <section className="settings-form-section" data-setting-anchor="execution">
+        <SettingsModeSelector settings={settings} setSettings={setSettings} />
+        <label className="settings-debug-row">
+          <span>
+            {t("settings.overview.debug")}
+            <small className="block text-xs text-muted-foreground">{t("settings.agentDevModeDesc")}</small>
+          </span>
+          <input
+            type="checkbox"
+            role="switch"
+            checked={isAgentDevMode}
+            disabled={executionMode === "text"}
+            onChange={(event) =>
               setSettings((prev) =>
-                updateSystem(prev, { executionMode: "agent-dev" as ExecutionMode }),
+                updateSystem(prev, { executionMode: event.target.checked ? "agent-dev" : "tools" }),
               )
             }
-            className={`group relative flex flex-col items-start gap-3 rounded-xl border-2 p-4 text-left transition-all ${
-              isAgentDevMode
-                ? "border-primary bg-primary/5 shadow-sm shadow-primary/10"
-                : "border-transparent bg-muted/40 hover:border-border hover:bg-muted/60"
-            }`}
-          >
-            <div
-              className={`flex h-10 w-10 items-center justify-center rounded-xl transition-colors ${
-                isAgentDevMode
-                  ? "bg-primary/10 text-primary"
-                  : "bg-muted text-muted-foreground group-hover:bg-accent"
-              }`}
-            >
-              <Cpu className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="text-sm font-semibold">{t("settings.agentDevMode")}</div>
-              <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                {t("settings.agentDevModeDesc")}
-              </div>
-            </div>
-            {isAgentDevMode ? (
-              <div className="absolute right-3 top-3">
-                <CheckCircle2 className="h-4.5 w-4.5 text-primary" />
-              </div>
-            ) : null}
-          </button>
-        </div>
-      </div>
-
-      <div className="border-t" />
+          />
+        </label>
+      </section>
 
       <div className="grid gap-4 md:grid-cols-2">
-        <section className="space-y-3 rounded-2xl border border-border/60 bg-card p-4">
+        <section className="settings-form-section space-y-3" data-setting-anchor="appearance">
           <div className="flex items-start gap-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -312,7 +217,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
           </div>
         </section>
 
-        <section className="space-y-3 rounded-2xl border border-border/60 bg-card p-4">
+        <section className="settings-form-section space-y-3" data-setting-anchor="language">
           <div className="flex items-start gap-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -361,7 +266,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
         </section>
       </div>
 
-      <section className="space-y-3 rounded-2xl border border-border/60 bg-card p-4">
+      <section className="settings-form-section space-y-3" data-setting-anchor="proxy">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-sm font-medium text-foreground">
             <Globe className="h-4 w-4 text-muted-foreground" />
@@ -479,7 +384,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
         </div>
       </section>
 
-      <section className="space-y-3 rounded-2xl border border-border/60 bg-card p-4">
+      <section className="settings-form-section space-y-3" data-setting-anchor="window">
         <div className="flex items-center gap-2 text-sm font-medium text-foreground">
           <Minimize2 className="h-4 w-4 text-muted-foreground" />
           {t("settings.closeWindowBehavior")}
@@ -539,7 +444,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
         </div>
       </section>
 
-      <section className="space-y-3 rounded-2xl border border-border/60 bg-card p-4">
+      <section className="settings-form-section space-y-3" data-setting-anchor="font">
         <div className="flex items-center gap-2 text-sm font-medium text-foreground">
           <ScanText className="h-4 w-4 text-muted-foreground" />
           {t("settings.fontSize")}
@@ -575,7 +480,7 @@ export function SystemSettingsForm(props: SettingsSectionProps) {
           ))}
         </div>
       </section>
-      <AutoArchiveSection projects={settings.system.workspaceProjects} />
+      <div data-setting-anchor="archive"><AutoArchiveSection projects={settings.system.workspaceProjects} /></div>
     </div>
   );
 }

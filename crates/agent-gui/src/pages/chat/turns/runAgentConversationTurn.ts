@@ -1,3 +1,4 @@
+import { type MemoryAccessContext, resolveMemoryAccessContext } from "../../../lib/memory/api";
 import type {
   AssistantMessage,
   Context,
@@ -227,6 +228,7 @@ export type RunAgentConversationTurnParams = {
   skillAccessPolicy?: SkillAccessPolicy;
   /** Allows callers such as unattended runtimes to disable shared memory and extraction. */
   memoryEnabled?: boolean;
+  memoryContext?: MemoryAccessContext;
   principal?: PrincipalContext;
   /** Model behind the VisualReview tool (configured review slot or the chat model). */
   visualReview?: VisualReviewModelConfig;
@@ -356,6 +358,10 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     throw new Error("Tool mode requires a project directory from the chat sidebar.");
   }
 
+  const memoryContext = resolveMemoryAccessContext(
+    conversationId, principal, params.memoryContext,
+  );
+
   // Reset per-turn dedup state so <already-written-this-turn> reflects only
   // this turn. In-flight extraction from the previous turn keeps running.
   if (memoryEnabled) {
@@ -458,6 +464,8 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
     getMcpSettings,
     applyMcpOps,
     memoryEnabled,
+    memoryContext,
+    conversationId,
     remoteWebTunnelsEnabled,
     tunnelProjectPathKey: workspaceProjectPathKey(effectiveWorkdir),
     tunnelPublicBaseUrl,
@@ -1036,6 +1044,7 @@ export async function runAgentConversationTurn(params: RunAgentConversationTurnP
       onPrimaryFailure: memoryExtractionModel ? onMemoryExtractionModelFailure : undefined,
       sessionId,
       conversationId,
+      memoryContext,
       workdir: conversationCwd ?? effectiveWorkdir,
       messages: buildPreparedContext(finalState).messages,
       statusText: memoryExtractionStatusText,

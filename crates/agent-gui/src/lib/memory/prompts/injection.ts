@@ -1,7 +1,7 @@
 // Injection audience: renders the "# Memory Index" system-prompt section and
 // the "## Memory" tools-suffix rules for the MAIN conversation model.
 
-import type { MemoryOverviewEntry, MemoryOverviewResponse } from "../api";
+import type { MemoryAccessContext, MemoryOverviewEntry, MemoryOverviewResponse } from "../api";
 import { memoryIndexOverview } from "../api";
 import { INDEX_MAX_ENTRIES_PER_BUCKET, INDEX_MAX_PROMPT_CHARS } from "../config";
 import {
@@ -170,8 +170,8 @@ export function formatMemoryOverview(overview: MemoryOverviewResponse, workdir?:
   return `${text.slice(0, INDEX_MAX_PROMPT_CHARS)}\n\n${MEMORY_PROMPT_TRUNCATION_SUFFIX}`;
 }
 
-export async function buildMemoryOverviewSection(workdir?: string) {
-  const overview = await memoryIndexOverview(workdir);
+export async function buildMemoryOverviewSection(workdir?: string, memoryContext?: MemoryAccessContext) {
+  const overview = await memoryIndexOverview(workdir, memoryContext);
   const hasEntries =
     overview.user.length > 0 ||
     overview.project.length > 0 ||

@@ -1,3 +1,4 @@
+import { type MemoryAccessContext, resolveMemoryAccessContext } from "../../../lib/memory/api";
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import type { CompactionController } from "../../../lib/chat/compaction/controller";
 import { estimateTextTokenUnits } from "../../../lib/chat/compaction/tokenLedger";
@@ -105,6 +106,7 @@ export type RunTextConversationTurnParams = {
   persistConversationWithHistorySync: (params: PersistConversationParams) => Promise<boolean>;
   memoryExtractionModel?: MemoryExtractionModelConfig;
   memoryEnabled?: boolean;
+  memoryContext?: MemoryAccessContext;
   onMemoryExtractionModelFailure?: (model: MemoryExtractionModelConfig) => void;
   memoryExtractionStatusText?: MemoryExtractionStatusText;
 };
@@ -146,6 +148,10 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
     onMemoryExtractionModelFailure,
     memoryExtractionStatusText,
   } = params;
+
+  const memoryContext = resolveMemoryAccessContext(
+    conversationId, undefined, params.memoryContext,
+  );
 
   // Reset per-turn dedup state so <already-written-this-turn> reflects only
   // this turn. In-flight extraction from the previous turn keeps running.
@@ -440,6 +446,7 @@ export async function runTextConversationTurn(params: RunTextConversationTurnPar
       onPrimaryFailure: memoryExtractionModel ? onMemoryExtractionModelFailure : undefined,
       sessionId,
       conversationId,
+      memoryContext,
       workdir: conversationCwd,
       messages: buildPreparedContext(finalState).messages,
       statusText: memoryExtractionStatusText,

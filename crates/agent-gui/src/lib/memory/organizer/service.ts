@@ -17,6 +17,7 @@ import {
 } from "../../settings";
 import { createMemoryTools } from "../../tools/memoryTools";
 import {
+  type MemoryAccessContext,
   type MemoryBatchResponse,
   type MemoryOrganizeRun,
   memoryApplyBatch,
@@ -26,6 +27,7 @@ import {
   memoryOrganizeRunUpdate,
   memoryQuotaSummary,
   memoryRead,
+  memorySpacesList,
 } from "../api";
 import { ORGANIZER_MAX_WAKE_DELAY_MS, ORGANIZER_RAW_PROTOCOL_CHARS } from "../config";
 import {
@@ -177,17 +179,24 @@ function toolResultMessage(
   };
 }
 
-async function listOrganizerEntries(run: MemoryOrganizeRun, workdir: string) {
+async function listOrganizerEntries(
+  run: MemoryOrganizeRun,
+  workdir: string,
+  memoryContext?: MemoryAccessContext,
+) {
   const entries = [];
   let offset = 0;
   for (;;) {
-    const page = await memoryList({
-      workdir,
-      includeAllProjects: run.scope !== "current-project",
-      includeDaily: false,
-      limit: 1000,
-      offset,
-    });
+    const page = await memoryList(
+      {
+        workdir,
+        includeAllProjects: run.scope !== "current-project",
+        includeDaily: false,
+        limit: 1000,
+        offset,
+      },
+      memoryContext,
+    );
     entries.push(...page.entries);
     if (!page.truncated) break;
     offset += page.entries.length;
@@ -199,15 +208,19 @@ async function listOrganizerEntries(run: MemoryOrganizeRun, workdir: string) {
 async function readOrganizerEntries(
   entries: Awaited<ReturnType<typeof listOrganizerEntries>>,
   workdir: string,
+  memoryContext?: MemoryAccessContext,
 ): Promise<OrganizerEntry[]> {
   const out: OrganizerEntry[] = [];
   for (const entry of entries) {
-    const read = await memoryRead({
-      slug: entry.slug,
-      scope: entry.scope,
-      workdir: entry.scope === "project" ? entry.workdirPath || workdir : workdir,
-      workdirHash: entry.scope === "project" ? entry.workdirHash : undefined,
-    });
+    const read = await memoryRead(
+      {
+        slug: entry.slug,
+        scope: entry.scope,
+        workdir: entry.scope === "project" ? entry.workdirPath || workdir : workdir,
+        workdirHash: entry.scope === "project" ? entry.workdirHash : undefined,
+      },
+      memoryContext,
+    );
     out.push({ ...entry, body: read.body });
   }
   return out;
@@ -319,6 +332,7 @@ async function runOrganizerPlanPrompt(params: {
   prompt: string;
   workdir: string;
   tokens: { total: number };
+  memoryContext?: MemoryAccessContext;
 }): Promise<OrganizerClusterPlan> {
   const { model } = resolveOrganizerProvider(params.run, params.settings);
   const memoryBundle = createMemoryTools({
@@ -326,6 +340,7 @@ async function runOrganizerPlanPrompt(params: {
     mode: "ro",
     actor: "extractor",
     model,
+    memoryContext: params.memoryContext,
   });
   const captured: {
     plan?: Omit<OrganizerClusterPlan, "raw">;
@@ -397,51 +412,61 @@ async function buildOrganizerClusters(params: {
 async function executeOrganizerRun(
   run: MemoryOrganizeRun,
   settings: AppSettings,
-  setSettings: SetSettings,
+  memoryContext?: MemoryAccessContext,
+  targetWorkdir?: string,
 ) {
-  const workdir = settings.system.workdir.trim();
+  const workdir = (targetWorkdir ?? settings.system.workdir).trim();
   const startedAt = Date.now();
   const tokens = { total: 0 };
   const stats = emptyStats();
   const report: OrganizeRunReportV4 = createEmptyRunReport();
 
   // --- scan -----------------------------------------------------------------
-  await memoryOrganizeRunUpdate({ runId: run.runId, status: "running", startedAt, phase: "scan" });
-  const quotaSummary = await memoryQuotaSummary({ workdir: workdir || undefined }).catch(
-    () => null,
+  await memoryOrganizeRunUpdate(
+    { runId: run.runId, status: "running", startedAt, phase: "scan" },
+    memoryContext,
   );
+  const quotaSummary = await memoryQuotaSummary(
+    { workdir: workdir || undefined },
+    memoryContext,
+  ).catch(() => null);
   const ladder = deriveQuotaLadder(quotaSummary);
   const quotaHeadroomAtStart = ladder.tightestScope?.headroom;
 
   try {
-    const metas = await listOrganizerEntries(run, workdir);
-    const entries = await readOrganizerEntries(metas, workdir);
+    const metas = await listOrganizerEntries(run, workdir, memoryContext);
+    const entries = await readOrganizerEntries(metas, workdir, memoryContext);
     stats.inputCount = entries.length;
 
     if (entries.length === 0) {
-      await memoryOrganizeRunUpdate({
-        runId: run.runId,
-        status: "skipped",
-        finishedAt: Date.now(),
-        finalSummary: buildFinalSummary(stats),
-        inputCount: 0,
-        clusterCount: 0,
-        phase: "scan",
-        quotaHeadroomAtStart,
-        tokenUsageTotal: tokens.total,
-        report,
-      });
-      advanceScheduledOrganizer(run, setSettings);
+      await memoryOrganizeRunUpdate(
+        {
+          runId: run.runId,
+          status: "skipped",
+          finishedAt: Date.now(),
+          finalSummary: buildFinalSummary(stats),
+          inputCount: 0,
+          clusterCount: 0,
+          phase: "scan",
+          quotaHeadroomAtStart,
+          tokenUsageTotal: tokens.total,
+          report,
+        },
+        memoryContext,
+      );
       return;
     }
 
     // --- cluster --------------------------------------------------------------
-    await memoryOrganizeRunUpdate({
-      runId: run.runId,
-      phase: "cluster",
-      inputCount: stats.inputCount,
-      quotaHeadroomAtStart,
-    });
+    await memoryOrganizeRunUpdate(
+      {
+        runId: run.runId,
+        phase: "cluster",
+        inputCount: stats.inputCount,
+        quotaHeadroomAtStart,
+      },
+      memoryContext,
+    );
     const clusterPlan = await buildOrganizerClusters({ entries, run, settings, workdir, tokens });
     const clusters = clusterPlan.clusters;
     stats.clusterCount = clusters.length;
@@ -462,12 +487,15 @@ async function executeOrganizerRun(
     };
 
     // --- plan -----------------------------------------------------------------
-    await memoryOrganizeRunUpdate({
-      runId: run.runId,
-      phase: "plan",
-      clusterCount: stats.clusterCount,
-      tokenUsageTotal: tokens.total,
-    });
+    await memoryOrganizeRunUpdate(
+      {
+        runId: run.runId,
+        phase: "plan",
+        clusterCount: stats.clusterCount,
+        tokenUsageTotal: tokens.total,
+      },
+      memoryContext,
+    );
     const mode = normalizeOrganizerMode(run.mode);
     const parsedResults: ParsedClusterResult[] = [];
     for (const cluster of clusters) {
@@ -485,6 +513,7 @@ async function executeOrganizerRun(
           }),
           workdir,
           tokens,
+          memoryContext,
         });
         parsedResults.push({ cluster, plan });
         report.clusterSummaries.push(plan.summary);
@@ -510,26 +539,28 @@ async function executeOrganizerRun(
         severity: "error",
         message,
       });
-      await memoryOrganizeDueComplete({
-        runId: run.runId,
-        status: "failed",
-        finishedAt: Date.now(),
-        inputCount: stats.inputCount,
-        clusterCount: stats.clusterCount,
-        parseFailures: stats.parseFailures,
-        error: message,
-        finalSummary: `本次记忆整理失败：${message}请重新运行或调整记忆整理模型。`,
-        phase: "plan",
-        quotaHeadroomAtStart,
-        tokenUsageTotal: tokens.total,
-        report,
-      });
-      advanceScheduledOrganizer(run, setSettings);
+      await memoryOrganizeDueComplete(
+        {
+          runId: run.runId,
+          status: "failed",
+          finishedAt: Date.now(),
+          inputCount: stats.inputCount,
+          clusterCount: stats.clusterCount,
+          parseFailures: stats.parseFailures,
+          error: message,
+          finalSummary: `本次记忆整理失败：${message}请重新运行或调整记忆整理模型。`,
+          phase: "plan",
+          quotaHeadroomAtStart,
+          tokenUsageTotal: tokens.total,
+          report,
+        },
+        memoryContext,
+      );
       return;
     }
 
     // --- gate -----------------------------------------------------------------
-    await memoryOrganizeRunUpdate({ runId: run.runId, phase: "gate" });
+    await memoryOrganizeRunUpdate({ runId: run.runId, phase: "gate" }, memoryContext);
     const gated = buildDecisions(parsedResults, run);
     stats.reviewSkipped += gated.reviewSkipped;
     stats.mergedCount = gated.mergedCount;
@@ -537,7 +568,7 @@ async function executeOrganizerRun(
     report.reviewItems.push(...gated.reviewItems);
 
     // --- apply ----------------------------------------------------------------
-    await memoryOrganizeRunUpdate({ runId: run.runId, phase: "apply" });
+    await memoryOrganizeRunUpdate({ runId: run.runId, phase: "apply" }, memoryContext);
     let batch: MemoryBatchResponse = { created: [], updated: [], deleted: [], warnings: [] };
     if (run.trigger === "manual") {
       stats.pendingSafeDecisions = gated.decisions.length;
@@ -548,12 +579,15 @@ async function executeOrganizerRun(
         failedDecisionKeys: [],
       };
     } else if (gated.decisions.length > 0) {
-      batch = await memoryApplyBatch({
-        workdir,
-        trigger: "memory-organize",
-        model: modelLabel(run, settings),
-        decisions: gated.decisions,
-      });
+      batch = await memoryApplyBatch(
+        {
+          workdir,
+          trigger: "memory-organize",
+          model: modelLabel(run, settings),
+          decisions: gated.decisions,
+        },
+        memoryContext,
+      );
       stats.createdCount = batch.created.length;
       stats.updatedCount = batch.updated.length;
       stats.deletedCount = batch.deleted.length;
@@ -570,52 +604,55 @@ async function executeOrganizerRun(
     }
 
     const finalCount = Math.max(0, stats.inputCount - stats.deletedCount + stats.createdCount);
-    await memoryOrganizeDueComplete({
-      runId: run.runId,
-      status: "succeeded",
-      finishedAt: Date.now(),
-      inputCount: stats.inputCount,
-      clusterCount: stats.clusterCount,
-      safeApplied: stats.safeApplied,
-      reviewSkipped: stats.reviewSkipped,
-      createdCount: stats.createdCount,
-      updatedCount: stats.updatedCount,
-      deletedCount: stats.deletedCount,
-      mergedCount: stats.mergedCount,
-      parseFailures: stats.parseFailures,
-      finalSummary: buildFinalSummary(stats),
-      phase: "apply",
-      finalCount,
-      compressionRatio: stats.inputCount > 0 ? finalCount / stats.inputCount : undefined,
-      compressionTarget: ladder.compressionTarget,
-      quotaHeadroomAtStart,
-      tokenUsageTotal: tokens.total,
-      report,
-    });
-
-    advanceScheduledOrganizer(run, setSettings);
+    await memoryOrganizeDueComplete(
+      {
+        runId: run.runId,
+        status: "succeeded",
+        finishedAt: Date.now(),
+        inputCount: stats.inputCount,
+        clusterCount: stats.clusterCount,
+        safeApplied: stats.safeApplied,
+        reviewSkipped: stats.reviewSkipped,
+        createdCount: stats.createdCount,
+        updatedCount: stats.updatedCount,
+        deletedCount: stats.deletedCount,
+        mergedCount: stats.mergedCount,
+        parseFailures: stats.parseFailures,
+        finalSummary: buildFinalSummary(stats),
+        phase: "apply",
+        finalCount,
+        compressionRatio: stats.inputCount > 0 ? finalCount / stats.inputCount : undefined,
+        compressionTarget: ladder.compressionTarget,
+        quotaHeadroomAtStart,
+        tokenUsageTotal: tokens.total,
+        report,
+      },
+      memoryContext,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await memoryOrganizeDueComplete({
-      runId: run.runId,
-      status: "failed",
-      finishedAt: Date.now(),
-      inputCount: stats.inputCount,
-      clusterCount: stats.clusterCount,
-      safeApplied: stats.safeApplied,
-      reviewSkipped: stats.reviewSkipped,
-      createdCount: stats.createdCount,
-      updatedCount: stats.updatedCount,
-      deletedCount: stats.deletedCount,
-      mergedCount: stats.mergedCount,
-      parseFailures: stats.parseFailures,
-      error: message,
-      finalSummary: `本次记忆整理失败：${message}`,
-      quotaHeadroomAtStart,
-      tokenUsageTotal: tokens.total,
-      report,
-    });
-    advanceScheduledOrganizer(run, setSettings);
+    await memoryOrganizeDueComplete(
+      {
+        runId: run.runId,
+        status: "failed",
+        finishedAt: Date.now(),
+        inputCount: stats.inputCount,
+        clusterCount: stats.clusterCount,
+        safeApplied: stats.safeApplied,
+        reviewSkipped: stats.reviewSkipped,
+        createdCount: stats.createdCount,
+        updatedCount: stats.updatedCount,
+        deletedCount: stats.deletedCount,
+        mergedCount: stats.mergedCount,
+        parseFailures: stats.parseFailures,
+        error: message,
+        finalSummary: `本次记忆整理失败：${message}`,
+        quotaHeadroomAtStart,
+        tokenUsageTotal: tokens.total,
+        report,
+      },
+      memoryContext,
+    );
   }
 }
 
@@ -623,7 +660,7 @@ export type MemoryOrganizerService = {
   /** Re-arm the wake timer from current settings (call on settings change). */
   configure: () => void;
   /** Run Now / external trigger: claim and execute immediately. */
-  poke: () => void;
+  poke: (memoryContext?: MemoryAccessContext) => void;
   dispose: () => void;
 };
 
@@ -631,6 +668,7 @@ export function createMemoryOrganizerService(deps: OrganizerServiceDeps): Memory
   let disposed = false;
   let running = false;
   let wakeTimeout: ReturnType<typeof setTimeout> | null = null;
+  const pendingPokes = new Map<string, MemoryAccessContext | undefined>();
 
   function clearWake() {
     if (wakeTimeout === null) return;
@@ -650,16 +688,25 @@ export function createMemoryOrganizerService(deps: OrganizerServiceDeps): Memory
     return Math.max(0, dueAt - Date.now());
   }
 
-  function scheduleNextWake() {
+  function scheduleNextWake(minimumDelay = 0) {
     clearWake();
     if (disposed) return;
     const delay = scheduledDelayMs();
     if (delay === null) return;
-    wakeTimeout = setTimeout(() => void tick(false), Math.min(delay, ORGANIZER_MAX_WAKE_DELAY_MS));
+    wakeTimeout = setTimeout(
+      () => void tick(false),
+      Math.max(minimumDelay, Math.min(delay, ORGANIZER_MAX_WAKE_DELAY_MS)),
+    );
   }
 
-  async function tick(forceClaim: boolean) {
-    if (disposed || running) return;
+  async function tick(forceClaim: boolean, memoryContext?: MemoryAccessContext) {
+    if (disposed) return;
+    // Keep the target immutable through queued claims and asynchronous model calls.
+    const target = memoryContext ? Object.freeze({ ...memoryContext }) : undefined;
+    if (running) {
+      if (forceClaim) pendingPokes.set(target?.conversationId ?? "", target);
+      return;
+    }
     const current = deps.getSettings();
     const model = current.memory.organizerModel;
     const delay = scheduledDelayMs();
@@ -674,27 +721,70 @@ export function createMemoryOrganizerService(deps: OrganizerServiceDeps): Memory
       return;
     }
     running = true;
+    let retryDelay = 0;
     try {
-      const claim = await memoryOrganizeDueClaim({
-        enabled: current.memory.organizerEnabled,
-        dueAt: current.memory.organizerNextRunAt,
-        now: Date.now(),
-        model,
-        scope: current.memory.organizerScope,
-        mode: current.memory.organizerMode,
-      });
-      if (claim.run) {
-        if (claim.run.status === "skipped") {
-          advanceScheduledOrganizer(claim.run, deps.setSettings);
-        } else {
-          await executeOrganizerRun(claim.run, current, deps.setSettings);
+      // Each space claims, scans, clusters and writes in its own database.
+      // Use one schedule snapshot so finishing local memory cannot move the
+      // deadline before the WeCom spaces have been processed.
+      const spaces =
+        !forceClaim || target
+          ? await memorySpacesList().catch((error) => {
+              console.error("memory organizer could not list WeCom spaces", error);
+              return [];
+            })
+          : [];
+      const localTarget = { memoryContext: undefined, workdir: current.system.workdir };
+      const spaceTargets = spaces.map((space) => ({
+        memoryContext: Object.freeze({ conversationId: space.conversationId }),
+        workdir: space.workdir ?? "",
+      }));
+      const selectedTarget = target
+        ? spaceTargets.find((space) => space.memoryContext.conversationId === target.conversationId)
+        : localTarget;
+      if (forceClaim && !selectedTarget) {
+        throw new Error("The requested memory space is no longer available.");
+      }
+      const targets = forceClaim ? [selectedTarget!] : [localTarget, ...spaceTargets];
+      let scheduledRun: MemoryOrganizeRun | undefined;
+      for (const { memoryContext: context, workdir } of targets) {
+        if (disposed) break;
+        try {
+          const claim = await memoryOrganizeDueClaim(
+            {
+              enabled: !forceClaim && current.memory.organizerEnabled,
+              dueAt: current.memory.organizerNextRunAt,
+              now: Date.now(),
+              model,
+              scope: current.memory.organizerScope,
+              mode: current.memory.organizerMode,
+            },
+            context,
+          );
+          if (!claim.run) continue;
+          if (claim.run.status !== "skipped") {
+            await executeOrganizerRun(claim.run, current, context, workdir);
+          }
+          if (claim.run.trigger === "scheduled") scheduledRun = claim.run;
+        } catch (error) {
+          // A removed binding or disabled permission must never fall back to
+          // the desktop database, or prevent other spaces from being handled.
+          console.error("memory organizer space failed", context?.conversationId ?? "local", error);
+          retryDelay = 60_000;
         }
       }
+      if (scheduledRun) advanceScheduledOrganizer(scheduledRun, deps.setSettings);
     } catch (error) {
       console.error("memory organizer service failed", error);
+      retryDelay = 60_000;
     } finally {
       running = false;
-      scheduleNextWake();
+      const queued = pendingPokes.entries().next();
+      if (!disposed && !queued.done) {
+        pendingPokes.delete(queued.value[0]);
+        void tick(true, queued.value[1]);
+      } else {
+        scheduleNextWake(retryDelay);
+      }
     }
   }
 
@@ -703,11 +793,12 @@ export function createMemoryOrganizerService(deps: OrganizerServiceDeps): Memory
       // Settings changed: re-arm the timer; claim only if already due.
       void tick(false);
     },
-    poke() {
-      void tick(true);
+    poke(memoryContext) {
+      void tick(true, memoryContext);
     },
     dispose() {
       disposed = true;
+      pendingPokes.clear();
       clearWake();
     },
   };
@@ -726,8 +817,8 @@ export function installMemoryOrganizerService(service: MemoryOrganizerService | 
 
 /** Run Now entry. Returns false when no organizer runs in this frontend (the
  *  gateway web build ships a platform stub that always returns false). */
-export function pokeMemoryOrganizer(): boolean {
+export function pokeMemoryOrganizer(memoryContext?: MemoryAccessContext): boolean {
   if (!activeService) return false;
-  activeService.poke();
+  activeService.poke(memoryContext);
   return true;
 }

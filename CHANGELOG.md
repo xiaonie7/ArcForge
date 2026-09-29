@@ -1,5 +1,25 @@
 # 更新日志
 
+## v0.3.11
+
+本次发布为 **功能版本**，核心是企微通道的按会话隔离记忆空间（channel memory spaces），同时修复企微交互卡片的流式续期与空回复问题，并重构桌面端设置页。
+
+### 新功能
+
+- **企微记忆空间隔离（memory registry + scoped memory）**：仅企微会话使用隔离的记忆空间，空间由桌面端持久化、受信任的安装与用户绑定推导（群聊额外含群 ID），新会话沿用同一空间；普通桌面与浏览器会话继续使用本地记忆库。企微记忆落在 `~/.arcforge/channel-memory/<space-hash>/`，拥有独立 Markdown 文件与 SQLite 索引；召回、MemoryManager 操作、延迟抽取与 organizer 运行共用同一捕获上下文。缺失绑定或记忆策略关闭时一律 fail closed，作用域历史搜索在共享索引支持按 owner 过滤前保持禁用。桌面端新增 `memory_scoped` / `memory_spaces_list` 命令（`registry.rs`），前端 `api.ts` 统一经 `resolveMemoryAccessContext` 路由，防止缺上下文的调用把企微写入写进本地库。
+- **记忆面板空间选择**：记忆设置面板可在本地与企微空间之间切换查看与清理，当前仅列出存在活跃绑定且已启用记忆的空间；仅归档或已停用的空间保留在磁盘但不进入列表与定时整理。
+
+### 修复
+
+- **企微流式回复续期（worker.py）**：刷新已到期时不再重启整轮 interval 导致流提前过期，改为等待当前刷新选择完成；选择被桌面端解决后（包括成功且无需确认回复的情形）恢复进度/保活节奏；重复回调命中已完成但无文本的记录时不再空回复。
+- **企微交互卡片提示语（interactions.py）**：卡片可用时提示"请直接点击卡片中的选项按钮"，卡片渲染失败回退 Markdown 时才提示回复选项序号；成功提交（含重复回调）静默消费，不再向群里补发成功通知。
+
+### 其他
+
+- **设置页重构**：`SettingsPage` 拆分为 `SettingsOverview` / `SettingsModeSelector`，抽出 `useSettingsRuntime` / `useSettingsFocus` 与 `settings.css`，`SystemSettingsForm` 精简；补充中文 i18n 词条。
+- **测试**：新增 `access-context.test.mjs`（记忆访问上下文解析）、`organizer-spaces.test.mjs`、`settings-spaces.test.mjs`（企微空间列举与面板行为）、`settings-overview.test.mjs`、`memory-scoped-shim.test.mjs`（gateway web 侧 shim），扩充 `test_wecom_aibot.py` 流续期与空回复用例。
+- 桌面端版本（Cargo.toml / package.json / Cargo.lock）统一升级至 0.3.11。
+
 ## v0.3.10
 
 本次发布为 **修复版本**，聚焦三类问题：模板 PPT 源文件被清理后内联编辑/撤销失效、GLM-5.3 系列模型的思考等级映射，以及视觉评审强制关闭 thinking 导致部分模型请求失败。

@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   formatMemoryError,
+  type MemoryAccessContext,
   type MemoryOrganizeRunStatus,
   memoryApplyBatch,
   memoryOrganizeRunClearHistory,
@@ -63,12 +64,14 @@ export function OrganizerHistoryModal(props: {
   t: (key: string) => string;
   onClose: () => void;
   workdir?: string;
+  memoryContext?: MemoryAccessContext;
+  spaceLabel: string;
   onMemoryChanged?: () => void;
 }) {
-  const { t, onClose, workdir, onMemoryChanged } = props;
+  const { t, onClose, workdir, memoryContext, spaceLabel, onMemoryChanged } = props;
   const [statusFilter, setStatusFilter] = useState<"all" | MemoryOrganizeRunStatus>("all");
   const { runs, selectedRun, setSelectedRun, loading, error, setError, reload } =
-    useOrganizeRunHistory({ statusFilter });
+    useOrganizeRunHistory({ statusFilter, memoryContext });
   const [applyingPreview, setApplyingPreview] = useState(false);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
@@ -140,12 +143,15 @@ export function OrganizerHistoryModal(props: {
     setApplyingPreview(true);
     setError(null);
     try {
-      const batch = await memoryApplyBatch({
-        workdir,
-        trigger: "memory-organize",
-        model: modelNameFromRun(selectedRun),
-        decisions: selectedWithKeys.map((item) => item.decision),
-      });
+      const batch = await memoryApplyBatch(
+        {
+          workdir,
+          trigger: "memory-organize",
+          model: modelNameFromRun(selectedRun),
+          decisions: selectedWithKeys.map((item) => item.decision),
+        },
+        memoryContext,
+      );
       const appliedCount = appliedBatchCount(batch);
       const nextReviewItems = buildReviewItemsForBatch(batch, selectedWithKeys);
       const appliedDecisionKeys = successfulDecisionKeys(selectedWithKeys, batch);
@@ -181,18 +187,21 @@ export function OrganizerHistoryModal(props: {
         safeDecisions: safeDecisionsForReport,
         manualApplyState: manualApplyStateForReport,
       };
-      await memoryOrganizeRunUpdate({
-        runId: selectedRun.runId,
-        safeApplied: appliedCount,
-        createdCount: batch.created.length,
-        updatedCount: batch.updated.length,
-        deletedCount: batch.deleted.length,
-        reviewSkipped: selectedRun.reviewSkipped + nextReviewItems.length,
-        finalSummary: existingFinalSummary.includes("手动应用结果")
-          ? manualSummary
-          : `${manualSummary}${existingFinalSummary ? `\n\n模型原始总结：${existingFinalSummary}` : ""}`,
-        report: nextReport,
-      });
+      await memoryOrganizeRunUpdate(
+        {
+          runId: selectedRun.runId,
+          safeApplied: appliedCount,
+          createdCount: batch.created.length,
+          updatedCount: batch.updated.length,
+          deletedCount: batch.deleted.length,
+          reviewSkipped: selectedRun.reviewSkipped + nextReviewItems.length,
+          finalSummary: existingFinalSummary.includes("手动应用结果")
+            ? manualSummary
+            : `${manualSummary}${existingFinalSummary ? `\n\n模型原始总结：${existingFinalSummary}` : ""}`,
+          report: nextReport,
+        },
+        memoryContext,
+      );
       await reload(selectedRun.runId);
       onMemoryChanged?.();
     } catch (err) {
@@ -207,7 +216,7 @@ export function OrganizerHistoryModal(props: {
     setError(null);
     setHistoryFeedback(null);
     try {
-      const response = await memoryOrganizeRunClearHistory();
+      const response = await memoryOrganizeRunClearHistory(memoryContext);
       setClearConfirmOpen(false);
       setSelectedRun(null);
       setSelectedDecisionKeys(new Set());
@@ -241,6 +250,7 @@ export function OrganizerHistoryModal(props: {
               </div>
               <div className="mt-1 text-xs text-muted-foreground">
                 {t("settings.memoryOrganizerHistoryDescription")}
+                <span className="ml-2 font-medium">{spaceLabel}</span>
               </div>
             </div>
             <button

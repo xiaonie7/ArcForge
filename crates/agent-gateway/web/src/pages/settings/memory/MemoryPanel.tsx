@@ -7,10 +7,16 @@
 // crates/agent-gateway/web/src). Keep changes in sync on both ends; platform
 // differences belong in ./platform, never here.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useLocale } from "../../../i18n";
-import type { MemoryMeta } from "../../../lib/memory/api";
+import {
+  formatMemoryError,
+  type MemoryAccessContext,
+  type MemoryMeta,
+  type MemorySpaceInfo,
+  memorySpacesList,
+} from "../../../lib/memory/api";
 import { MEMORY_TYPES, type MemoryType } from "../../../lib/memory/schema";
 import type { AppSettings } from "../../../lib/settings";
 import { MemorySettingsDrawer } from "./MemorySettingsDrawer";
@@ -40,6 +46,7 @@ import {
   buildModelOptions,
   Check,
   ChevronDown,
+  DrawerSelect,
   Folder,
   Globe2,
   Input,
@@ -59,12 +66,105 @@ const EMPTY_CREATE_DRAFT: MemoryCreateDraft = {
   body: "",
 };
 
-export function MemoryPanel(props: {
+type MemoryPanelProps = {
   workdir?: string;
   settings: AppSettings;
   setSettings: (updater: (prev: AppSettings) => AppSettings) => void;
-}) {
+};
+
+export function MemoryPanel(props: MemoryPanelProps) {
+  const [spaces, setSpaces] = useState<MemorySpaceInfo[]>([]);
+  const [selectedSpace, setSelectedSpace] = useState<MemorySpaceInfo | null>(null);
+  const [spacesError, setSpacesError] = useState<string | null>(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    setSpacesError(null);
+    void memorySpacesList()
+      .then((items) => {
+        if (!cancelled) {
+          setSpaces(items);
+          setSelectedSpace((selected) =>
+            selected
+              ? (items.find((space) => space.spaceId === selected.spaceId) ?? selected)
+              : null,
+          );
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) setSpacesError(formatMemoryError(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshVersion]);
+  const memoryContext = useMemo(
+    () =>
+      selectedSpace ? Object.freeze({ conversationId: selectedSpace.conversationId }) : undefined,
+    [selectedSpace],
+  );
+  const spaceLabel = selectedSpace?.label || "本地记忆";
+  const spaceWorkdir = selectedSpace ? selectedSpace.workdir?.trim() || undefined : props.workdir;
+  const availableSpaces =
+    selectedSpace && !spaces.some((space) => space.spaceId === selectedSpace.spaceId)
+      ? [selectedSpace, ...spaces]
+      : spaces;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-3 rounded-xl border border-border/60 bg-card px-4 py-3">
+        <span className="text-sm font-medium">记忆空间</span>
+        <div className="min-w-56 flex-1">
+          <DrawerSelect
+            value={selectedSpace?.spaceId ?? "local"}
+            ariaLabel="选择记忆空间"
+            onValueChange={(value) => {
+              if (value === "local") setSelectedSpace(null);
+              else {
+                const space = availableSpaces.find((item) => item.spaceId === value);
+                if (space) setSelectedSpace(space);
+              }
+            }}
+            options={[
+              { value: "local", label: "本地记忆" },
+              ...availableSpaces.map((space) => ({ value: space.spaceId, label: space.label })),
+            ]}
+          />
+        </div>
+        <Button variant="outline" size="sm" onClick={() => setRefreshVersion((value) => value + 1)}>
+          <RefreshCw className="h-3.5 w-3.5" />
+          刷新空间
+        </Button>
+        <p className="basis-full text-xs text-muted-foreground">
+          查看、编辑和清理仅作用于当前空间。定时整理会分别处理本地记忆和各企业微信空间。
+        </p>
+        {spacesError ? (
+          <p role="alert" className="basis-full text-xs text-destructive">
+            {spacesError}
+          </p>
+        ) : null}
+      </div>
+      {/* Remount every data hook, draft and open review when the space changes.
+          In-flight actions retain their original context and cannot populate the new panel. */}
+      <ScopedMemoryPanel
+        key={`${selectedSpace?.spaceId ?? "local"}:${memoryContext?.conversationId ?? ""}:${spaceWorkdir ?? ""}`}
+        {...props}
+        workdir={spaceWorkdir}
+        memoryContext={memoryContext}
+        spaceLabel={spaceLabel}
+      />
+    </div>
+  );
+}
+
+function ScopedMemoryPanel(
+  props: MemoryPanelProps & {
+    memoryContext?: MemoryAccessContext;
+    spaceLabel: string;
+  },
+) {
   const { t } = useLocale();
+  const { memoryContext, spaceLabel } = props;
   const workdir = props.workdir?.trim() || undefined;
   const [tab, setTab] = useState<MemoryTab>("global");
   const [filter, setFilter] = useState("");
@@ -91,7 +191,7 @@ export function MemoryPanel(props: {
     deleteSelected,
     wipeAll,
     watchOrganizerRun,
-  } = useMemoryPanelData({ workdir, t });
+  } = useMemoryPanelData({ workdir, t, memoryContext });
 
   const modelOptions = useMemo<MemoryModelOption[]>(
     () =>
@@ -232,7 +332,7 @@ export function MemoryPanel(props: {
                 {t("settings.memoryTitle")}
               </div>
               <div className="break-all text-xs text-muted-foreground">
-                {pathsInfo?.root ?? "~/.arcforge/memory"}
+                {pathsInfo?.root ?? (memoryContext ? spaceLabel : "~/.arcforge/memory")}
               </div>
             </div>
             <div className="settings-memory-summary-actions flex flex-wrap items-center gap-2">
@@ -597,6 +697,8 @@ export function MemoryPanel(props: {
           settings={props.settings}
           setSettings={props.setSettings}
           workdir={workdir}
+          memoryContext={memoryContext}
+          spaceLabel={spaceLabel}
           saving={saving}
           t={t}
           onClose={() => setSettingsDrawerOpen(false)}
@@ -631,6 +733,7 @@ export function MemoryPanel(props: {
                     </div>
                     <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
                       {t("settings.memoryWipeConfirmDescription")}
+                      <div className="mt-2 font-medium">当前空间：{spaceLabel}</div>
                     </div>
                   </div>
                 </div>

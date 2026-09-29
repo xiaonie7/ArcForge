@@ -344,6 +344,55 @@ class ReplyChunkingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ReplyStreamKeepaliveTests(unittest.IsolatedAsyncioTestCase):
+    async def test_paused_refresh_resumes_without_waiting_another_full_interval(self):
+        refresh_allowed = asyncio.Event()
+        stop = asyncio.Event()
+        paused = asyncio.Event()
+        wecom = SimpleNamespace(
+            reply_stream=AsyncMock(side_effect=lambda *_args: stop.set() or {"errcode": 0})
+        )
+        trigger_count = 0
+
+        async def refresh_trigger(_stop, wake, _timeout):
+            nonlocal trigger_count
+            trigger_count += 1
+            if trigger_count == 1:
+                # The regular keepalive timer expires while a choice is open.
+                self.assertIsNone(wake)
+                return
+            self.assertIs(wake, refresh_allowed)
+            paused.set()
+            await wake.wait()
+
+        with patch(
+            "connectors.wecom_aibot.worker._wait_for_refresh_trigger",
+            side_effect=refresh_trigger,
+        ):
+            task = asyncio.create_task(
+                _maintain_reply_stream(
+                    wecom,
+                    {},
+                    "stream-1",
+                    refresh_allowed=refresh_allowed,
+                    send_lock=asyncio.Lock(),
+                    stop=stop,
+                )
+            )
+            try:
+                await asyncio.wait_for(paused.wait(), timeout=1)
+                wecom.reply_stream.assert_not_awaited()
+                refresh_allowed.set()
+                await asyncio.wait_for(task, timeout=1)
+            finally:
+                stop.set()
+                refresh_allowed.set()
+                await task
+
+        wecom.reply_stream.assert_awaited_once()
+        self.assertEqual(wecom.reply_stream.await_args.args[1], "stream-1")
+        self.assertIn("正在处理", wecom.reply_stream.await_args.args[2])
+        self.assertFalse(wecom.reply_stream.await_args.args[3])
+
     async def test_keepalive_waits_while_interaction_is_active_then_resumes(self):
         sent = asyncio.Event()
 
@@ -2664,8 +2713,74 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.submit.await_count, 1)
         channel.answer_input.assert_awaited_once()
         wecom.reply_stream_with_card.assert_awaited_once()
-        answer_replies = [call.args[2] for call in wecom.reply_stream.await_args_list]
-        self.assertTrue(any("选择已提交" in text for text in answer_replies))
+        card_prompt = wecom.reply_stream_with_card.await_args.args[2]
+        self.assertIn("请直接点击卡片", card_prompt)
+        self.assertNotIn("回复选项序号", card_prompt)
+        self.assertFalse(
+            any(
+                call.args[0]["body"]["msgid"] == "message-2"
+                for call in wecom.reply_stream.await_args_list
+            ),
+            "selection replies must not create a separate chat message",
+        )
+        replies = [call.args[2:4] for call in wecom.reply_stream.await_args_list]
+        self.assertFalse(any("选择已" in text for text, _finished in replies))
+        self.assertEqual(replies[-1], ("done", True))
+
+        reply_count = wecom.reply_stream.await_count
+        await _handle_text(
+            wecom,
+            channel,
+            dedupe,
+            sessions,
+            _config(),
+            self._frame("message-2", "1"),
+            sequencer,
+            interactions,
+        )
+        self.assertEqual(wecom.reply_stream.await_count, reply_count)
+        self.assertEqual(channel.submit.await_count, 1)
+        channel.answer_input.assert_awaited_once()
+
+    async def test_silent_answer_stays_consumed_after_dedupe_store_reopens(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "wecom-state.sqlite3")
+            sessions = SessionStore(id_factory=lambda: "session-1")
+            session_key = sessions.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            )
+            wecom = self._wecom()
+            interactions = InteractionCoordinator()
+            await interactions.present(
+                self._request(),
+                session_key=session_key,
+                wecom=wecom,
+                frame=self._frame("message-1", "start"),
+                stream_id="stream-1",
+            )
+            channel = SimpleNamespace(
+                submit=AsyncMock(),
+                answer_input=AsyncMock(return_value={"accepted": True}),
+            )
+            frame = self._frame("message-2", "1")
+            for coordinator in (interactions, InteractionCoordinator()):
+                backend = SQLiteStateStore(path, installation_id="installation")
+                try:
+                    await _handle_text(
+                        wecom,
+                        channel,
+                        DedupeStore(state_store=backend),
+                        sessions,
+                        _config(),
+                        frame,
+                        interactions=coordinator,
+                    )
+                finally:
+                    backend.close()
+
+            channel.answer_input.assert_awaited_once()
+            channel.submit.assert_not_awaited()
+            wecom.reply_stream.assert_not_awaited()
 
     async def test_turn_keepalive_pauses_for_input_card_and_resumes_after_resolution(
         self,
@@ -2745,7 +2860,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
             async def resolve_later():
                 await asyncio.sleep(0.01)
                 await input_resolved_handler(
-                    {"interaction_id": "input-1", "status": "answered"}
+                    {"interaction_id": "input-1", "status": "expired"}
                 )
 
             asyncio.create_task(resolve_later())
@@ -2763,7 +2878,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         replies = [call.args[2:4] for call in wecom.reply_stream.await_args_list]
-        self.assertIn(("选择已完成，桌面端正在继续处理。", False), replies)
+        self.assertIn(("选择已超时，桌面端已继续处理。", False), replies)
         self.assertEqual(replies[-1], ("done", True))
 
     async def test_card_failure_falls_back_to_numbered_markdown_without_remote_error(
@@ -2794,6 +2909,8 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("您要分析哪种事业群口径", markdown)
         self.assertIn("1. 业务板块事业群", markdown)
         self.assertIn("回复选项序号", markdown)
+        self.assertNotIn("请点击卡片", markdown)
+        self.assertNotIn("请直接点击卡片", markdown)
         self.assertNotIn("sensitive", markdown)
 
     async def test_card_click_is_mapped_updated_and_duplicate_click_is_idempotent(self):
@@ -2857,6 +2974,47 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         updated_card = wecom.update_template_card.await_args_list[0].args[1]
         self.assertEqual(updated_card["card_type"], "text_notice")
         self.assertEqual(updated_card["main_title"]["title"], "选择已收到")
+        await interactions.handle_resolved(
+            {"interaction_id": "input-1", "status": "answered"}, wecom=wecom
+        )
+        wecom.reply_stream.assert_not_awaited()
+
+    async def test_invalid_and_failed_text_answers_still_show_actionable_feedback(self):
+        interactions = InteractionCoordinator()
+        sessions = SessionStore(id_factory=lambda: "session-1")
+        wecom = self._wecom()
+        await interactions.present(
+            self._request(),
+            session_key=sessions.key(
+                chat_type="single", chat_id="", external_user_id="alice"
+            ),
+            wecom=wecom,
+            frame=self._frame("message-1", "start"),
+            stream_id="stream-1",
+        )
+        channel = SimpleNamespace(
+            submit=AsyncMock(),
+            answer_input=AsyncMock(return_value={"accepted": False, "status": "failed"}),
+        )
+        dedupe = DedupeStore()
+        for message_id, text, expected in (
+            ("message-2", "9", "有效的选项序号"),
+            ("message-3", "1", "选择提交失败"),
+        ):
+            await _handle_text(
+                wecom,
+                channel,
+                dedupe,
+                sessions,
+                _config(),
+                self._frame(message_id, text),
+                interactions=interactions,
+            )
+            self.assertIn(expected, wecom.reply_stream.await_args.args[2])
+            self.assertTrue(wecom.reply_stream.await_args.args[3])
+        channel.submit.assert_not_awaited()
+        channel.answer_input.assert_awaited_once()
+        self.assertEqual(await interactions.pending_count(), 1)
 
     async def test_multi_question_card_advances_one_button_question_at_a_time(self):
         interactions = InteractionCoordinator()

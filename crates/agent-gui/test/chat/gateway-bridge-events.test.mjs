@@ -333,7 +333,7 @@ test("trusted channel deadline covers persistence, bridge delivery, Skills, Memo
   assert.match(sendTurnSource, /runWithinChannelDeadline\(refreshSkills\(\)\)/);
   assert.match(
     sendTurnSource,
-    /runWithinChannelDeadline\(\s*buildMemoryOverviewSection\(effectiveWorkdir\)/,
+    /runWithinChannelDeadline\(\s*buildMemoryOverviewSection\(effectiveWorkdir, memoryContext\)/,
   );
   assert.match(sendTurnSource, /cancellation\.userStop\.abort\(error\)/);
   assert.match(sendTurnSource, /channelDeadline\?\.clear\(\)/);

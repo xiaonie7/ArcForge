@@ -148,7 +148,7 @@ import { useWorkspaceProjectRemoval } from "./chat/workspace/useWorkspaceProject
 import { useWorkspaceProjects } from "./chat/workspace/useWorkspaceProjects";
 import { McpHubPage } from "./mcp-hub/McpHubPage";
 import { ScheduledPage } from "./scheduled/ScheduledPage";
-import type { SectionId } from "./settings/types";
+import type { SectionId, SettingsRuntimeSources } from "./settings/types";
 import { SkillsHubPage } from "./skills-hub/SkillsHubPage";
 
 type ChatPageProps = {
@@ -159,6 +159,7 @@ type ChatPageProps = {
   context: Context;
   setContext: (next: Context) => void;
   onOpenSettings: (section?: SectionId) => void;
+  onSettingsRuntimeSources?: (sources: SettingsRuntimeSources | null) => void;
   onToggleTheme: () => void;
   openConversationRequest?: { id: string; sequence: number } | null;
 };
@@ -777,6 +778,15 @@ export function ChatPage(props: ChatPageProps) {
     setRightDockFilePreviewRequest(null);
     setArtifactSelection(null);
   }, []);
+  // The settings runtime strip observes existing stores; it does not start runs or poll transcripts.
+  useEffect(() => {
+    props.onSettingsRuntimeSources?.({
+      sidebar: sidebarStore,
+      transcript: getConversationLiveTranscriptStore,
+    });
+    return () => props.onSettingsRuntimeSources?.(null);
+  }, [props.onSettingsRuntimeSources, sidebarStore, getConversationLiveTranscriptStore]);
+
   // Local runner running-state → sidebar store: diff transitions so sidebar
   // dots (and running workdir keys) include local runs immediately; remote
   // runs arrive through the store's own event subscription.
