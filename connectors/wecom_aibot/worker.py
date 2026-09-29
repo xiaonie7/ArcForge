@@ -1333,9 +1333,9 @@ async def _handle_message(
         else:
 
             async def input_request_handler(request: object) -> None:
-                # The card and the keepalive share one stream. Pause before
-                # taking the send lock so a refresh can never overwrite a
-                # question after it has been presented.
+                # The card is independent, but its numbered prompt shares the
+                # reply stream with progress. Pause before taking the send
+                # lock so a refresh cannot overwrite the question prompt.
                 refresh_allowed.clear()
                 presented = False
                 try:

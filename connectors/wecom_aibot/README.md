@@ -130,8 +130,15 @@ gateway-generated aliases; it never exposes arbitrary desktop tool calls or
 workspace details.
 
 When card delivery is available, WeCom receives an official
-`button_interaction` card with one question at a time. A click is identified by
-the opaque `task_id` and `event_key`; the connector updates the card immediately
+`button_interaction` card with one question at a time. Each input request sends
+an independent `template_card` through the SDK's `send_message`: direct chats
+target the user's `userid`, and group chats target the `chatid`. The original
+reply remains a plain stream for question details, progress, and the final
+answer. This avoids upgrading an existing stream to a combined card message
+or trying to attach multiple cards to one message (the SDK permits only one).
+A click is identified by the opaque `task_id` and a question-specific
+`event_key`; delayed clicks on an earlier question cannot answer the next one.
+The connector updates the card immediately
 and advances to the next question. After the final click, the connector sends
 the selections back to the same desktop run. If the card callback is unavailable
 or rejected, users can reply with option numbers (`1` for one question or
@@ -139,7 +146,11 @@ or rejected, users can reply with option numbers (`1` for one question or
 already-resolved replies are handled without starting a second desktop turn.
 
 Card prompts direct users to click a button, which sends an interaction callback
-without a separate user text message. Manually sent option numbers remain in
+without a separate user text message. They also retain numbered reply
+instructions in case the client does not display the buttons; a successful
+delivery acknowledgement alone cannot confirm client rendering. Failed card
+updates show the complete numbered fallback, and a failed final submission
+restores the last question for another click. Manually sent option numbers remain in
 WeCom chat history; the connector cannot hide them. Successful submissions are
 consumed silently, including duplicate callbacks, and the original reply stream
 continues with progress and the final result. Submission failures and timeout

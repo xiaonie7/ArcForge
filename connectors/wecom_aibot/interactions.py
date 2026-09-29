@@ -21,7 +21,7 @@ _MAX_OPTIONS = 6
 _RESOLVED_RETENTION_SECONDS = 10 * 60
 _TOKEN_SPLIT = re.compile(r"[\s,，;；]+")
 _KEYED_CHOICE = re.compile(r"^(\d+)(?:[:：=\-]?)([A-Fa-f]|\d+)$")
-_CARD_EVENT_KEY = re.compile(r"^o[1-6]$")
+_CARD_EVENT_KEY = re.compile(r"^(q[1-4])_(o[1-6])$")
 
 
 def _value(value: object, *names: str, default: object = None) -> object:
@@ -161,10 +161,12 @@ def render_numbered_questions(
     lines.append("")
     if card_available:
         lines.append("请直接点击卡片中的选项按钮。")
-    elif len(questions) == 1:
-        lines.append("请直接回复选项序号，例如 `1`。")
+    prefix = "若未显示按钮，也可" if card_available else "请"
+    if len(questions) == 1:
+        lines.append(f"{prefix}直接回复选项序号，例如 `1`。")
     else:
-        lines.append("请按题目顺序回复选项序号，例如 `1,2`。")
+        example = ",".join("1" for _ in questions)
+        lines.append(f"{prefix}按题目顺序回复选项序号，例如 `{example}`。")
     return "\n".join(lines)
 
 
@@ -189,8 +191,7 @@ def _build_card(
         question_key = f"q{question_index}"
         question_by_card_key[question_key] = question
         for option_index, option in enumerate(question.options, start=1):
-            # WeCom button callbacks expose only event_key. Keep the key
-            # opaque and bounded; the active question is tracked server-side.
+            # Keep identifiers bounded and independent of desktop tool IDs.
             option_key = f"o{option_index}"
             option_by_card_key[(question_key, option_key)] = option
     card = _question_card(task_id, questions, question_index=0)
@@ -221,7 +222,7 @@ def _question_card(
         buttons.append(
             {
                 "text": _short(option.label, 10),
-                "key": option_key,
+                "key": f"{question_key}_{option_key}",
                 "style": style,
             }
         )
@@ -233,8 +234,13 @@ def _question_card(
         "task_id": task_id,
     }
     if selected_option_key:
+        selected_text = next(
+            (button["text"] for button in buttons
+             if button["key"] == f"{question_key}_{selected_option_key}"),
+            "",
+        )
         card["sub_title_text"] = _short(
-            f"已选择：{next((button['text'] for button in buttons if button['key'] == selected_option_key), '')}\n{question.prompt}",
+            f"已选择：{selected_text}\n{question.prompt}",
             112,
         )
     return card
@@ -406,12 +412,13 @@ def _event_choice(
 ) -> tuple[str, str] | None:
     event = _event_payload(frame)
     event_key = _text(event, "event_key", "eventKey")
-    if not _CARD_EVENT_KEY.fullmatch(event_key):
+    match = _CARD_EVENT_KEY.fullmatch(event_key)
+    if not match:
         return None
-    question_key = f"q{pending.current_question_index + 1}"
-    if (question_key, event_key) not in pending.option_by_card_key:
+    question_key, option_key = match.groups()
+    if (question_key, option_key) not in pending.option_by_card_key:
         return None
-    return question_key, event_key
+    return question_key, option_key
 
 
 def _event_id(frame: dict[str, Any]) -> str:
@@ -483,26 +490,32 @@ class InteractionCoordinator:
             self._by_interaction[interaction_id] = pending
             self._by_task[task_id] = pending
 
-        card_method = getattr(wecom, "reply_stream_with_card", None)
+        # The reply already started as a plain stream. Send each interaction
+        # as its own native card instead of changing that message's type or
+        # attaching several cards to it (WeCom permits only one per message).
+        card_method = getattr(wecom, "send_message", None)
         if callable(card_method):
             try:
+                target_id = (
+                    session_key.chat_id
+                    if session_key.chat_type == "group"
+                    else session_key.external_user_id
+                )
                 acknowledgement = await card_method(
-                    frame,
-                    stream_id,
-                    render_numbered_questions(questions, card_available=True),
-                    False,
-                    template_card=card,
+                    target_id,
+                    {"msgtype": "template_card", "template_card": card},
                 )
                 if _ack_rejected(acknowledgement):
                     raise RuntimeError("WeCom rejected the template card")
                 pending.card_sent = True
-                return True
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.warning("WeCom input card failed; using Markdown fallback")
         try:
-            markdown = render_numbered_questions(questions)
+            markdown = render_numbered_questions(
+                questions, card_available=pending.card_sent
+            )
             acknowledgement = await wecom.reply_stream(frame, stream_id, markdown, False)
             if _ack_rejected(acknowledgement):
                 raise RuntimeError("WeCom rejected the Markdown input prompt")
@@ -511,7 +524,8 @@ class InteractionCoordinator:
             raise
         except Exception:
             logger.warning("WeCom input prompt delivery failed")
-            return False
+            # A failed stream update does not invalidate an independent card.
+            return pending.card_sent
 
     async def _claim(
         self,
@@ -602,9 +616,9 @@ class InteractionCoordinator:
         frame: dict[str, Any],
         card: dict[str, Any] | None = None,
         status_text: str = "",
-    ) -> None:
+    ) -> bool:
         if not pending.card_sent:
-            return
+            return False
         if card is None:
             card = _resolved_card(pending.task_id, status_text or "该选择已处理")
         method = getattr(wecom, "update_template_card", None)
@@ -614,7 +628,7 @@ class InteractionCoordinator:
             else:
                 reply = getattr(wecom, "reply", None)
                 if not callable(reply):
-                    return
+                    return False
                 acknowledgement = await reply(
                     frame,
                     {"response_type": "update_template_card", "template_card": card},
@@ -622,10 +636,22 @@ class InteractionCoordinator:
                 )
             if _ack_rejected(acknowledgement):
                 raise RuntimeError("WeCom rejected the template card update")
+            return True
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("WeCom input card update failed")
+            return False
+
+    async def _show_card_fallback(self, pending: PendingInteraction, wecom: Any) -> None:
+        with contextlib.suppress(Exception):
+            await wecom.reply_stream(
+                pending.frame,
+                pending.stream_id,
+                "卡片更新或提交失败，请按编号直接回复。\n\n"
+                + render_numbered_questions(pending.questions),
+                False,
+            )
 
     async def _claim_card_choice(
         self,
@@ -666,7 +692,11 @@ class InteractionCoordinator:
 
     async def _rollback_card_choice(self, pending: PendingInteraction) -> None:
         async with self._lock:
-            if pending.state != "answering" or not pending.selections:
+            # _finish_answer restores pending before returning a failure.
+            # Only undo a completed set, never an externally resolved input.
+            if pending.state not in {"answering", "pending"} or (
+                len(pending.selections) != len(pending.questions)
+            ):
                 return
             pending.selections.pop()
             pending.current_question_index = len(pending.selections)
@@ -718,7 +748,11 @@ class InteractionCoordinator:
             pending, question_key, option_key
         )
         if claim == "advanced" and next_card is not None:
-            await self._update_card(pending, wecom=wecom, frame=frame, card=next_card)
+            updated = await self._update_card(
+                pending, wecom=wecom, frame=frame, card=next_card
+            )
+            if not updated:
+                await self._show_card_fallback(pending, wecom)
             return True
         if claim == "stale":
             await self._update_card(
@@ -756,13 +790,7 @@ class InteractionCoordinator:
         if outcome == "failed":
             await self._rollback_card_choice(pending)
             await self._update_card(pending, wecom=wecom, frame=frame, card=pending.card)
-            with contextlib.suppress(Exception):
-                await wecom.reply_stream(
-                    pending.frame,
-                    pending.stream_id,
-                    "卡片提交失败，请按编号直接回复。",
-                    False,
-                )
+            await self._show_card_fallback(pending, wecom)
         return True
 
     async def handle_resolved(self, resolved: object, *, wecom: Any) -> bool:

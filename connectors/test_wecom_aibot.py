@@ -2631,11 +2631,147 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
     def _wecom(**overrides):
         values = {
             "reply_stream": AsyncMock(return_value={"errcode": 0}),
-            "reply_stream_with_card": AsyncMock(return_value={"errcode": 0}),
+            "send_message": AsyncMock(return_value={"errcode": 0}),
             "update_template_card": AsyncMock(return_value={"errcode": 0}),
         }
         values.update(overrides)
         return SimpleNamespace(**values)
+
+    @staticmethod
+    def _card_event(task_id, event_key, *, event_id="card-event-1"):
+        return {
+            "headers": {"req_id": event_id},
+            "body": {
+                "from": {"userid": "alice"},
+                "chattype": "single",
+                "event": {"task_id": task_id, "event_key": event_key},
+            },
+        }
+
+    def _two_question_request(self):
+        request = self._request()
+        request["questions"].append(
+            {
+                "id": "period",
+                "header": "周期",
+                "prompt": "选择统计周期？",
+                "options": [
+                    {"id": "month", "label": "月度"},
+                    {"id": "quarter", "label": "季度"},
+                ],
+            }
+        )
+        return request
+
+    async def test_standalone_card_routes_to_user_or_group_and_keeps_numeric_fallback(self):
+        for chat_type, chat_id, expected_target in (
+            ("single", "single-conversation", "alice"),
+            ("group", "group-123", "group-123"),
+        ):
+            with self.subTest(chat_type=chat_type):
+                interactions = InteractionCoordinator()
+                wecom = self._wecom()
+                frame = self._frame("message-1", "start")
+                frame["body"].update(chattype=chat_type, chatid=chat_id)
+                session_key = SessionStore.key(
+                    chat_type=chat_type, chat_id=chat_id, external_user_id="alice"
+                )
+                self.assertTrue(await interactions.present(
+                    self._two_question_request(),
+                    session_key=session_key,
+                    wecom=wecom,
+                    frame=frame,
+                    stream_id="stream-1",
+                ))
+                wecom.send_message.assert_awaited_once()
+                target, body = wecom.send_message.await_args.args
+                self.assertEqual(target, expected_target)
+                self.assertEqual(body["msgtype"], "template_card")
+                self.assertEqual(body["template_card"]["card_type"], "button_interaction")
+                wecom.reply_stream.assert_awaited_once()
+                self.assertEqual(wecom.reply_stream.await_args.args[:2], (frame, "stream-1"))
+                prompt = wecom.reply_stream.await_args.args[2]
+                self.assertIn("卡片", prompt)
+                self.assertIn("回复选项序号", prompt)
+                self.assertIn("1,1", prompt)
+                self.assertFalse(wecom.reply_stream.await_args.args[3])
+
+    async def test_two_inputs_in_same_turn_send_distinct_cards_without_ending_stream(self):
+        interactions = InteractionCoordinator()
+        wecom = self._wecom()
+
+        async def submit(_inbound, *, input_request_handler, input_resolved_handler):
+            for interaction_id in ("input-1", "input-2"):
+                await input_request_handler(self._request(interaction_id=interaction_id))
+                await input_resolved_handler({
+                    "interaction_id": interaction_id, "status": "answered"
+                })
+            return SimpleNamespace(status="completed", text="done", message="")
+
+        await _handle_text(
+            wecom,
+            SimpleNamespace(submit=AsyncMock(side_effect=submit)),
+            DedupeStore(),
+            SessionStore(id_factory=lambda: "session-1"),
+            _config(),
+            self._frame("message-1", "start"),
+            interactions=interactions,
+        )
+        self.assertEqual(wecom.send_message.await_count, 2)
+        cards = [call.args[1]["template_card"] for call in wecom.send_message.await_args_list]
+        self.assertNotEqual(cards[0]["task_id"], cards[1]["task_id"])
+        stream_calls = wecom.reply_stream.await_args_list
+        self.assertEqual(len({call.args[1] for call in stream_calls}), 1)
+        self.assertTrue(all(call.args[3] is False for call in stream_calls[:-1]))
+        self.assertEqual(stream_calls[-1].args[2:], ("done", True))
+
+    async def test_rejected_or_unavailable_card_still_accepts_numbered_text(self):
+        for card_method in (
+            AsyncMock(return_value={"body": {"errcode": 40001}}),
+            None,
+        ):
+            with self.subTest(card_available=card_method is not None):
+                interactions = InteractionCoordinator()
+                wecom = self._wecom(send_message=card_method)
+                session_key = SessionStore.key(
+                    chat_type="single", chat_id="", external_user_id="alice"
+                )
+                with patch("connectors.wecom_aibot.interactions.logger.warning"):
+                    self.assertTrue(await interactions.present(
+                        self._request(), session_key=session_key, wecom=wecom,
+                        frame=self._frame("message-1", "start"), stream_id="stream-1",
+                    ))
+                prompt = wecom.reply_stream.await_args.args[2]
+                self.assertIn("回复选项序号", prompt)
+                self.assertNotIn("点击", prompt)
+                channel = SimpleNamespace(answer_input=AsyncMock(return_value={"accepted": True}))
+                self.assertEqual(await interactions.handle_text(
+                    session_key=session_key, text="2", channel=channel,
+                ), "")
+                channel.answer_input.assert_awaited_once_with(
+                    "input-1", [{"question_id": "dimension", "option_id": "organization"}]
+                )
+
+    async def test_card_remains_usable_when_stream_prompt_fails(self):
+        interactions = InteractionCoordinator()
+        wecom = self._wecom(reply_stream=AsyncMock(side_effect=RuntimeError("expired stream")))
+        session_key = SessionStore.key(
+            chat_type="single", chat_id="", external_user_id="alice"
+        )
+        with patch("connectors.wecom_aibot.interactions.logger.warning"):
+            self.assertTrue(await interactions.present(
+                self._request(), session_key=session_key, wecom=wecom,
+                frame=self._frame("message-1", "start"), stream_id="stream-1",
+            ))
+        card = wecom.send_message.await_args.args[1]["template_card"]
+        channel = SimpleNamespace(answer_input=AsyncMock(return_value={"accepted": True}))
+        self.assertTrue(await interactions.handle_card_event(
+            frame=self._card_event(card["task_id"], "q1_o1"),
+            session_key=session_key, wecom=wecom, channel=channel,
+        ))
+        channel.answer_input.assert_awaited_once_with(
+            "input-1", [{"question_id": "dimension", "option_id": "business"}]
+        )
 
     async def test_text_answer_bypasses_active_session_lock_and_resumes_same_turn(self):
         interactions = InteractionCoordinator()
@@ -2712,10 +2848,14 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(channel.submit.await_count, 1)
         channel.answer_input.assert_awaited_once()
-        wecom.reply_stream_with_card.assert_awaited_once()
-        card_prompt = wecom.reply_stream_with_card.await_args.args[2]
-        self.assertIn("请直接点击卡片", card_prompt)
-        self.assertNotIn("回复选项序号", card_prompt)
+        wecom.send_message.assert_awaited_once()
+        self.assertEqual(wecom.send_message.await_args.args[0], "alice")
+        self.assertEqual(
+            wecom.send_message.await_args.args[1]["msgtype"], "template_card"
+        )
+        card_prompt = wecom.reply_stream.await_args_list[1].args[2]
+        self.assertIn("卡片", card_prompt)
+        self.assertIn("回复选项序号", card_prompt)
         self.assertFalse(
             any(
                 call.args[0]["body"]["msgid"] == "message-2"
@@ -2758,6 +2898,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
                 frame=self._frame("message-1", "start"),
                 stream_id="stream-1",
             )
+            wecom.reply_stream.reset_mock()
             channel = SimpleNamespace(
                 submit=AsyncMock(),
                 answer_input=AsyncMock(return_value={"accepted": True}),
@@ -2840,7 +2981,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
                 interactions=interactions,
             )
 
-        wecom.reply_stream_with_card.assert_awaited_once()
+        wecom.send_message.assert_awaited_once()
         self.assertEqual(await interactions.pending_count(), 0)
 
     async def test_final_reply_waits_for_delayed_input_resolution_update(self):
@@ -2886,7 +3027,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
     ):
         interactions = InteractionCoordinator()
         wecom = self._wecom(
-            reply_stream_with_card=AsyncMock(
+            send_message=AsyncMock(
                 side_effect=RuntimeError("remote response containing sensitive text")
             )
         )
@@ -2904,7 +3045,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(presented)
-        wecom.reply_stream_with_card.assert_awaited_once()
+        wecom.send_message.assert_awaited_once()
         markdown = wecom.reply_stream.await_args.args[2]
         self.assertIn("您要分析哪种事业群口径", markdown)
         self.assertIn("1. 业务板块事业群", markdown)
@@ -2926,7 +3067,8 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
             frame=self._frame("message-1", "start"),
             stream_id="stream-1",
         )
-        card = wecom.reply_stream_with_card.await_args.kwargs["template_card"]
+        card = wecom.send_message.await_args.args[1]["template_card"]
+        wecom.reply_stream.reset_mock()
         event_frame = {
             "headers": {"req_id": "card-event-1"},
             "body": {
@@ -2935,7 +3077,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
                 "event": {
                     "eventtype": "template_card_event",
                     "task_id": card["task_id"],
-                    "event_key": "o2",
+                    "event_key": "q1_o2",
                 },
             },
         }
@@ -3041,10 +3183,10 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
             frame=self._frame("message-1", "start"),
             stream_id="stream-1",
         )
-        first_card = wecom.reply_stream_with_card.await_args.kwargs["template_card"]
+        first_card = wecom.send_message.await_args.args[1]["template_card"]
         self.assertEqual(first_card["card_type"], "button_interaction")
         self.assertEqual(
-            [button["key"] for button in first_card["button_list"]], ["o1", "o2"]
+            [button["key"] for button in first_card["button_list"]], ["q1_o1", "q1_o2"]
         )
 
         channel = SimpleNamespace(
@@ -3061,7 +3203,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
             "body": {
                 "from": {"userid": "alice"},
                 "chattype": "single",
-                "event": {"task_id": first_card["task_id"], "event_key": "o2"},
+                "event": {"task_id": first_card["task_id"], "event_key": "q1_o2"},
             },
         }
         self.assertTrue(
@@ -3075,7 +3217,22 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
         second_card = wecom.update_template_card.await_args_list[0].args[1]
         self.assertEqual(second_card["card_type"], "button_interaction")
         self.assertEqual(
-            [button["key"] for button in second_card["button_list"]], ["o1", "o2"]
+            [button["key"] for button in second_card["button_list"]], ["q2_o1", "q2_o2"]
+        )
+        # A delayed click from the previous card can have a fresh callback ID.
+        # Its question-qualified key must never answer the next question.
+        await interactions.handle_card_event(
+            frame=self._card_event(
+                first_card["task_id"], "q1_o1", event_id="late-first-question"
+            ),
+            session_key=session_key,
+            wecom=wecom,
+            channel=channel,
+        )
+        channel.answer_input.assert_not_awaited()
+        self.assertEqual(
+            wecom.update_template_card.await_args.args[1]["button_list"],
+            second_card["button_list"],
         )
 
         second_event = {
@@ -3083,7 +3240,7 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
             "body": {
                 "from": {"userid": "alice"},
                 "chattype": "single",
-                "event": {"task_id": first_card["task_id"], "event_key": "o1"},
+                "event": {"task_id": first_card["task_id"], "event_key": "q2_o1"},
             },
         }
         await interactions.handle_card_event(
@@ -3099,6 +3256,97 @@ class WorkerInteractionTests(unittest.IsolatedAsyncioTestCase):
                 {"question_id": "period", "option_id": "month"},
             ],
         )
+
+    async def test_failed_last_choice_can_be_retried_without_duplicate_selections(self):
+        for first_result in (
+            {"accepted": False, "status": "failed"},
+            RuntimeError("desktop disconnected"),
+        ):
+            with self.subTest(first_result=type(first_result).__name__):
+                interactions = InteractionCoordinator()
+                wecom = self._wecom()
+                session_key = SessionStore.key(
+                    chat_type="single", chat_id="", external_user_id="alice"
+                )
+                await interactions.present(
+                    self._two_question_request(), session_key=session_key, wecom=wecom,
+                    frame=self._frame("message-1", "start"), stream_id="stream-1",
+                )
+                task_id = wecom.send_message.await_args.args[1]["template_card"]["task_id"]
+                channel = SimpleNamespace(answer_input=AsyncMock(side_effect=[
+                    first_result, {"accepted": True},
+                ]))
+                with patch("connectors.wecom_aibot.interactions.logger.warning"):
+                    for event_key, event_id in (
+                        ("q1_o2", "first-question"),
+                        ("q2_o1", "failed-last-question"),
+                    ):
+                        await interactions.handle_card_event(
+                            frame=self._card_event(task_id, event_key, event_id=event_id),
+                            session_key=session_key, wecom=wecom, channel=channel,
+                        )
+                self.assertEqual(await interactions.pending_count(), 1)
+                retry_card = wecom.update_template_card.await_args.args[1]
+                self.assertEqual(
+                    [button["key"] for button in retry_card["button_list"]],
+                    ["q2_o1", "q2_o2"],
+                )
+                self.assertIn("回复", wecom.reply_stream.await_args.args[2])
+                await interactions.handle_card_event(
+                    frame=self._card_event(task_id, "q2_o2", event_id="retried-last-question"),
+                    session_key=session_key, wecom=wecom, channel=channel,
+                )
+                self.assertEqual(channel.answer_input.await_count, 2)
+                self.assertEqual(channel.answer_input.await_args_list[0].args[1], [
+                    {"question_id": "dimension", "option_id": "organization"},
+                    {"question_id": "period", "option_id": "month"},
+                ])
+                channel.answer_input.assert_awaited_with("input-1", [
+                    {"question_id": "dimension", "option_id": "organization"},
+                    {"question_id": "period", "option_id": "quarter"},
+                ])
+                self.assertEqual(await interactions.pending_count(), 0)
+
+    async def test_failed_next_card_update_shows_full_fallback_and_ignores_old_choice(self):
+        interactions = InteractionCoordinator()
+        wecom = self._wecom(update_template_card=AsyncMock(side_effect=[
+            {"errcode": 40001}, {"errcode": 0},
+        ]))
+        session_key = SessionStore.key(
+            chat_type="single", chat_id="", external_user_id="alice"
+        )
+        await interactions.present(
+            self._two_question_request(), session_key=session_key, wecom=wecom,
+            frame=self._frame("message-1", "start"), stream_id="stream-1",
+        )
+        task_id = wecom.send_message.await_args.args[1]["template_card"]["task_id"]
+        channel = SimpleNamespace(answer_input=AsyncMock(return_value={"accepted": True}))
+        with patch("connectors.wecom_aibot.interactions.logger.warning"):
+            await interactions.handle_card_event(
+                frame=self._card_event(task_id, "q1_o2"),
+                session_key=session_key, wecom=wecom, channel=channel,
+            )
+        fallback = wecom.reply_stream.await_args.args[2]
+        self.assertIn("您要分析哪种事业群口径", fallback)
+        self.assertIn("选择统计周期", fallback)
+        self.assertIn("1,1", fallback)
+        self.assertIn("回复", fallback)
+        await interactions.handle_card_event(
+            frame=self._card_event(task_id, "q1_o1", event_id="old-visible-card"),
+            session_key=session_key, wecom=wecom, channel=channel,
+        )
+        channel.answer_input.assert_not_awaited()
+        self.assertEqual(
+            [button["key"] for button in wecom.update_template_card.await_args.args[1]["button_list"]],
+            ["q2_o1", "q2_o2"],
+        )
+        self.assertEqual(await interactions.handle_text(
+            session_key=session_key, text="2,1", channel=channel,
+        ), "")
+        channel.answer_input.assert_awaited_once_with("input-1", [
+            {"question_id": "dimension", "option_id": "organization"},
+            {"question_id": "period", "option_id": "month"},
+        ])
 
     async def test_expired_and_desktop_resolved_inputs_stop_intercepting_text(self):
         interactions = InteractionCoordinator()
